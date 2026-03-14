@@ -30,6 +30,21 @@ def create_worktree(repo: Repo, branch: str) -> str:
     return worktree_path
 
 
+def list_worktrees(repo: Repo) -> None:
+    repo_name = os.path.basename(repo.working_dir)
+    worktrees_dir = os.path.expanduser(f"~/.claudulhu/worktrees/{repo_name}")
+    if not os.path.isdir(worktrees_dir):
+        print("No worktrees found.")
+        return
+    worktrees = sorted(os.listdir(worktrees_dir))
+    if not worktrees:
+        print("No worktrees found.")
+        return
+    for name in worktrees:
+        path = os.path.join(worktrees_dir, name)
+        print(f"{name}  ({path})")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="claudulhu")
     subparsers = parser.add_subparsers(dest="command")
@@ -37,8 +52,17 @@ def main():
     task_parser = subparsers.add_parser("task", help="Run a task in a new worktree")
     task_parser.add_argument("description", help="Task description")
 
+    subparsers.add_parser("list", help="List worktrees for the current repo")
+
     args = parser.parse_args()
-    if args.command == "task":
+    if args.command == "list":
+        try:
+            repo = Repo(os.getcwd(), search_parent_directories=True)
+        except InvalidGitRepositoryError:
+            print("No git repository found in current directory.", file=sys.stderr)
+            sys.exit(1)
+        list_worktrees(repo)
+    elif args.command == "task":
         try:
             repo = Repo(os.getcwd(), search_parent_directories=True)
         except InvalidGitRepositoryError:
@@ -46,8 +70,17 @@ def main():
             sys.exit(1)
 
         print("Generating branch name...")
-        branch = generate_branch_name(args.description)
-        print(f"Branch:   {branch}")
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            branch = generate_branch_name(args.description)
+            print(f"Branch:   {branch}")
+            existing = [h.name for h in repo.heads]
+            if branch not in existing:
+                break
+            print(f"  Branch already exists, retrying... ({attempt}/{max_attempts})")
+        else:
+            print("Error: could not generate a unique branch name after 5 attempts.", file=sys.stderr)
+            sys.exit(1)
 
         print("Creating worktree...")
         worktree_path = create_worktree(repo, branch)
