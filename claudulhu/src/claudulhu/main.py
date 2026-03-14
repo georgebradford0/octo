@@ -5,11 +5,13 @@ import sys
 from git import Repo, InvalidGitRepositoryError
 
 
-def generate_branch_name(task: str) -> str:
+def generate_branch_name(task: str, taken: list[str] | None = None) -> str:
     prompt = (
         f"Generate a short, lowercase, hyphenated git branch name (2-5 words, no punctuation) "
         f"for this task: {task}. Reply with only the branch name, nothing else."
     )
+    if taken:
+        prompt += f" Do not use any of these names as they are already taken: {', '.join(taken)}."
     result = subprocess.run(
         ["claude", "-p", prompt],
         capture_output=True,
@@ -71,13 +73,15 @@ def main():
 
         print("Generating branch name...")
         max_attempts = 5
+        taken = []
         for attempt in range(1, max_attempts + 1):
-            branch = generate_branch_name(args.description)
+            branch = generate_branch_name(args.description, taken or None)
             print(f"Branch:   {branch}")
             existing = [h.name for h in repo.heads]
             if branch not in existing:
                 break
-            print(f"  Branch already exists, retrying... ({attempt}/{max_attempts})")
+            taken.append(branch)
+            print(f"  '{branch}' is already taken, retrying... ({attempt}/{max_attempts})")
         else:
             print("Error: could not generate a unique branch name after 5 attempts.", file=sys.stderr)
             sys.exit(1)
