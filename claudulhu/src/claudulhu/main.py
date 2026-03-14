@@ -69,7 +69,42 @@ def install_completions() -> None:
                 return
     with open(zshrc, "a") as f:
         f.write(f"\n# claudulhu tab completion\n{line}\n")
-    print(f"Completions installed. Run 'source ~/.zshrc' to activate.")
+    print("Completions installed. Run 'source ~/.zshrc' to activate.")
+
+
+def uninstall_completions() -> None:
+    zshrc = os.path.expanduser("~/.zshrc")
+    if not os.path.isfile(zshrc):
+        print("No ~/.zshrc found.")
+        return
+    with open(zshrc) as f:
+        contents = f.read()
+    updated = contents.replace("\n# claudulhu tab completion\neval \"$(register-python-argcomplete claudulhu)\"\n", "")
+    if updated == contents:
+        print("Completions not found in ~/.zshrc.")
+        return
+    with open(zshrc, "w") as f:
+        f.write(updated)
+    print("Completions removed. Run 'source ~/.zshrc' to deactivate.")
+
+
+def uninstall() -> None:
+    confirm = input("This will remove ~/.claudulhu and shell completions. Continue? [y/N] ")
+    if confirm.strip().lower() != "y":
+        print("Aborted.")
+        return
+
+    import shutil
+    claudulhu_dir = os.path.expanduser("~/.claudulhu")
+    if os.path.isdir(claudulhu_dir):
+        shutil.rmtree(claudulhu_dir)
+        print(f"Removed {claudulhu_dir}")
+    else:
+        print("No ~/.claudulhu directory found.")
+
+    uninstall_completions()
+
+    print("Run 'uv tool uninstall claudulhu' to remove the binary.")
 
 
 def list_worktrees(repo: Repo) -> None:
@@ -99,15 +134,22 @@ def main():
     completions_parser = subparsers.add_parser("completions", help="Manage shell completions")
     completions_subparsers = completions_parser.add_subparsers(dest="completions_command")
     completions_subparsers.add_parser("install", help="Install tab completions into ~/.zshrc")
+    completions_subparsers.add_parser("uninstall", help="Remove tab completions from ~/.zshrc")
+
+    subparsers.add_parser("uninstall", help="Remove all claudulhu data and shell completions")
 
     remove_parser = subparsers.add_parser("remove", help="Remove a worktree and its branch")
     remove_parser.add_argument("name", help="Worktree name (branch) to remove").completer = worktree_completer
 
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
-    if args.command == "completions":
+    if args.command == "uninstall":
+        uninstall()
+    elif args.command == "completions":
         if args.completions_command == "install":
             install_completions()
+        elif args.completions_command == "uninstall":
+            uninstall_completions()
         else:
             completions_parser.print_help()
     elif args.command == "remove":
