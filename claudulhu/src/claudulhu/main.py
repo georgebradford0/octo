@@ -3,20 +3,94 @@ import os
 import re
 import subprocess
 import sys
-import argcomplete
 from git import Repo, InvalidGitRepositoryError
 
+ZSH_COMPLETION_FUNC = r"""#compdef claudulhu
 
-def worktree_completer(prefix, parsed_args, **kwargs):
-    try:
-        repo = Repo(os.getcwd(), search_parent_directories=True)
-        repo_name = os.path.basename(repo.working_dir)
-        worktrees_dir = os.path.expanduser(f"~/.claudulhu/worktrees/{repo_name}")
-        if not os.path.isdir(worktrees_dir):
-            return []
-        return [w for w in os.listdir(worktrees_dir) if w.startswith(prefix)]
-    except Exception:
-        return []
+_claudulhu_worktrees() {
+  local repo_root repo_name worktrees_dir
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return
+  repo_name="${repo_root:t}"
+  worktrees_dir="${HOME}/.claudulhu/worktrees/${repo_name}"
+  [[ -d "$worktrees_dir" ]] || return
+  local -a worktrees
+  worktrees=("${worktrees_dir}"/*(N:t))
+  compadd -a worktrees
+}
+
+_claudulhu_task_desc() {
+  local cur="${words[CURRENT]}"
+  [[ "$cur" != *@* ]] && return
+  local before_at="${cur%@*}"
+  local path_part="${cur##*@}"
+  local dir_part file_part search_dir
+  if [[ "$path_part" == */* ]]; then
+    dir_part="${path_part%/*}"
+    file_part="${path_part##*/}"
+    search_dir="${dir_part}"
+  else
+    dir_part=""
+    file_part="$path_part"
+    search_dir="."
+  fi
+  [[ -d "$search_dir" ]] || return
+  local -a completions
+  local f rel
+  for f in ${search_dir}/${file_part}*(N); do
+    local base="${f##*/}"
+    [[ -n "$dir_part" ]] && rel="${dir_part}/${base}" || rel="${base}"
+    if [[ -d "$f" ]]; then
+      completions+=("${before_at}@${rel}/")
+    else
+      completions+=("${before_at}@${rel}")
+    fi
+  done
+  (( ${#completions} )) || return
+  compadd -Q -S '' -a completions
+}
+
+_claudulhu() {
+  local context state state_descr line
+  typeset -A opt_args
+
+  _arguments -C \
+    '1: :->command' \
+    '*: :->args'
+
+  case $state in
+    command)
+      _values 'command' \
+        'task[Run a task in a new worktree]' \
+        'list[List worktrees for the current repo]' \
+        'completions[Manage shell completions]' \
+        'uninstall[Remove all claudulhu data and shell completions]' \
+        'merge[Merge a worktree branch into the current branch]' \
+        'remove[Remove a worktree and its branch]'
+      ;;
+    args)
+      case $line[1] in
+        task)
+          _claudulhu_task_desc
+          ;;
+        merge|remove)
+          _claudulhu_worktrees
+          ;;
+        completions)
+          _values 'subcommand' \
+            'install[Install tab completions into ~/.zshrc]' \
+            'uninstall[Remove tab completions from ~/.zshrc]'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_claudulhu "$@"
+"""
+
+ZSH_FUNCTIONS_DIR = os.path.expanduser("~/.zsh_functions")
+ZSH_COMPLETION_FILE = os.path.join(ZSH_FUNCTIONS_DIR, "_claudulhu")
+ZSHRC_BLOCK = "\n# claudulhu tab completion\nautoload -Uz compinit && compinit\n"
 
 
 def generate_branch_name(task: str, taken: list[str] | None = None) -> str:
@@ -61,31 +135,34 @@ def remove_worktree(repo: Repo, name: str) -> None:
 
 
 def install_completions() -> None:
-    completion_block = (
-        "\n# claudulhu tab completion\n"
-        "autoload -U bashcompinit\n"
-        "bashcompinit\n"
-        f'eval "$({os.path.join(os.path.dirname(sys.executable), "register-python-argcomplete").replace(os.path.expanduser("~"), "~")} claudulhu)"\n'
-    )
     zshrc = os.path.expanduser("~/.zshrc")
     if os.path.isfile(zshrc):
         with open(zshrc) as f:
-            if "-m argcomplete claudulhu" in f.read():
+            if "# claudulhu tab completion" in f.read():
                 print("Completions already installed.")
                 return
+    os.makedirs(ZSH_FUNCTIONS_DIR, exist_ok=True)
+    with open(ZSH_COMPLETION_FILE, "w") as f:
+        f.write(ZSH_COMPLETION_FUNC)
     with open(zshrc, "a") as f:
-        f.write(completion_block)
+        f.write(ZSHRC_BLOCK)
     print("Completions installed. Run 'source ~/.zshrc' to activate.")
 
 
 def uninstall_completions() -> None:
+    if os.path.isfile(ZSH_COMPLETION_FILE):
+        os.remove(ZSH_COMPLETION_FILE)
     zshrc = os.path.expanduser("~/.zshrc")
     if not os.path.isfile(zshrc):
         print("No ~/.zshrc found.")
         return
     with open(zshrc) as f:
         contents = f.read()
-    updated = re.sub(r"\n# claudulhu tab completion\nautoload -U bashcompinit\nbashcompinit\neval \"\$\(.*?claudulhu.*?\)\"\n", "", contents)
+    updated = re.sub(
+        r"\n# claudulhu tab completion\n(?:[^\n]*\n)*?(?:autoload -Uz compinit && compinit|eval \"\$\(.*?claudulhu.*?\)\")\n",
+        "",
+        contents,
+    )
     if updated == contents:
         print("Completions not found in ~/.zshrc.")
         return
@@ -146,7 +223,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
 
     task_parser = subparsers.add_parser("task", help="Run a task in a new worktree")
-    task_parser.add_argument("description", help="Task description")
+    task_parser.add_argument("description", help="Task description (use double quotes)")
 
     subparsers.add_parser("list", help="List worktrees for the current repo")
 
@@ -158,12 +235,11 @@ def main():
     subparsers.add_parser("uninstall", help="Remove all claudulhu data and shell completions")
 
     merge_parser = subparsers.add_parser("merge", help="Merge a worktree branch into the current branch")
-    merge_parser.add_argument("name", help="Worktree name (branch) to merge").completer = worktree_completer
+    merge_parser.add_argument("name", help="Worktree name (branch) to merge")
 
     remove_parser = subparsers.add_parser("remove", help="Remove a worktree and its branch")
-    remove_parser.add_argument("name", help="Worktree name (branch) to remove").completer = worktree_completer
+    remove_parser.add_argument("name", help="Worktree name (branch) to remove")
 
-    argcomplete.autocomplete(parser)
     args = parser.parse_args()
     if args.command == "uninstall":
         uninstall()
@@ -224,6 +300,8 @@ def main():
         print(f"Starting Claude Code session...")
         os.chdir(worktree_path)
         os.execvp("claude", ["claude", "--dangerously-skip-permissions", args.description])
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
