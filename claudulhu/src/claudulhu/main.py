@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import subprocess
 import sys
 import argcomplete
@@ -84,9 +85,7 @@ def uninstall_completions() -> None:
         return
     with open(zshrc) as f:
         contents = f.read()
-    # Match the block regardless of the python path embedded in the eval line
-    import re
-    updated = re.sub(r"\n# claudulhu tab completion\nautoload -U bashcompinit\nbashcompinit\neval \"\$\(.*? -m argcomplete claudulhu\)\"\n", "", contents)
+    updated = re.sub(r"\n# claudulhu tab completion\nautoload -U bashcompinit\nbashcompinit\neval \"\$\(.*?claudulhu.*?\)\"\n", "", contents)
     if updated == contents:
         print("Completions not found in ~/.zshrc.")
         return
