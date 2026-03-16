@@ -60,15 +60,20 @@ def remove_worktree(repo: Repo, name: str) -> None:
 
 
 def install_completions() -> None:
+    completion_block = (
+        "\n# claudulhu tab completion\n"
+        "autoload -U bashcompinit\n"
+        "bashcompinit\n"
+        f'eval "$({sys.executable.replace(os.path.expanduser("~"), "~")} -m argcomplete claudulhu)"\n'
+    )
     zshrc = os.path.expanduser("~/.zshrc")
-    line = 'eval "$(register-python-argcomplete claudulhu)"'
     if os.path.isfile(zshrc):
         with open(zshrc) as f:
-            if line in f.read():
+            if "-m argcomplete claudulhu" in f.read():
                 print("Completions already installed.")
                 return
     with open(zshrc, "a") as f:
-        f.write(f"\n# claudulhu tab completion\n{line}\n")
+        f.write(completion_block)
     print("Completions installed. Run 'source ~/.zshrc' to activate.")
 
 
@@ -79,7 +84,9 @@ def uninstall_completions() -> None:
         return
     with open(zshrc) as f:
         contents = f.read()
-    updated = contents.replace("\n# claudulhu tab completion\neval \"$(register-python-argcomplete claudulhu)\"\n", "")
+    # Match the block regardless of the python path embedded in the eval line
+    import re
+    updated = re.sub(r"\n# claudulhu tab completion\nautoload -U bashcompinit\nbashcompinit\neval \"\$\(.*? -m argcomplete claudulhu\)\"\n", "", contents)
     if updated == contents:
         print("Completions not found in ~/.zshrc.")
         return
