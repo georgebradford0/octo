@@ -110,7 +110,8 @@ def generate_branch_name(task: str, taken: list[str] | None = None) -> str:
     if result.returncode != 0:
         print(f"Error generating branch name: {result.stderr}", file=sys.stderr)
         sys.exit(1)
-    return result.stdout.strip().lower().replace(" ", "-")
+    name = result.stdout.strip().lower().replace(" ", "-")
+    return re.sub(r"[^a-z0-9-]", "", name)
 
 
 def create_worktree(repo: Repo, branch: str) -> str:
