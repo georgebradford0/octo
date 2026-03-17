@@ -51,7 +51,7 @@ _claudulhu() {
 
   if (( CURRENT == 2 )); then
     local -a commands=(
-      'task:Run a task in a new worktree'
+      'branch:Run a task in a new worktree'
       'list:List worktrees for the current repo'
       'completions:Manage shell completions'
       'uninstall:Remove all claudulhu data and shell completions'
@@ -63,7 +63,7 @@ _claudulhu() {
   fi
 
   case $subcmd in
-    task)
+    branch)
       _claudulhu_task_desc
       ;;
     merge|remove)
@@ -225,7 +225,7 @@ def main():
     parser = argparse.ArgumentParser(prog="claudulhu")
     subparsers = parser.add_subparsers(dest="command")
 
-    task_parser = subparsers.add_parser("task", help="Run a task in a new worktree")
+    task_parser = subparsers.add_parser("branch", help="Run a task in a new worktree")
     task_parser.add_argument("description", help="Task description (use double quotes)")
 
     subparsers.add_parser("list", help="List worktrees for the current repo")
@@ -274,7 +274,7 @@ def main():
             print("No git repository found in current directory.", file=sys.stderr)
             sys.exit(1)
         list_worktrees(repo)
-    elif args.command == "task":
+    elif args.command == "branch":
         try:
             repo = Repo(os.getcwd(), search_parent_directories=True)
         except InvalidGitRepositoryError:
