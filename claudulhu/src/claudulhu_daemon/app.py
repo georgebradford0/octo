@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import JSONResponse
-from git import InvalidGitRepositoryError, Repo
-from pydantic import BaseModel
+from git import Repo
 
 from .chat import handle_chat
 from .monitor import GitMonitor
@@ -35,15 +33,16 @@ class _State:
 state = _State()
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(worktree_path: str) -> str:
     snap = state.monitor.snapshot
     branches = ", ".join(snap.branches) or "none"
-    active = [w.branch for w in state.workers.all() if w.status in ("starting", "running")]
+    active = [w.branch for w in state.workers.all()]
     return (
         f"You are an AI assistant helping engineer the git repository at {state.repo_path}.\n"
+        f"You are working in the worktree at {worktree_path}.\n"
         f"Current branches: {branches}\n"
-        f"Branches with active workers: {', '.join(active) or 'none'}\n\n"
-        "You can inspect code, propose changes, create branches, spawn workers, and more. "
+        f"Branches with active sessions: {', '.join(active) or 'none'}\n\n"
+        "You can inspect code, propose changes, make commits, and more. "
         "Be concise and precise."
     )
 
@@ -72,34 +71,36 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="claudulhu", lifespan=lifespan)
+app = FastAPI(title="claudulhud", lifespan=lifespan)
 
 
 # ------------------------------------------------------------------
-# WebSocket  /chat
+# WebSocket  /workers/{branch}
 # ------------------------------------------------------------------
 
-@app.websocket("/chat")
-async def chat_ws(websocket: WebSocket):
-    session_id = str(uuid.uuid4())
-    await handle_chat(
-        websocket=websocket,
-        session_id=session_id,
-        repo_path=state.repo_path,
-        model=state.model,
-        system_prompt=_build_system_prompt(),
-    )
+@app.websocket("/workers/{branch}")
+async def worker_ws(websocket: WebSocket, branch: str):
+    snap = state.monitor.snapshot
+    if branch not in snap.branches:
+        await websocket.close(code=4004, reason=f"Branch '{branch}' not found")
+        return
 
+    wt_path = snap.branches[branch].worktree_path
+    if not wt_path or not os.path.isdir(wt_path):
+        await websocket.close(code=4004, reason=f"No worktree for branch '{branch}'")
+        return
 
-@app.websocket("/chat/{session_id}")
-async def chat_ws_with_id(websocket: WebSocket, session_id: str):
-    await handle_chat(
-        websocket=websocket,
-        session_id=session_id,
-        repo_path=state.repo_path,
-        model=state.model,
-        system_prompt=_build_system_prompt(),
-    )
+    state.workers.register(branch, wt_path, websocket)
+    try:
+        await handle_chat(
+            websocket=websocket,
+            session_id=branch,
+            repo_path=wt_path,
+            model=state.model,
+            system_prompt=_build_system_prompt(wt_path),
+        )
+    finally:
+        state.workers.deregister(branch)
 
 
 # ------------------------------------------------------------------
@@ -116,45 +117,26 @@ async def list_branches() -> JSONResponse:
 # REST  /workers
 # ------------------------------------------------------------------
 
-class SpawnRequest(BaseModel):
-    task: str
-    worktree_path: str | None = None
-
-
 @app.get("/workers")
 async def list_workers() -> JSONResponse:
     return JSONResponse([w.to_dict() for w in state.workers.all()])
-
-
-@app.post("/workers/{branch}")
-async def spawn_worker(branch: str, body: SpawnRequest) -> JSONResponse:
-    snap = state.monitor.snapshot
-    if branch not in snap.branches:
-        raise HTTPException(404, f"Branch '{branch}' not found")
-
-    wt_path = body.worktree_path or snap.branches[branch].worktree_path
-    if not wt_path or not os.path.isdir(wt_path):
-        raise HTTPException(400, f"No worktree directory for branch '{branch}'")
-
-    info = state.workers.spawn(branch, wt_path, body.task)
-    return JSONResponse(info.to_dict(), status_code=202)
-
-
-@app.delete("/workers/{branch}")
-async def stop_worker(branch: str) -> JSONResponse:
-    w = state.workers.get(branch)
-    if w is None:
-        raise HTTPException(404, f"No worker for branch '{branch}'")
-    await state.workers.stop(branch)
-    return JSONResponse({"stopped": branch})
 
 
 @app.get("/workers/{branch}")
 async def get_worker(branch: str) -> JSONResponse:
     w = state.workers.get(branch)
     if w is None:
-        raise HTTPException(404, f"No worker for branch '{branch}'")
+        raise HTTPException(404, f"No active session for branch '{branch}'")
     return JSONResponse(w.to_dict())
+
+
+@app.delete("/workers/{branch}")
+async def stop_worker(branch: str) -> JSONResponse:
+    w = state.workers.get(branch)
+    if w is None:
+        raise HTTPException(404, f"No active session for branch '{branch}'")
+    await state.workers.disconnect(branch)
+    return JSONResponse({"disconnected": branch})
 
 
 # ------------------------------------------------------------------
@@ -167,6 +149,6 @@ async def health() -> dict[str, Any]:
     return {
         "repo": state.repo_path,
         "branches": len(snap.branches),
-        "workers": len(state.workers.all()),
+        "active_sessions": len(state.workers.all()),
         "model": state.model,
     }
