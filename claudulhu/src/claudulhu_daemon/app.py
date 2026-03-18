@@ -87,6 +87,10 @@ async def worker_ws(websocket: WebSocket, branch: str):
         await websocket.close(code=4004, reason=f"Branch '{branch}' not found")
         return
 
+    if state.workers.get(branch) is not None:
+        await websocket.close(code=4009, reason=f"Branch '{branch}' already has an active session")
+        return
+
     wt_path = snap.branches[branch].worktree_path
     if not wt_path or not os.path.isdir(wt_path):
         await websocket.close(code=4004, reason=f"No worktree for branch '{branch}'")
