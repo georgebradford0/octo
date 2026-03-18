@@ -41,7 +41,9 @@ def _format_sdk_message(
             "result": msg.result,
         })
     elif isinstance(msg, sdk.SystemMessage):
-        frames.append({"type": "system", "text": msg.data})
+        import json as _json
+        text = msg.data.get("message") or _json.dumps(msg.data)
+        frames.append({"type": "system", "text": text})
     return frames
 
 
@@ -80,6 +82,7 @@ async def handle_chat(
     async def stream_response(client: sdk.ClaudeSDKClient) -> None:
         try:
             async for msg in client.receive_response():
+                print(f"[chat] msg type={type(msg).__name__}")
                 if isinstance(msg, sdk.ResultMessage) and msg.session_id and on_session_id:
                     await on_session_id(msg.session_id)
                 for frame in _format_sdk_message(msg):
@@ -87,11 +90,16 @@ async def handle_chat(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await websocket.send_text(_msg(type="error", message=str(exc)))
+            print(f"[chat] stream_response error: {type(exc).__name__}: {exc}")
+            try:
+                await websocket.send_text(_msg(type="error", message=str(exc)))
+            except Exception:
+                pass
 
     resumed = resume_sdk_session_id is not None
     try:
         async with sdk.ClaudeSDKClient(options=opts) as client:
+            print(f"[chat] session={session_id} connected (resumed={resumed})")
             await websocket.send_text(_msg(
                 type="ready",
                 session_id=session_id,
@@ -120,8 +128,12 @@ async def handle_chat(
                             pass
                         await client.interrupt()
 
-                    await client.query(text)
-                    stream_task = asyncio.create_task(stream_response(client))
+                    try:
+                        await client.query(text)
+                        stream_task = asyncio.create_task(stream_response(client))
+                    except Exception as exc:
+                        print(f"[chat] query error: {exc}")
+                        await websocket.send_text(_msg(type="error", message=str(exc)))
 
                 elif kind == "interrupt":
                     if stream_task and not stream_task.done():
@@ -146,6 +158,7 @@ async def handle_chat(
         if stream_task and not stream_task.done():
             stream_task.cancel()
     except Exception as exc:
+        print(f"[chat] unhandled exception: {type(exc).__name__}: {exc}")
         try:
             await websocket.send_text(_msg(type="error", message=str(exc)))
             await websocket.close()
