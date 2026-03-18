@@ -13,6 +13,7 @@ from git import Repo
 
 from .chat import handle_chat
 from .monitor import GitMonitor
+from .sessions import SessionRecord, SessionStore
 from .workers import WorkerPool
 
 
@@ -25,6 +26,7 @@ class _State:
     repo_path: str
     monitor: GitMonitor
     workers: WorkerPool
+    sessions: SessionStore
     _stop: asyncio.Event
     _monitor_task: asyncio.Task
     model: str
@@ -90,6 +92,19 @@ async def worker_ws(websocket: WebSocket, branch: str):
         await websocket.close(code=4004, reason=f"No worktree for branch '{branch}'")
         return
 
+    # Resume prior session if one exists on disk
+    record = state.sessions.load(branch)
+    resume_id = record.sdk_session_id if record else None
+
+    async def _persist_session_id(sdk_session_id: str) -> None:
+        import datetime
+        state.sessions.save(SessionRecord(
+            branch=branch,
+            sdk_session_id=sdk_session_id,
+            worktree_path=wt_path,
+            last_seen=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        ))
+
     state.workers.register(branch, wt_path, websocket)
     try:
         await handle_chat(
@@ -98,6 +113,8 @@ async def worker_ws(websocket: WebSocket, branch: str):
             repo_path=wt_path,
             model=state.model,
             system_prompt=_build_system_prompt(wt_path),
+            resume_sdk_session_id=resume_id,
+            on_session_id=_persist_session_id,
         )
     finally:
         state.workers.deregister(branch)

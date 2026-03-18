@@ -69,13 +69,15 @@ def main() -> None:
     # Wire app state before uvicorn imports the app module
     from .app import state
     from .monitor import GitMonitor
+    from .sessions import SessionStore
     from .workers import WorkerPool
 
     state.repo = repo
     state.repo_path = resolved
     state.model = args.model
     state.monitor = GitMonitor(repo, poll_interval=args.poll_interval)
-    state.workers = WorkerPool(model=args.model)
+    state.workers = WorkerPool()
+    state.sessions = SessionStore(repo_name=os.path.basename(resolved))
 
     import uvicorn
     uvicorn.run(

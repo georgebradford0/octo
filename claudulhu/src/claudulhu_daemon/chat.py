@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import claude_agent_sdk as sdk
 from fastapi import WebSocket, WebSocketDisconnect
@@ -18,7 +18,10 @@ def _msg(**kwargs: Any) -> str:
     return json.dumps(kwargs)
 
 
-def _format_sdk_message(msg: sdk.Message) -> list[dict]:
+def _format_sdk_message(
+    msg: sdk.Message,
+    on_session_id: Callable[[str], Awaitable[None]] | None = None,
+) -> list[dict]:
     """Translate one SDK Message into ≥0 wire frames."""
     frames: list[dict] = []
     if isinstance(msg, sdk.AssistantMessage):
@@ -52,8 +55,16 @@ async def handle_chat(
     repo_path: str,
     model: str,
     system_prompt: str,
+    resume_sdk_session_id: str | None = None,
+    on_session_id: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
-    """Manages one user's WebSocket connection end-to-end."""
+    """Manages one user's WebSocket connection end-to-end.
+
+    Args:
+        resume_sdk_session_id: If provided, resumes a prior Claude SDK session.
+        on_session_id: Called with the SDK session_id each time a ResultMessage
+                       arrives, so callers can persist it for future resumption.
+    """
     await websocket.accept()
 
     opts = sdk.ClaudeAgentOptions(
@@ -61,6 +72,7 @@ async def handle_chat(
         model=model,
         cwd=repo_path,
         permission_mode="bypassPermissions",
+        resume=resume_sdk_session_id,
     )
 
     stream_task: asyncio.Task | None = None
@@ -68,6 +80,8 @@ async def handle_chat(
     async def stream_response(client: sdk.ClaudeSDKClient) -> None:
         try:
             async for msg in client.receive_response():
+                if isinstance(msg, sdk.ResultMessage) and msg.session_id and on_session_id:
+                    await on_session_id(msg.session_id)
                 for frame in _format_sdk_message(msg):
                     await websocket.send_text(_msg(**frame))
         except asyncio.CancelledError:
@@ -75,9 +89,14 @@ async def handle_chat(
         except Exception as exc:
             await websocket.send_text(_msg(type="error", message=str(exc)))
 
+    resumed = resume_sdk_session_id is not None
     try:
         async with sdk.ClaudeSDKClient(options=opts) as client:
-            await websocket.send_text(_msg(type="ready", session_id=session_id))
+            await websocket.send_text(_msg(
+                type="ready",
+                session_id=session_id,
+                resumed=resumed,
+            ))
 
             while True:
                 raw = await websocket.receive_text()
@@ -93,7 +112,6 @@ async def handle_chat(
                     text = data.get("text", "").strip()
                     if not text:
                         continue
-                    # If a prior response is still streaming, interrupt it first
                     if stream_task and not stream_task.done():
                         stream_task.cancel()
                         try:
