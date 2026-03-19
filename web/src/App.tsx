@@ -1,6 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import './App.css'
 
+// ── Tauri integration (no-ops when running in browser) ────────────────────────
+
+const isTauri = () => '__TAURI_INTERNALS__' in window
+
+async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import('@tauri-apps/api/core')
+  return invoke<T>(cmd, args)
+}
+
+async function tauriPickFolder(): Promise<string | null> {
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const result = await open({ directory: true, title: 'Select Repository' })
+  return typeof result === 'string' ? result : null
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 type ServerFrame =
@@ -471,6 +486,27 @@ export default function App() {
   const [activeTab,  setActiveTab]  = useState('main')
   const [tabStatuses, setTabStatuses] = useState<Record<string, ConnStatus>>({ main: 'connecting' })
   const [branches,   setBranches]   = useState<Branch[]>([])
+  const [repoPath,   setRepoPath]   = useState<string | null>(null)
+  const [repoReady,  setRepoReady]  = useState(!isTauri()) // browser: always ready
+
+  // Tauri: load stored repo on mount, auto-start daemon if found
+  useEffect(() => {
+    if (!isTauri()) return
+    tauriInvoke<string | null>('get_repo').then(repo => {
+      if (repo) {
+        setRepoPath(repo)
+        setRepoReady(true)
+      }
+    })
+  }, [])
+
+  const pickRepo = useCallback(async () => {
+    const folder = await tauriPickFolder()
+    if (!folder) return
+    await tauriInvoke('start_daemon', { repo: folder })
+    setRepoPath(folder)
+    setRepoReady(true)
+  }, [])
 
   // Branch polling
   useEffect(() => {
@@ -519,13 +555,38 @@ export default function App() {
     return ''
   }
 
+  const repoName = repoPath ? repoPath.split('/').pop() : null
+
+  if (isTauri() && !repoReady) {
+    return (
+      <div className="app">
+        <div className="repo-picker">
+          <div className="repo-picker-card">
+            <span className="repo-picker-mark">⬡</span>
+            <h1 className="repo-picker-title">claudulhu</h1>
+            <p className="repo-picker-desc">Select a git repository to manage.</p>
+            <button className="repo-picker-btn" onClick={pickRepo}>
+              Select Repository
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <header className="app-header">
         <div className="app-title">
           <span className="title-mark">⬡</span>
           <span>claudulhu</span>
+          {repoName && <span className="header-repo">{repoName}</span>}
         </div>
+        {isTauri() && (
+          <button className="btn-change-repo" onClick={pickRepo}>
+            change repo
+          </button>
+        )}
       </header>
 
       <main className="app-body">

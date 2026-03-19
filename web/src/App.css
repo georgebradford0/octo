@@ -30,6 +30,86 @@
 
 .title-mark { color: var(--blue); font-size: 15px; }
 
+.header-repo {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+  padding-left: 4px;
+  border-left: 1px solid var(--border);
+  margin-left: 4px;
+}
+
+.btn-change-repo {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  letter-spacing: 0.03em;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.btn-change-repo:hover {
+  color: var(--text-dim);
+  border-color: var(--border-mid);
+}
+
+/* ── Repo picker screen ───────────────────────────────────────────────────── */
+
+.repo-picker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: var(--bg);
+}
+
+.repo-picker-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 48px 56px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.repo-picker-mark {
+  font-size: 32px;
+  color: var(--blue);
+}
+
+.repo-picker-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.repo-picker-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+}
+
+.repo-picker-btn {
+  margin-top: 8px;
+  padding: 9px 24px;
+  background: var(--blue-dim);
+  border: 1px solid rgba(59, 98, 232, 0.3);
+  border-radius: var(--radius);
+  color: var(--blue);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  transition: background 0.15s;
+}
+
+.repo-picker-btn:hover {
+  background: rgba(59, 98, 232, 0.14);
+}
+
 .app-body {
   display: flex;
   flex: 1;
