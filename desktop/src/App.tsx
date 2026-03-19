@@ -494,19 +494,20 @@ function ChatPane({
     return { atPos: atIdx, dirPart, filePart }
   }
 
-  const acceptCompletion = useCallback((completion: string) => {
+  const acceptCompletion = useCallback((completion: string, addSpace = false) => {
     if (!compQuery) return
     const ta = inputRef.current
     const cursor = ta?.selectionStart ?? input.length
     // Replace from the '@' up to cursor with '@' + completion
     const before = input.slice(0, compQuery.atPos + 1) // keep the '@'
     const after  = input.slice(cursor)
-    const next   = before + completion + after
+    const suffix = addSpace && !completion.endsWith('/') ? ' ' : ''
+    const next   = before + completion + suffix + after
     setInput(next)
     setCompletions([])
     setCompQuery(null)
-    // Move cursor to end of inserted completion
-    const newCursor = compQuery.atPos + 1 + completion.length
+    // Move cursor to end of inserted completion (after space if added)
+    const newCursor = compQuery.atPos + 1 + completion.length + suffix.length
     requestAnimationFrame(() => {
       ta?.setSelectionRange(newCursor, newCursor)
       ta?.focus()
@@ -549,7 +550,7 @@ function ChatPane({
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
-        acceptCompletion(completions[compIndex])
+        acceptCompletion(completions[compIndex], true)
         return
       }
       if (e.key === 'Escape') {
