@@ -903,7 +903,7 @@ async fn stream_turn(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 8096,
+        "max_tokens": 1000000,
         "system": system,
         "tools": tool_definitions(),
         "messages": messages,
@@ -1315,7 +1315,7 @@ async fn chat_send(
 
     let config = read_config();
     let api_key = resolve_api_key().ok_or_else(|| "no API key configured".to_string())?;
-    let model = config.model.unwrap_or_else(|| "claude-opus-4-6".to_string());
+    let model = config.model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
     // Reset abort flag and add user message
     {
