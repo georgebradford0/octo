@@ -207,6 +207,7 @@ function ChatPane({
   const [messages,     setMessages]     = useState<ChatMessage[]>([])
   const [status,       setStatus]       = useState<ConnStatus>('connecting')
   const [isStreaming,  setIsStreaming]   = useState(false)
+  const [isPending,    setIsPending]    = useState(false)  // waiting for API (no text yet)
   const [input,        setInput]        = useState('')
   const [completions,  setCompletions]  = useState<string[]>([])
   const [compIndex,    setCompIndex]    = useState(0)
@@ -252,6 +253,7 @@ function ChatPane({
   const ensureAssistantMsg = useCallback(() => {
     if (!inResponseRef.current) {
       inResponseRef.current = true
+      setIsPending(false)
       setIsStreaming(true)
       setMessages(prev => [...prev, { id: uid(), role: 'assistant', blocks: [], streaming: true }])
     }
@@ -276,6 +278,7 @@ function ChatPane({
 
   const completeResponse = useCallback(() => {
     inResponseRef.current = false
+    setIsPending(false)
     setIsStreaming(false)
     setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
   }, [])
@@ -295,6 +298,11 @@ function ChatPane({
         break
       case 'tool_result':
         appendBlock({ kind: 'tool_result', content: frame.content })
+        // After tool results, we're waiting for the next API turn
+        inResponseRef.current = false
+        setIsStreaming(false)
+        setIsPending(true)
+        setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
         break
       case 'result':
         appendBlock({ kind: 'result', cost_usd: frame.cost_usd, turns: frame.turns })
@@ -468,6 +476,7 @@ function ChatPane({
       }
     }
 
+    setIsPending(true)
     setInput('')
     inputRef.current?.focus()
   }, [input, isStreaming, canSpawnWorker, repo])
@@ -584,6 +593,16 @@ function ChatPane({
           {messages.map(msg => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
+          {isPending && (
+            <div className="message message--assistant">
+              <div className="message-label">claude</div>
+              <div className="message-body">
+                <span className="thinking-dots">
+                  <span /><span /><span />
+                </span>
+              </div>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
       </div>
