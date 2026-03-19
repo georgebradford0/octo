@@ -38,7 +38,7 @@ type ServerFrame =
   | { type: 'spawning';             task: string }
   | { type: 'worker_created';       branch: string; worktree_path: string; task: string }
   | { type: 'worker_error';         message: string }
-  | { type: 'worker_session_ready'; branch: string; worker_session_id: string; task: string }
+  | { type: 'worker_session_ready'; branch: string; worktree_path: string; worker_session_id: string; task: string }
 
 type Block =
   | { kind: 'text';           text: string }
@@ -70,6 +70,7 @@ interface Tab {
   label: string
   wsUrl: string          // used in browser mode
   sessionId?: string     // used in Tauri mode
+  worktreePath?: string  // cwd for the session (worktree path if applicable)
   initialMessage?: string
 }
 
@@ -192,11 +193,13 @@ interface ChatPaneProps {
   initialMessage?: string
   onStatusChange: (status: ConnStatus) => void
   onWorkerCreated: (branch: string, worktreePath: string, task: string, workerSessionId: string) => void
+  worktreePath?: string  // pre-set cwd for this pane (passed into chat_new_session)
 }
 
 function ChatPane({
   wsUrl,
   sessionId: externalSessionId,
+  worktreePath: externalWorktreePath,
   active,
   canSpawnWorker,
   repo,
@@ -334,7 +337,7 @@ function ChatPane({
         }])
         break
       case 'worker_session_ready':
-        onWorkerCreatedRef.current(frame.branch, '', frame.task, frame.worker_session_id)
+        onWorkerCreatedRef.current(frame.branch, frame.worktree_path, frame.task, frame.worker_session_id)
         break
       case 'worker_error':
         setMessages(prev => [...prev, {
@@ -363,7 +366,7 @@ function ChatPane({
         const sid = await tauriInvoke<string>('chat_new_session', {
           sessionType,
           branch: branch ?? null,
-          worktreePath: null,
+          worktreePath: externalWorktreePath ?? null,
           repo,
         })
         if (!mounted) return
@@ -754,11 +757,11 @@ export default function App() {
     return () => clearInterval(t)
   }, [repoPath])
 
-  const openTab = useCallback((branch: string, initialMessage?: string, sessionId?: string) => {
+  const openTab = useCallback((branch: string, initialMessage?: string, sessionId?: string, worktreePath?: string) => {
     const wsUrl = `ws://localhost:8000/workers/${encodeURIComponent(branch)}`
     setTabs(prev => {
       if (prev.find(t => t.id === branch)) return prev
-      return [...prev, { id: branch, label: branch, wsUrl, sessionId, initialMessage }]
+      return [...prev, { id: branch, label: branch, wsUrl, sessionId, worktreePath, initialMessage }]
     })
     setTabStatuses(prev => ({ ...prev, [branch]: prev[branch] ?? 'connecting' }))
     setActiveTab(branch)
@@ -776,8 +779,8 @@ export default function App() {
   }, [])
 
   const handleWorkerCreated = useCallback(
-    (_branch: string, _worktreePath: string, task: string, workerSessionId: string) => {
-      openTab(_branch, task, workerSessionId || undefined)
+    (branch: string, worktreePath: string, task: string, workerSessionId: string) => {
+      openTab(branch, task, workerSessionId || undefined, worktreePath || undefined)
     },
     [openTab],
   )
@@ -902,6 +905,7 @@ export default function App() {
                 <ChatPane
                   wsUrl={tab.wsUrl}
                   sessionId={tab.sessionId}
+                  worktreePath={tab.worktreePath}
                   active={activeTab === tab.id}
                   canSpawnWorker={tab.id === 'main'}
                   repo={repoPath ?? ''}
@@ -930,7 +934,7 @@ export default function App() {
                     key={b.name}
                     branch={b}
                     isOpen={openTabIds.has(b.name)}
-                    onOpen={() => openTab(b.name)}
+                    onOpen={() => openTab(b.name, undefined, undefined, b.worktree ?? undefined)}
                   />
                 ))
             }

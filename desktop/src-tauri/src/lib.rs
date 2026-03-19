@@ -129,6 +129,7 @@ enum ChatEvent {
     },
     WorkerSessionReady {
         branch: String,
+        worktree_path: String,
         worker_session_id: String,
         task: String,
     },
@@ -975,7 +976,7 @@ async fn spawn_worker(
     let worker_session = Arc::new(Mutex::new(Session {
         messages: Vec::new(),
         system_prompt,
-        cwd: worktree_path,
+        cwd: worktree_path.clone(),
         aborted: Arc::new(AtomicBool::new(false)),
     }));
 
@@ -997,6 +998,7 @@ async fn spawn_worker(
     // Notify the parent chat that the worker is ready, including the worker's session_id
     emit(&app, &session_id, ChatEvent::WorkerSessionReady {
         branch,
+        worktree_path: worktree_path.clone(),
         worker_session_id,
         task,
     });
