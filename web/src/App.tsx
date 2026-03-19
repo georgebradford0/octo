@@ -41,6 +41,12 @@ interface Branch {
   worktree: string | null
 }
 
+interface Tab {
+  id: string
+  label: string
+  wsUrl: string
+}
+
 type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -48,8 +54,8 @@ type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 let _id = 0
 const uid = () => `m${++_id}`
 
-const WS_URL       = 'ws://localhost:8000/chat'
 const BRANCHES_URL = 'http://localhost:8000/branches'
+const MAIN_WS_URL  = 'ws://localhost:8000/chat'
 
 // ── ToolUseBlock ──────────────────────────────────────────────────────────────
 
@@ -147,41 +153,47 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   )
 }
 
-// ── BranchItem ────────────────────────────────────────────────────────────────
+// ── ChatPane ──────────────────────────────────────────────────────────────────
 
-function BranchItem({ branch }: { branch: Branch }) {
-  return (
-    <div className="branch-item">
-      <span className={`branch-dot${branch.worktree ? ' branch-dot--active' : ''}`} />
-      <div className="branch-info">
-        <span className="branch-name">{branch.name}</span>
-        <span className="branch-commit">{branch.commit}</span>
-        {branch.worktree && (
-          <span className="branch-worktree">{branch.worktree}</span>
-        )}
-      </div>
-    </div>
-  )
+interface ChatPaneProps {
+  wsUrl: string
+  active: boolean
+  canSpawnWorker: boolean
+  onStatusChange: (status: ConnStatus) => void
+  onWorkerCreated: (branch: string, worktreePath: string) => void
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
-
-export default function App() {
+function ChatPane({
+  wsUrl,
+  active,
+  canSpawnWorker,
+  onStatusChange,
+  onWorkerCreated,
+}: ChatPaneProps) {
   const [messages,    setMessages]   = useState<ChatMessage[]>([])
   const [status,      setStatus]     = useState<ConnStatus>('connecting')
   const [isStreaming, setIsStreaming] = useState(false)
   const [input,       setInput]      = useState('')
-  const [branches,    setBranches]   = useState<Branch[]>([])
 
-  const wsRef           = useRef<WebSocket | null>(null)
-  const inResponseRef   = useRef(false)
-  const messagesEndRef  = useRef<HTMLDivElement>(null)
-  const inputRef        = useRef<HTMLTextAreaElement>(null)
+  const wsRef          = useRef<WebSocket | null>(null)
+  const inResponseRef  = useRef(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef       = useRef<HTMLTextAreaElement>(null)
+
+  const updateStatus = useCallback((s: ConnStatus) => {
+    setStatus(s)
+    onStatusChange(s)
+  }, [onStatusChange])
 
   // Auto-scroll
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (active) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, active])
+
+  // Focus input when tab becomes active
+  useEffect(() => {
+    if (active) inputRef.current?.focus()
+  }, [active])
 
   // Auto-resize textarea
   useEffect(() => {
@@ -191,19 +203,6 @@ export default function App() {
     ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'
   }, [input])
 
-  // Branch polling
-  useEffect(() => {
-    const fetch_ = () =>
-      fetch(BRANCHES_URL)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => d && setBranches(d))
-        .catch(() => {})
-    fetch_()
-    const t = setInterval(fetch_, 10_000)
-    return () => clearInterval(t)
-  }, [])
-
-  // Message helpers (all use functional setMessages to avoid stale closures)
   const ensureAssistantMsg = useCallback(() => {
     if (!inResponseRef.current) {
       inResponseRef.current = true
@@ -216,7 +215,6 @@ export default function App() {
     setMessages(prev => {
       const last = prev[prev.length - 1]
       if (!last?.streaming) return prev
-      // Merge consecutive text blocks
       if (block.kind === 'text') {
         const tail = last.blocks[last.blocks.length - 1]
         if (tail?.kind === 'text') {
@@ -242,8 +240,8 @@ export default function App() {
 
     const connect = () => {
       if (cancelled) return
-      setStatus('connecting')
-      const ws = new WebSocket(WS_URL)
+      updateStatus('connecting')
+      const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onmessage = ({ data }) => {
@@ -252,7 +250,7 @@ export default function App() {
 
         switch (frame.type) {
           case 'ready':
-            setStatus(frame.resumed ? 'resumed' : 'ready')
+            updateStatus(frame.resumed ? 'resumed' : 'ready')
             break
           case 'text':
             ensureAssistantMsg()
@@ -285,13 +283,13 @@ export default function App() {
             }])
             break
           case 'spawning':
-            // Update the last user message (which showed the & task) with spawning status
             break
           case 'worker_created':
             setMessages(prev => [...prev, {
               id: uid(), role: 'info', streaming: false,
               blocks: [{ kind: 'worker_created', branch: frame.branch, worktree_path: frame.worktree_path }],
             }])
+            onWorkerCreated(frame.branch, frame.worktree_path)
             break
           case 'worker_error':
             setMessages(prev => [...prev, {
@@ -304,12 +302,12 @@ export default function App() {
 
       ws.onclose = () => {
         if (!cancelled) {
-          setStatus('disconnected')
+          updateStatus('disconnected')
           setTimeout(connect, 3000)
         }
       }
 
-      ws.onerror = () => setStatus('error')
+      ws.onerror = () => updateStatus('error')
     }
 
     connect()
@@ -317,16 +315,15 @@ export default function App() {
       cancelled = true
       wsRef.current?.close()
     }
-  }, [appendBlock, completeResponse, ensureAssistantMsg])
+  }, [wsUrl, appendBlock, completeResponse, ensureAssistantMsg, onWorkerCreated, updateStatus])
 
-  // Send
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text || isStreaming) return
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
 
-    if (text.startsWith('&')) {
+    if (canSpawnWorker && text.startsWith('&')) {
       const task = text.slice(1).trim()
       if (!task) return
       setMessages(prev => [...prev, {
@@ -344,7 +341,7 @@ export default function App() {
 
     setInput('')
     inputRef.current?.focus()
-  }, [input, isStreaming])
+  }, [input, isStreaming, canSpawnWorker])
 
   const sendInterrupt = useCallback(() => {
     wsRef.current?.send(JSON.stringify({ type: 'interrupt' }))
@@ -358,16 +355,137 @@ export default function App() {
   }, [sendMessage])
 
   const canSend = !isStreaming && !!input.trim() && (status === 'ready' || status === 'resumed')
+  const placeholder = canSpawnWorker
+    ? 'message… (& task to spawn a worktree)'
+    : 'message…'
 
-  const statusLabel: Record<ConnStatus, string> = {
-    connecting:   'connecting…',
-    ready:        'connected',
-    resumed:      'resumed',
-    error:        'error',
-    disconnected: 'reconnecting…',
-  }
+  return (
+    <div className="chat-pane">
+      <div className="messages-scroll">
+        <div className="messages-inner">
+          {messages.length === 0 && (
+            <div className="empty-state">
+              {status === 'connecting' || status === 'disconnected'
+                ? 'establishing connection…'
+                : 'send a message to begin'}
+            </div>
+          )}
+          {messages.map(msg => (
+            <MessageBubble key={msg.id} message={msg} />
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      <div className="input-area">
+        <textarea
+          ref={inputRef}
+          className="chat-input"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          rows={1}
+          disabled={status === 'connecting' || status === 'disconnected'}
+        />
+        <div>
+          {isStreaming
+            ? <button className="btn btn--interrupt" onClick={sendInterrupt}>stop</button>
+            : <button className="btn btn--send" onClick={sendMessage} disabled={!canSend}>send</button>
+          }
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── BranchItem ────────────────────────────────────────────────────────────────
+
+function BranchItem({
+  branch,
+  isOpen,
+  onOpen,
+}: {
+  branch: Branch
+  isOpen: boolean
+  onOpen: () => void
+}) {
+  return (
+    <div
+      className={`branch-item${branch.worktree ? ' branch-item--clickable' : ''}${isOpen ? ' branch-item--open' : ''}`}
+      onClick={branch.worktree ? onOpen : undefined}
+    >
+      <span className={`branch-dot${branch.worktree ? ' branch-dot--active' : ''}`} />
+      <div className="branch-info">
+        <span className="branch-name">{branch.name}</span>
+        <span className="branch-commit">{branch.commit}</span>
+        {branch.worktree && (
+          <span className="branch-worktree">{branch.worktree}</span>
+        )}
+      </div>
+      {branch.worktree && (
+        <span className="branch-open-hint">{isOpen ? 'open' : 'chat'}</span>
+      )}
+    </div>
+  )
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [tabs,       setTabs]       = useState<Tab[]>([
+    { id: 'main', label: 'main', wsUrl: MAIN_WS_URL },
+  ])
+  const [activeTab,  setActiveTab]  = useState('main')
+  const [tabStatuses, setTabStatuses] = useState<Record<string, ConnStatus>>({ main: 'connecting' })
+  const [branches,   setBranches]   = useState<Branch[]>([])
+
+  // Branch polling
+  useEffect(() => {
+    const fetch_ = () =>
+      fetch(BRANCHES_URL)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setBranches(d))
+        .catch(() => {})
+    fetch_()
+    const t = setInterval(fetch_, 10_000)
+    return () => clearInterval(t)
+  }, [])
+
+  const openTab = useCallback((branch: string) => {
+    const wsUrl = `ws://localhost:8000/workers/${encodeURIComponent(branch)}`
+    setTabs(prev => {
+      if (prev.find(t => t.id === branch)) return prev
+      return [...prev, { id: branch, label: branch, wsUrl }]
+    })
+    setTabStatuses(prev => ({ ...prev, [branch]: prev[branch] ?? 'connecting' }))
+    setActiveTab(branch)
+  }, [])
+
+  const closeTab = useCallback((id: string) => {
+    if (id === 'main') return
+    setTabs(prev => prev.filter(t => t.id !== id))
+    setTabStatuses(prev => { const n = { ...prev }; delete n[id]; return n })
+    setActiveTab(prev => prev === id ? 'main' : prev)
+  }, [])
+
+  const handleStatusChange = useCallback((id: string) => (status: ConnStatus) => {
+    setTabStatuses(prev => ({ ...prev, [id]: status }))
+  }, [])
+
+  const handleWorkerCreated = useCallback((branch: string) => {
+    openTab(branch)
+  }, [openTab])
 
   const activeWorktrees = branches.filter(b => b.worktree).length
+  const openTabIds = new Set(tabs.map(t => t.id))
+
+  const statusDotClass = (status: ConnStatus) => {
+    if (status === 'ready' || status === 'resumed') return 'tab-dot--ready'
+    if (status === 'connecting' || status === 'disconnected') return 'tab-dot--connecting'
+    if (status === 'error') return 'tab-dot--error'
+    return ''
+  }
 
   return (
     <div className="app">
@@ -376,48 +494,47 @@ export default function App() {
           <span className="title-mark">⬡</span>
           <span>claudulhu</span>
         </div>
-        <div className={`status-badge status-badge--${status}`}>
-          <span className="status-dot" />
-          {statusLabel[status]}
-        </div>
       </header>
 
       <main className="app-body">
-        {/* ── Chat ── */}
-        <section className="chat-panel">
-          <div className="messages-scroll">
-            <div className="messages-inner">
-              {messages.length === 0 && (
-                <div className="empty-state">
-                  {status === 'connecting' || status === 'disconnected'
-                    ? 'establishing connection…'
-                    : 'send a message to begin'}
-                </div>
-              )}
-              {messages.map(msg => (
-                <MessageBubble key={msg.id} message={msg} />
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
+        {/* ── Chat section ── */}
+        <section className="chat-section">
+          {/* Tab bar */}
+          <div className="tab-bar">
+            {tabs.map(tab => (
+              <div
+                key={tab.id}
+                className={`tab${activeTab === tab.id ? ' tab--active' : ''}`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                <span className={`tab-dot ${statusDotClass(tabStatuses[tab.id] ?? 'connecting')}`} />
+                <span className="tab-label">{tab.label}</span>
+                {tab.id !== 'main' && (
+                  <button
+                    className="tab-close"
+                    onClick={e => { e.stopPropagation(); closeTab(tab.id) }}
+                  >×</button>
+                )}
+              </div>
+            ))}
           </div>
 
-          <div className="input-area">
-            <textarea
-              ref={inputRef}
-              className="chat-input"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="message… (& task to spawn a worktree)"
-              rows={1}
-              disabled={status === 'connecting' || status === 'disconnected'}
-            />
-            <div>
-              {isStreaming
-                ? <button className="btn btn--interrupt" onClick={sendInterrupt}>stop</button>
-                : <button className="btn btn--send" onClick={sendMessage} disabled={!canSend}>send</button>
-              }
-            </div>
+          {/* Chat panes — all mounted, only active one visible */}
+          <div className="chat-panes">
+            {tabs.map(tab => (
+              <div
+                key={tab.id}
+                className={`chat-pane-wrapper${activeTab === tab.id ? ' chat-pane-wrapper--active' : ''}`}
+              >
+                <ChatPane
+                  wsUrl={tab.wsUrl}
+                  active={activeTab === tab.id}
+                  canSpawnWorker={tab.id === 'main'}
+                  onStatusChange={handleStatusChange(tab.id)}
+                  onWorkerCreated={handleWorkerCreated}
+                />
+              </div>
+            ))}
           </div>
         </section>
 
@@ -430,7 +547,14 @@ export default function App() {
           <div className="branches-list">
             {branches.length === 0
               ? <div className="branches-empty">no branches found</div>
-              : branches.map(b => <BranchItem key={b.name} branch={b} />)
+              : branches.map(b => (
+                  <BranchItem
+                    key={b.name}
+                    branch={b}
+                    isOpen={openTabIds.has(b.name)}
+                    onOpen={() => openTab(b.name)}
+                  />
+                ))
             }
           </div>
         </aside>

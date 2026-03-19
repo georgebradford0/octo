@@ -67,15 +67,100 @@
   50%       { opacity: 0.35; }
 }
 
-/* ── Chat panel ───────────────────────────────────────────────────────────── */
+/* ── Chat section (tab bar + panes) ──────────────────────────────────────── */
 
-.chat-panel {
+.chat-section {
   flex: 3;
   display: flex;
   flex-direction: column;
   min-width: 0;
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────────── */
+
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  overflow-x: auto;
+  flex-shrink: 0;
+  height: 36px;
+}
+
+.tab-bar::-webkit-scrollbar { height: 0; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: color 0.1s, background 0.1s;
+  user-select: none;
+  position: relative;
+}
+
+.tab:hover { color: var(--text-dim); background: var(--bg-elevated); }
+.tab--active { color: var(--text); border-bottom-color: var(--blue); background: var(--bg-panel); }
+
+.tab-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+
+.tab-dot--ready       { background: var(--green); }
+.tab-dot--connecting  { background: var(--amber); animation: pulse 1.2s ease-in-out infinite; }
+.tab-dot--error       { background: var(--red); }
+
+.tab-label { letter-spacing: 0.02em; }
+
+.tab-close {
+  font-size: 13px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  padding: 0;
+  line-height: 1;
+  margin-left: 2px;
+  transition: color 0.1s;
+}
+
+.tab-close:hover { color: var(--red); }
+
+/* ── Chat panes ───────────────────────────────────────────────────────────── */
+
+.chat-panes {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.chat-pane-wrapper {
+  display: none;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+}
+
+.chat-pane-wrapper--active {
+  display: flex;
+}
+
+.chat-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
 }
 
 .messages-scroll {
@@ -404,8 +489,11 @@
   cursor: default;
 }
 
-.branch-item:last-child { border-bottom: none; }
-.branch-item:hover      { background: var(--bg-panel); }
+.branch-item:last-child  { border-bottom: none; }
+.branch-item:hover       { background: var(--bg-panel); }
+.branch-item--clickable  { cursor: pointer; }
+.branch-item--open       { background: var(--bg-panel); }
+.branch-item--open .branch-name { color: var(--blue); }
 
 .branch-dot {
   width: 7px;
@@ -452,6 +540,20 @@
   text-overflow: ellipsis;
   opacity: 0.7;
 }
+
+.branch-open-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  margin-left: auto;
+  flex-shrink: 0;
+  align-self: center;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.branch-item--clickable:hover .branch-open-hint { opacity: 1; }
+.branch-item--open .branch-open-hint            { opacity: 1; color: var(--blue); }
 
 /* ── Spawn worker blocks ──────────────────────────────────────────────────── */
 
