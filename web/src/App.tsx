@@ -326,6 +326,14 @@ function ChatPane({
 
       ws.onclose = () => {
         if (!cancelled) {
+          // If disconnected mid-stream, stop the blinking cursor and unblock input
+          if (inResponseRef.current) {
+            inResponseRef.current = false
+            setIsStreaming(false)
+            setMessages(prev => prev.map((m, i) =>
+              i < prev.length - 1 ? m : { ...m, streaming: false }
+            ))
+          }
           updateStatus('disconnected')
           setTimeout(connect, 3000)
         }
