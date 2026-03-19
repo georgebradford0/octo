@@ -277,7 +277,91 @@ fn create_worktree(repo_path: &str, branch: &str) -> Result<String, String> {
     Ok(worktree_path.to_string_lossy().to_string())
 }
 
+// ── Task Management ───────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Task {
+    id: String,
+    subject: String,
+    description: String,
+    active_form: Option<String>,
+    status: String, // "pending" | "in_progress" | "completed" | "deleted"
+    owner: Option<String>,
+    output: Option<String>,
+    blocks: Vec<String>,
+    blocked_by: Vec<String>,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct TaskStore {
+    next_id: u32,
+    tasks: Vec<Task>,
+}
+
+fn tasks_path() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".claudulhu")
+        .join("tasks.json")
+}
+
+fn read_task_store() -> TaskStore {
+    fs::read_to_string(tasks_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_task_store(store: &TaskStore) {
+    let path = tasks_path();
+    fs::create_dir_all(path.parent().unwrap()).ok();
+    fs::write(path, serde_json::to_string_pretty(store).unwrap()).ok();
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 // ── Tool Execution ────────────────────────────────────────────────────────────
+
+fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut in_script = false;
+    let mut tag_buf = String::new();
+
+    let mut chars = html.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag_buf.clear();
+            }
+            '>' => {
+                let tag = tag_buf.trim().to_lowercase();
+                if tag.starts_with("script") || tag.starts_with("style") {
+                    in_script = true;
+                } else if tag.starts_with("/script") || tag.starts_with("/style") {
+                    in_script = false;
+                }
+                in_tag = false;
+            }
+            _ if in_tag => {
+                tag_buf.push(c);
+            }
+            _ if !in_script => {
+                out.push(c);
+            }
+            _ => {}
+        }
+    }
+    // Normalise whitespace
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 fn resolve_path(p: &str, cwd: &str) -> PathBuf {
     if p.starts_with('/') { PathBuf::from(p) } else { PathBuf::from(cwd).join(p) }
@@ -391,6 +475,196 @@ async fn execute_tool(name: &str, input: &serde_json::Value, cwd: &str) -> Strin
                 Err(e) => format!("error: {e}"),
             }
         }
+        "task_create" => {
+            let subject = input["subject"].as_str().unwrap_or("").to_string();
+            if subject.is_empty() {
+                return "error: subject is required".to_string();
+            }
+            let description = input["description"].as_str().unwrap_or("").to_string();
+            let active_form = input["activeForm"].as_str().map(|s| s.to_string());
+            let now = now_secs();
+            let mut store = read_task_store();
+            store.next_id += 1;
+            let id = store.next_id.to_string();
+            store.tasks.push(Task {
+                id: id.clone(),
+                subject,
+                description,
+                active_form,
+                status: "pending".to_string(),
+                owner: None,
+                output: None,
+                blocks: vec![],
+                blocked_by: vec![],
+                created_at: now,
+                updated_at: now,
+            });
+            write_task_store(&store);
+            format!("created task {id}")
+        }
+        "task_list" => {
+            let store = read_task_store();
+            let visible: Vec<&Task> = store.tasks.iter()
+                .filter(|t| t.status != "deleted")
+                .collect();
+            if visible.is_empty() {
+                return "no tasks".to_string();
+            }
+            visible.iter().map(|t| {
+                let blocked = if t.blocked_by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [blocked by: {}]", t.blocked_by.join(", "))
+                };
+                let owner = t.owner.as_deref().map(|o| format!(" owner={o}")).unwrap_or_default();
+                format!("[{}] {} — {}{}{}", t.id, t.status, t.subject, owner, blocked)
+            }).collect::<Vec<_>>().join("\n")
+        }
+        "task_get" => {
+            let id = input["taskId"].as_str().unwrap_or("");
+            let store = read_task_store();
+            match store.tasks.iter().find(|t| t.id == id) {
+                None => format!("error: task {id} not found"),
+                Some(t) => serde_json::to_string_pretty(t).unwrap_or_default(),
+            }
+        }
+        "task_update" => {
+            let id = input["taskId"].as_str().unwrap_or("");
+            let mut store = read_task_store();
+            match store.tasks.iter_mut().find(|t| t.id == id) {
+                None => format!("error: task {id} not found"),
+                Some(t) => {
+                    if let Some(s) = input["status"].as_str() {
+                        t.status = s.to_string();
+                    }
+                    if let Some(s) = input["subject"].as_str() {
+                        t.subject = s.to_string();
+                    }
+                    if let Some(s) = input["description"].as_str() {
+                        t.description = s.to_string();
+                    }
+                    if let Some(s) = input["activeForm"].as_str() {
+                        t.active_form = Some(s.to_string());
+                    }
+                    if let Some(s) = input["owner"].as_str() {
+                        t.owner = Some(s.to_string());
+                    }
+                    if let Some(arr) = input["addBlocks"].as_array() {
+                        for v in arr {
+                            if let Some(s) = v.as_str() {
+                                if !t.blocks.contains(&s.to_string()) {
+                                    t.blocks.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(arr) = input["addBlockedBy"].as_array() {
+                        for v in arr {
+                            if let Some(s) = v.as_str() {
+                                if !t.blocked_by.contains(&s.to_string()) {
+                                    t.blocked_by.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    t.updated_at = now_secs();
+                    write_task_store(&store);
+                    "ok".to_string()
+                }
+            }
+        }
+        "task_stop" => {
+            let id = input["task_id"].as_str()
+                .or_else(|| input["taskId"].as_str())
+                .unwrap_or("");
+            let mut store = read_task_store();
+            match store.tasks.iter_mut().find(|t| t.id == id) {
+                None => format!("error: task {id} not found"),
+                Some(t) => {
+                    t.status = "deleted".to_string();
+                    t.updated_at = now_secs();
+                    write_task_store(&store);
+                    "ok".to_string()
+                }
+            }
+        }
+        "task_output" => {
+            let id = input["task_id"].as_str().unwrap_or("");
+            let store = read_task_store();
+            match store.tasks.iter().find(|t| t.id == id) {
+                None => format!("error: task {id} not found"),
+                Some(t) => t.output.clone().unwrap_or_else(|| "(no output)".to_string()),
+            }
+        }
+        "web_fetch" => {
+            let url = input["url"].as_str().unwrap_or("");
+            if url.is_empty() {
+                return "error: url is required".to_string();
+            }
+            let client = reqwest::Client::builder()
+                .user_agent("Mozilla/5.0 (compatible; claudulhu/1.0)")
+                .build()
+                .unwrap();
+            match client.get(url).send().await {
+                Err(e) => format!("error: {e}"),
+                Ok(resp) => {
+                    let status = resp.status();
+                    match resp.text().await {
+                        Err(e) => format!("error reading response: {e}"),
+                        Ok(body) => {
+                            let text = strip_html(&body);
+                            let truncated = if text.len() > 50_000 {
+                                format!("{}\n[truncated at 50000 chars]", &text[..50_000])
+                            } else {
+                                text
+                            };
+                            if status.is_success() {
+                                truncated
+                            } else {
+                                format!("HTTP {status}\n{truncated}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "web_search" => {
+            let query = input["query"].as_str().unwrap_or("");
+            if query.is_empty() {
+                return "error: query is required".to_string();
+            }
+            let api_key = match std::env::var("BRAVE_API_KEY").ok().filter(|s| !s.is_empty()) {
+                Some(k) => k,
+                None => return "error: BRAVE_API_KEY environment variable not set".to_string(),
+            };
+            let client = reqwest::Client::new();
+            match client
+                .get("https://api.search.brave.com/res/v1/web/search")
+                .query(&[("q", query), ("count", "10")])
+                .header("Accept", "application/json")
+                .header("X-Subscription-Token", api_key)
+                .send()
+                .await
+            {
+                Err(e) => format!("error: {e}"),
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Err(e) => format!("error parsing response: {e}"),
+                    Ok(v) => match v["web"]["results"].as_array() {
+                        None => "no results".to_string(),
+                        Some(items) => items
+                            .iter()
+                            .map(|r| {
+                                let title = r["title"].as_str().unwrap_or("");
+                                let url   = r["url"].as_str().unwrap_or("");
+                                let desc  = r["description"].as_str().unwrap_or("");
+                                format!("**{title}**\n{url}\n{desc}")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    },
+                },
+            }
+        }
         _ => format!("unknown tool: {name}"),
     }
 }
@@ -467,6 +741,97 @@ fn tool_definitions() -> Vec<AnthropicTool> {
                     "path":    { "type": "string", "description": "Directory or file to search (default: .)" }
                 },
                 "required": ["pattern"]
+            }),
+        },
+        AnthropicTool {
+            name: "task_create".to_string(),
+            description: "Create a task with status 'pending'. Use for complex multi-step work. Returns the task ID.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject":     { "type": "string", "description": "Brief title in imperative form (e.g. 'Fix auth bug')" },
+                    "description": { "type": "string", "description": "Detailed requirements and acceptance criteria" },
+                    "activeForm":  { "type": "string", "description": "Present-continuous label shown while in_progress (e.g. 'Fixing auth bug')" }
+                },
+                "required": ["subject", "description"]
+            }),
+        },
+        AnthropicTool {
+            name: "task_list".to_string(),
+            description: "List all non-deleted tasks showing id, status, subject, owner, and blockedBy.".to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        AnthropicTool {
+            name: "task_get".to_string(),
+            description: "Get full details of a task by ID, including description, blocks, and blockedBy.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": { "type": "string", "description": "Task ID" }
+                },
+                "required": ["taskId"]
+            }),
+        },
+        AnthropicTool {
+            name: "task_update".to_string(),
+            description: "Update a task's status, subject, description, owner, or dependencies. Status values: pending → in_progress → completed | deleted.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId":       { "type": "string" },
+                    "status":       { "type": "string", "enum": ["pending", "in_progress", "completed", "deleted"] },
+                    "subject":      { "type": "string" },
+                    "description":  { "type": "string" },
+                    "activeForm":   { "type": "string" },
+                    "owner":        { "type": "string" },
+                    "addBlocks":    { "type": "array", "items": { "type": "string" }, "description": "Task IDs this task blocks" },
+                    "addBlockedBy": { "type": "array", "items": { "type": "string" }, "description": "Task IDs that must complete first" }
+                },
+                "required": ["taskId"]
+            }),
+        },
+        AnthropicTool {
+            name: "task_stop".to_string(),
+            description: "Cancel (delete) a task by ID.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID to cancel" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        AnthropicTool {
+            name: "task_output".to_string(),
+            description: "Get the output field of a task (set via task_update).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        AnthropicTool {
+            name: "web_fetch".to_string(),
+            description: "Fetch a URL and return its text content (HTML stripped). Truncated at 50 000 chars. Use for reading docs, RFCs, GitHub files, etc.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to fetch" }
+                },
+                "required": ["url"]
+            }),
+        },
+        AnthropicTool {
+            name: "web_search".to_string(),
+            description: "Search the web via Brave Search. Requires BRAVE_API_KEY env var. Returns up to 10 results with title, URL, and description.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" }
+                },
+                "required": ["query"]
             }),
         },
     ]
