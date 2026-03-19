@@ -15,10 +15,10 @@ pub fn run() {
             }
 
             // Spawn claudulhud sidecar — manages the daemon for the lifetime of the app
-            let shell = app.shell();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                match shell
+                match handle
+                    .shell()
                     .sidecar("claudulhud")
                     .expect("claudulhud sidecar not configured")
                     .args(["--host", "127.0.0.1", "--port", "8000"])
