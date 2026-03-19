@@ -1,4 +1,4 @@
-"""WebSocket chat handler — one ClaudeSDKClient session per connection."""
+"""WebSocket chat handler — ephemeral Claude session per connection."""
 
 from __future__ import annotations
 
@@ -18,10 +18,7 @@ def _msg(**kwargs: Any) -> str:
     return json.dumps(kwargs)
 
 
-def _format_sdk_message(
-    msg: sdk.Message,
-    on_session_id: Callable[[str], Awaitable[None]] | None = None,
-) -> list[dict]:
+def _format_sdk_message(msg: sdk.Message) -> list[dict]:
     """Translate one SDK Message into ≥0 wire frames."""
     frames: list[dict] = []
     if isinstance(msg, sdk.AssistantMessage):
@@ -57,16 +54,12 @@ async def handle_chat(
     repo_path: str,
     model: str,
     system_prompt: str,
-    resume_sdk_session_id: str | None = None,
-    on_session_id: Callable[[str], Awaitable[None]] | None = None,
     on_spawn_worker: Callable[[str], Awaitable[dict]] | None = None,
 ) -> None:
-    """Manages one user's WebSocket connection end-to-end.
+    """Manages one ephemeral WebSocket chat session end-to-end.
 
-    Args:
-        resume_sdk_session_id: If provided, resumes a prior Claude SDK session.
-        on_session_id: Called with the SDK session_id each time a ResultMessage
-                       arrives, so callers can persist it for future resumption.
+    The Claude session is created fresh on connect and discarded on disconnect.
+    Conversation history does not persist between connections.
     """
     await websocket.accept()
 
@@ -75,7 +68,6 @@ async def handle_chat(
         model=model,
         cwd=repo_path,
         permission_mode="bypassPermissions",
-        resume=resume_sdk_session_id,
     )
 
     stream_task: asyncio.Task | None = None
@@ -83,29 +75,22 @@ async def handle_chat(
     async def stream_response(client: sdk.ClaudeSDKClient) -> None:
         try:
             async for msg in client.receive_response():
-                print(f"[chat] msg type={type(msg).__name__}")
-                if isinstance(msg, sdk.ResultMessage) and msg.session_id and on_session_id:
-                    await on_session_id(msg.session_id)
+                print(f"[chat:{session_id}] msg type={type(msg).__name__}")
                 for frame in _format_sdk_message(msg):
                     await websocket.send_text(_msg(**frame))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"[chat] stream_response error: {type(exc).__name__}: {exc}")
+            print(f"[chat:{session_id}] stream error: {type(exc).__name__}: {exc}")
             try:
                 await websocket.send_text(_msg(type="error", message=str(exc)))
             except Exception:
                 pass
 
-    resumed = resume_sdk_session_id is not None
     try:
         async with sdk.ClaudeSDKClient(options=opts) as client:
-            print(f"[chat] session={session_id} connected (resumed={resumed})")
-            await websocket.send_text(_msg(
-                type="ready",
-                session_id=session_id,
-                resumed=resumed,
-            ))
+            print(f"[chat:{session_id}] connected")
+            await websocket.send_text(_msg(type="ready", session_id=session_id, resumed=False))
 
             while True:
                 raw = await websocket.receive_text()
@@ -133,7 +118,7 @@ async def handle_chat(
                         await client.query(text)
                         stream_task = asyncio.create_task(stream_response(client))
                     except Exception as exc:
-                        print(f"[chat] query error: {exc}")
+                        print(f"[chat:{session_id}] query error: {exc}")
                         await websocket.send_text(_msg(type="error", message=str(exc)))
 
                 elif kind == "interrupt":
@@ -165,7 +150,7 @@ async def handle_chat(
                         result = await on_spawn_worker(task)
                         await websocket.send_text(_msg(type="worker_created", **result))
                     except Exception as exc:
-                        print(f"[chat] spawn_worker error: {exc}")
+                        print(f"[chat:{session_id}] spawn_worker error: {exc}")
                         await websocket.send_text(_msg(type="worker_error", message=str(exc)))
 
                 else:
@@ -174,8 +159,9 @@ async def handle_chat(
     except WebSocketDisconnect:
         if stream_task and not stream_task.done():
             stream_task.cancel()
+        print(f"[chat:{session_id}] disconnected")
     except Exception as exc:
-        print(f"[chat] unhandled exception: {type(exc).__name__}: {exc}")
+        print(f"[chat:{session_id}] unhandled exception: {type(exc).__name__}: {exc}")
         try:
             await websocket.send_text(_msg(type="error", message=str(exc)))
             await websocket.close()

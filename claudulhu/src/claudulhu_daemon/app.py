@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from contextlib import asynccontextmanager
 from typing import Any
 
-import claude_agent_sdk as sdk
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from git import Repo
 
 from .chat import handle_chat
 from .monitor import GitMonitor
-from .sessions import SessionRecord, SessionStore
-from .shared_session import SharedChatSession
 from .workers import WorkerPool
 
 
@@ -31,12 +27,10 @@ class _State:
     repo_path: str
     monitor: GitMonitor
     workers: WorkerPool
-    sessions: SessionStore
     _stop: asyncio.Event
     _monitor_task: asyncio.Task
     model: str
-    max_turns: int
-    main_session: SharedChatSession
+    _main_chat_active: bool = False
 
 
 state = _State()
@@ -55,15 +49,14 @@ def _main_system_prompt() -> str:
     )
 
 
-def _worktree_system_prompt(worktree_path: str) -> str:
+def _worktree_system_prompt(branch: str, worktree_path: str) -> str:
     snap = state.monitor.snapshot
     branches = ", ".join(snap.branches) or "none"
-    active = [w.branch for w in state.workers.all()]
     return (
-        f"You are an AI assistant helping engineer the git repository at {state.repo_path}.\n"
-        f"You are working in the worktree at {worktree_path}.\n"
-        f"Current branches: {branches}\n"
-        f"Branches with active sessions: {', '.join(active) or 'none'}\n\n"
+        f"You are an AI assistant working on branch '{branch}' "
+        f"in the worktree at {worktree_path}.\n"
+        f"Main repository: {state.repo_path}\n"
+        f"All branches: {branches}\n\n"
         "You can inspect code, propose changes, make commits, and more. "
         "Be concise and precise."
     )
@@ -119,40 +112,19 @@ async def spawn_worker_from_task(task: str) -> dict:
 # Lifespan
 # ---------------------------------------------------------------------------
 
-_MAIN_SESSION_KEY = "__main__"
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start git monitor
     state._stop = asyncio.Event()
     state._monitor_task = asyncio.create_task(
         state.monitor.run(state._stop), name="git-monitor"
     )
-
-    # Start shared main chat session
-    record = state.sessions.load(_MAIN_SESSION_KEY)
-    resume_id = record.sdk_session_id if record else None
-    opts = sdk.ClaudeAgentOptions(
-        system_prompt=_main_system_prompt(),
-        model=state.model,
-        cwd=state.repo_path,
-        permission_mode="bypassPermissions",
-        resume=resume_id,
-    )
-    state.main_session = SharedChatSession(max_turns=state.max_turns)
-    await state.main_session.start(opts, resumed=resume_id is not None)
-
     yield
-
-    # Shutdown
     state._stop.set()
     state._monitor_task.cancel()
     try:
         await state._monitor_task
     except asyncio.CancelledError:
         pass
-    await state.main_session.stop()
     await state.workers.stop_all()
 
 
@@ -171,84 +143,31 @@ app.add_middleware(
 
 
 # ------------------------------------------------------------------
-# WebSocket  /chat  (shared main session — all clients see same conversation)
+# WebSocket  /chat  (ephemeral repo-level session)
 # ------------------------------------------------------------------
 
 @app.websocket("/chat")
 async def chat_ws(websocket: WebSocket):
-    await websocket.accept()
+    if state._main_chat_active:
+        await websocket.close(code=4009, reason="A main chat session is already active")
+        return
 
-    async def _persist(sdk_session_id: str) -> None:
-        import datetime
-        state.sessions.save(SessionRecord(
-            branch=_MAIN_SESSION_KEY,
-            sdk_session_id=sdk_session_id,
-            worktree_path=state.repo_path,
-            last_seen=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        ))
-
-    # Greet the new subscriber
-    await websocket.send_text(json.dumps({
-        "type": "ready",
-        "session_id": _MAIN_SESSION_KEY,
-        "resumed": state.main_session.resumed,
-    }))
-
-    state.main_session.subscribe(websocket)
-    print(f"[chat] subscriber joined (total={state.main_session.subscriber_count})")
+    state._main_chat_active = True
     try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                await state.main_session.send_to(
-                    websocket, type="error", message="invalid JSON"
-                )
-                continue
-
-            kind = data.get("type")
-
-            if kind == "message":
-                text = data.get("text", "").strip()
-                if text:
-                    await state.main_session.query(text, on_session_id=_persist)
-
-            elif kind == "interrupt":
-                await state.main_session.interrupt()
-
-            elif kind == "spawn_worker":
-                task = data.get("task", "").strip()
-                if not task:
-                    await state.main_session.send_to(
-                        websocket, type="error", message="spawn_worker requires a task"
-                    )
-                    continue
-                # spawning feedback is individual; worker_created is broadcast
-                await state.main_session.send_to(websocket, type="spawning", task=task)
-                try:
-                    result = await spawn_worker_from_task(task)
-                    await state.main_session.broadcast(type="worker_created", **result)
-                except Exception as exc:
-                    print(f"[chat] spawn_worker error: {exc}")
-                    await state.main_session.send_to(
-                        websocket, type="worker_error", message=str(exc)
-                    )
-
-            else:
-                await state.main_session.send_to(
-                    websocket, type="error", message=f"unknown type: {kind!r}"
-                )
-
-    except WebSocketDisconnect:
-        pass
+        await handle_chat(
+            websocket=websocket,
+            session_id="__main__",
+            repo_path=state.repo_path,
+            model=state.model,
+            system_prompt=_main_system_prompt(),
+            on_spawn_worker=spawn_worker_from_task,
+        )
     finally:
-        state.main_session.unsubscribe(websocket)
-        print(f"[chat] subscriber left (total={state.main_session.subscriber_count})")
+        state._main_chat_active = False
 
 
 # ------------------------------------------------------------------
-# WebSocket  /workers/{branch}
+# WebSocket  /workers/{branch}  (ephemeral per-branch session)
 # ------------------------------------------------------------------
 
 @app.websocket("/workers/{branch}")
@@ -267,18 +186,6 @@ async def worker_ws(websocket: WebSocket, branch: str):
         await websocket.close(code=4004, reason=f"No worktree for branch '{branch}'")
         return
 
-    record = state.sessions.load(branch)
-    resume_id = record.sdk_session_id if record else None
-
-    async def _persist_session_id(sdk_session_id: str) -> None:
-        import datetime
-        state.sessions.save(SessionRecord(
-            branch=branch,
-            sdk_session_id=sdk_session_id,
-            worktree_path=wt_path,
-            last_seen=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        ))
-
     state.workers.register(branch, wt_path, websocket)
     try:
         await handle_chat(
@@ -286,9 +193,7 @@ async def worker_ws(websocket: WebSocket, branch: str):
             session_id=branch,
             repo_path=wt_path,
             model=state.model,
-            system_prompt=_worktree_system_prompt(wt_path),
-            resume_sdk_session_id=resume_id,
-            on_session_id=_persist_session_id,
+            system_prompt=_worktree_system_prompt(branch, wt_path),
         )
     finally:
         state.workers.deregister(branch)
@@ -341,8 +246,5 @@ async def health() -> dict[str, Any]:
         "repo": state.repo_path,
         "branches": len(snap.branches),
         "active_sessions": len(state.workers.all()),
-        "shared_session_subscribers": state.main_session.subscriber_count,
-        "shared_session_turns": len(state.main_session._history),
-        "max_turns": state.max_turns,
         "model": state.model,
     }
