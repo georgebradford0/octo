@@ -187,7 +187,8 @@ interface ChatPaneProps {
   active: boolean
   canSpawnWorker: boolean
   repo: string
-  completionRoots: string[]   // dirs to search for @ completions (repo + worktrees)
+  completionRoots: string[]   // dirs to search for @ file completions
+  worktreeNames: string[]     // branch names with active worktrees
   initialMessage?: string
   onStatusChange: (status: ConnStatus) => void
   onWorkerCreated: (branch: string, worktreePath: string, task: string, workerSessionId: string) => void
@@ -200,6 +201,7 @@ function ChatPane({
   canSpawnWorker,
   repo,
   completionRoots,
+  worktreeNames,
   initialMessage,
   onStatusChange,
   onWorkerCreated,
@@ -507,16 +509,18 @@ function ChatPane({
     if (!compQuery) return
     const ta = inputRef.current
     const cursor = ta?.selectionStart ?? input.length
-    // Replace from the '@' up to cursor with '@' + completion
+    // Strip display prefix for worktree entries
+    const inserted = completion.startsWith('⎇ ') ? completion.slice(2) : completion
+    // Replace from the '@' up to cursor with '@' + inserted value
     const before = input.slice(0, compQuery.atPos + 1) // keep the '@'
     const after  = input.slice(cursor)
-    const suffix = addSpace && !completion.endsWith('/') ? ' ' : ''
-    const next   = before + completion + suffix + after
+    const suffix = addSpace && !inserted.endsWith('/') ? ' ' : ''
+    const next   = before + inserted + suffix + after
     setInput(next)
     setCompletions([])
     setCompQuery(null)
     // Move cursor to end of inserted completion (after space if added)
-    const newCursor = compQuery.atPos + 1 + completion.length + suffix.length
+    const newCursor = compQuery.atPos + 1 + inserted.length + suffix.length
     requestAnimationFrame(() => {
       ta?.setSelectionRange(newCursor, newCursor)
       ta?.focus()
@@ -535,15 +539,26 @@ function ChatPane({
 
     setCompQuery(query)
     setCompIndex(0)
+
+    // Worktree names match only when no directory prefix has been typed
+    const matchingWorktrees = query.dirPart === ''
+      ? worktreeNames
+          .filter(n => n.toLowerCase().startsWith(query.filePart.toLowerCase()))
+          .map(n => `⎇ ${n}`)
+      : []
+
     tauriInvoke<string[]>('get_completions', {
       roots: completionRoots.length ? completionRoots : [repo],
       dirPart: query.dirPart,
       filePart: query.filePart,
     }).then(items => {
-      setCompletions(items)
+      setCompletions([...matchingWorktrees, ...items])
       setCompIndex(0)
-    }).catch(() => setCompletions([]))
-  }, [completionRoots, repo])
+    }).catch(() => {
+      setCompletions(matchingWorktrees)
+      setCompIndex(0)
+    })
+  }, [completionRoots, worktreeNames, repo])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (completions.length > 0) {
@@ -780,6 +795,11 @@ export default function App() {
     return roots
   }, [repoPath, branches])
 
+  const worktreeNames = useMemo(
+    () => branches.filter(b => b.worktree).map(b => b.name),
+    [branches],
+  )
+
   const statusDotClass = (status: ConnStatus) => {
     if (status === 'ready' || status === 'resumed') return 'tab-dot--ready'
     if (status === 'connecting' || status === 'disconnected') return 'tab-dot--connecting'
@@ -886,6 +906,7 @@ export default function App() {
                   canSpawnWorker={tab.id === 'main'}
                   repo={repoPath ?? ''}
                   completionRoots={completionRoots}
+                  worktreeNames={worktreeNames}
                   initialMessage={tab.initialMessage}
                   onStatusChange={handleStatusChange(tab.id)}
                   onWorkerCreated={handleWorkerCreated}
