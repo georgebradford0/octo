@@ -234,6 +234,7 @@ function ChatPane({
   const wsRef               = useRef<WebSocket | null>(null)
   const inResponseRef       = useRef(false)
   const messagesEndRef      = useRef<HTMLDivElement>(null)
+  const scrollContainerRef  = useRef<HTMLDivElement>(null)
   const inputRef            = useRef<HTMLTextAreaElement>(null)
   const onStatusChangeRef   = useRef(onStatusChange)
   const onWorkerCreatedRef  = useRef(onWorkerCreated)
@@ -247,9 +248,13 @@ function ChatPane({
     onStatusChangeRef.current(s)
   }, [])
 
-  // Auto-scroll
+  // Auto-scroll — only when already at the bottom
   useEffect(() => {
-    if (active) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (!active) return
+    const el = scrollContainerRef.current
+    if (!el) return
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
+    if (atBottom) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, active])
 
   // Focus input when tab becomes active
@@ -642,7 +647,7 @@ function ChatPane({
 
   return (
     <div className="chat-pane">
-      <div className="messages-scroll">
+      <div className="messages-scroll" ref={scrollContainerRef}>
         <div className="messages-inner">
           {messages.length === 0 && (
             <div className="empty-state">
