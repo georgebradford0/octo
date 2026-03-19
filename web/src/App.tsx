@@ -359,7 +359,7 @@ function ChatPane({
       unlistenFn = await tauriListen<ServerFrame>(`claude-event-${sid}`, handleFrame)
     }
 
-    setup().catch(e => updateStatus('error'))
+    setup().catch(() => updateStatus('error'))
 
     return () => {
       mounted = false
@@ -367,18 +367,23 @@ function ChatPane({
     }
   }, [wsUrl, repo]) // stable — handleFrame/updateStatus are stable callbacks via useCallback
 
-  // Send initial message once Tauri session is ready
+  // Send initial message once session is ready (both Tauri and WebSocket modes)
   useEffect(() => {
-    if (!isTauri() || !initialMessage || initialMessageSent.current) return
+    if (!initialMessage || initialMessageSent.current) return
     if (status !== 'ready' && status !== 'resumed') return
-    const sid = tauriSessionId.current
-    if (!sid) return
     initialMessageSent.current = true
     setMessages(prev => [...prev, {
       id: uid(), role: 'user', streaming: false,
       blocks: [{ kind: 'text', text: initialMessage }],
     }])
-    tauriInvoke('chat_send', { sessionId: sid, text: initialMessage })
+    if (isTauri()) {
+      const sid = tauriSessionId.current
+      if (sid) tauriInvoke('chat_send', { sessionId: sid, text: initialMessage })
+    } else {
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'message', text: initialMessage }))
+    }
   }, [status, initialMessage])
 
   // ── WebSocket path (browser mode) ──────────────────────────────────────────
@@ -415,22 +420,6 @@ function ChatPane({
       }
 
       ws.onerror = () => updateStatus('error')
-    }
-
-    // Send initial message once WS is ready (browser mode)
-    const origOnMessage = (ws: WebSocket) => {
-      ws.addEventListener('message', ({ data }) => {
-        let frame: ServerFrame
-        try { frame = JSON.parse(data) } catch { return }
-        if ((frame.type === 'ready') && initialMessage && !initialMessageSent.current) {
-          initialMessageSent.current = true
-          setMessages(prev => [...prev, {
-            id: uid(), role: 'user', streaming: false,
-            blocks: [{ kind: 'text', text: initialMessage }],
-          }])
-          ws.send(JSON.stringify({ type: 'message', text: initialMessage }))
-        }
-      })
     }
 
     connect()
