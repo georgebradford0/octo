@@ -203,6 +203,43 @@ fn slug(text: &str) -> String {
     joined.chars().take(40).collect()
 }
 
+/// Ask Claude for a short, descriptive branch name for the given task.
+/// Falls back to slug() if the API call fails.
+async fn generate_branch_name(task: &str, api_key: &str) -> String {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 32,
+        "messages": [{
+            "role": "user",
+            "content": format!(
+                "Generate a short git branch name (2-4 words, lowercase, hyphenated, no punctuation) \
+                 for this task: {task}\n\nReply with only the branch name, nothing else."
+            )
+        }]
+    });
+
+    let result = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    let name: String = async {
+        let resp = result.ok()?;
+        if !resp.status().is_success() { return None; }
+        let v: serde_json::Value = resp.json().await.ok()?;
+        let text = v["content"][0]["text"].as_str()?.trim().to_string();
+        Some(text)
+    }.await.unwrap_or_default();
+
+    let cleaned = slug(&name);
+    if cleaned.is_empty() { slug(task) } else { cleaned }
+}
+
 fn create_worktree(repo_path: &str, branch: &str) -> Result<String, String> {
     let repo_name = PathBuf::from(repo_path)
         .file_name()
@@ -912,8 +949,9 @@ async fn spawn_worker(
 ) -> Result<(), String> {
     emit(&app, &session_id, ChatEvent::Spawning { task: task.clone() });
 
-    // Generate branch name from task
-    let branch = slug(&task);
+    // Generate branch name via Claude (Haiku, fast + cheap), fall back to slug
+    let api_key = resolve_api_key().unwrap_or_default();
+    let branch = generate_branch_name(&task, &api_key).await;
     let branch = if branch.is_empty() { Uuid::new_v4().to_string()[..8].to_string() } else { branch };
 
     // Create git worktree
