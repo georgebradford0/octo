@@ -7,6 +7,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use tokio::sync::oneshot;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,7 @@ struct Session {
     system_prompt: String,
     cwd: String,
     aborted: Arc<AtomicBool>,
+    pending_question: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
 }
 
 struct AppState {
@@ -116,6 +118,9 @@ enum ChatEvent {
         message: String,
     },
     Interrupted,
+    Question {
+        question: String,
+    },
     Spawning {
         task: String,
     },
@@ -367,7 +372,14 @@ fn resolve_path(p: &str, cwd: &str) -> PathBuf {
     if p.starts_with('/') { PathBuf::from(p) } else { PathBuf::from(cwd).join(p) }
 }
 
-async fn execute_tool(name: &str, input: &serde_json::Value, cwd: &str) -> String {
+async fn execute_tool(
+    name: &str,
+    input: &serde_json::Value,
+    cwd: &str,
+    app: &AppHandle,
+    session_id: &str,
+    pending_question: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+) -> String {
     match name {
         "bash" => {
             let cmd = input["command"].as_str().unwrap_or("");
@@ -473,6 +485,22 @@ async fn execute_tool(name: &str, input: &serde_json::Value, cwd: &str) -> Strin
             {
                 Ok(o)  => String::from_utf8_lossy(&o.stdout).to_string(),
                 Err(e) => format!("error: {e}"),
+            }
+        }
+        "ask_user" => {
+            let question = input["question"].as_str().unwrap_or("").to_string();
+            if question.is_empty() {
+                return "error: question is required".to_string();
+            }
+            let (tx, rx) = oneshot::channel::<String>();
+            {
+                let mut slot = pending_question.lock().await;
+                *slot = Some(tx);
+            }
+            emit(app, session_id, ChatEvent::Question { question });
+            match rx.await {
+                Ok(answer) => answer,
+                Err(_) => "error: question was cancelled".to_string(),
             }
         }
         "task_create" => {
@@ -741,6 +769,17 @@ fn tool_definitions() -> Vec<AnthropicTool> {
                     "path":    { "type": "string", "description": "Directory or file to search (default: .)" }
                 },
                 "required": ["pattern"]
+            }),
+        },
+        AnthropicTool {
+            name: "ask_user".to_string(),
+            description: "Pause and ask the user a clarifying question. Use when a task is ambiguous and proceeding incorrectly would waste significant effort. Returns the user's answer as a string.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "The question to ask the user" }
+                },
+                "required": ["question"]
             }),
         },
         AnthropicTool {
@@ -1039,9 +1078,9 @@ async fn run_agentic_loop(
     let mut total_output = 0u64;
 
     loop {
-        let (messages, system, cwd, aborted) = {
+        let (messages, system, cwd, aborted, pending_question) = {
             let s = session.lock().unwrap();
-            (s.messages.clone(), s.system_prompt.clone(), s.cwd.clone(), s.aborted.clone())
+            (s.messages.clone(), s.system_prompt.clone(), s.cwd.clone(), s.aborted.clone(), s.pending_question.clone())
         };
 
         if aborted.load(Ordering::Relaxed) {
@@ -1098,7 +1137,7 @@ async fn run_agentic_loop(
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
-                        let result = execute_tool(name, input, &cwd).await;
+                        let result = execute_tool(name, input, &cwd, &app, &session_id, pending_question.clone()).await;
                         emit(&app, &session_id, ChatEvent::ToolResult {
                             tool_use_id: id.clone(),
                             content: serde_json::Value::String(result.clone()),
@@ -1247,6 +1286,7 @@ fn chat_new_session(
         system_prompt,
         cwd,
         aborted: Arc::new(AtomicBool::new(false)),
+        pending_question: Arc::new(tokio::sync::Mutex::new(None)),
     }));
 
     state.sessions.lock().unwrap().insert(session_id.clone(), session);
@@ -1289,6 +1329,24 @@ async fn chat_send(
 
     run_agentic_loop(app, session, session_id, api_key, model).await;
     Ok(())
+}
+
+#[tauri::command]
+async fn chat_answer(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    answer: String,
+) -> Result<(), String> {
+    let session = {
+        state.sessions.lock().unwrap().get(&session_id).cloned()
+    };
+    let session = session.ok_or_else(|| "session not found".to_string())?;
+    let pending_question = session.lock().unwrap().pending_question.clone();
+    let mut slot = pending_question.lock().await;
+    match slot.take() {
+        Some(tx) => { tx.send(answer).ok(); Ok(()) }
+        None => Err("no pending question".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -1343,6 +1401,7 @@ async fn spawn_worker(
         system_prompt,
         cwd: worktree_path.clone(),
         aborted: Arc::new(AtomicBool::new(false)),
+        pending_question: Arc::new(tokio::sync::Mutex::new(None)),
     }));
 
     state
@@ -1399,6 +1458,7 @@ pub fn run() {
             get_completions,
             chat_new_session,
             chat_send,
+            chat_answer,
             chat_interrupt,
             spawn_worker,
         ])
