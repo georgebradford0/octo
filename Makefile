@@ -15,7 +15,7 @@ web:
 
 # Copy claudulhud binary into Tauri sidecar directory and build the desktop app
 desktop: daemon web copy-sidecar
-	cd web && npm run tauri:build
+	cd web && npm run tauri:build -- --bundles app
 
 copy-sidecar:
 	cp $(shell which claudulhud) web/src-tauri/binaries/claudulhud-$(TARGET)
