@@ -38,6 +38,9 @@ def _format_sdk_message(msg: sdk.Message) -> list[dict]:
             "result": msg.result,
         })
     elif isinstance(msg, sdk.SystemMessage):
+        # Skip init frames — they contain internal Claude Code session metadata
+        if msg.data.get("subtype") == "init":
+            return frames
         import json as _json
         text = msg.data.get("message") or _json.dumps(msg.data)
         frames.append({"type": "system", "text": text})
