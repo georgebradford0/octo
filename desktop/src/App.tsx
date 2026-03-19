@@ -34,6 +34,7 @@ type ServerFrame =
   | { type: 'result';               cost_usd: number; turns: number; session_id: string; result: string | null }
   | { type: 'error';                message: string }
   | { type: 'interrupted' }
+  | { type: 'question';             question: string }
   | { type: 'system';               text: string }
   | { type: 'spawning';             task: string }
   | { type: 'worker_created';       branch: string; worktree_path: string; task: string }
@@ -47,6 +48,7 @@ type Block =
   | { kind: 'result';         cost_usd: number; turns: number }
   | { kind: 'error';          message: string }
   | { kind: 'interrupted' }
+  | { kind: 'question';       question: string }
   | { kind: 'system';         text: string }
   | { kind: 'spawning';       task: string }
   | { kind: 'worker_created'; branch: string; worktree_path: string }
@@ -141,6 +143,13 @@ function BlockRenderer({ block }: { block: Block }) {
       return <div className="error-block">✗ {block.message}</div>
     case 'interrupted':
       return <div className="interrupted-block">— interrupted</div>
+    case 'question':
+      return (
+        <div className="question-block">
+          <span className="question-icon">?</span>
+          <span className="question-text">{block.question}</span>
+        </div>
+      )
     case 'system':
       return <div className="system-block">{block.text}</div>
     case 'spawning':
@@ -209,11 +218,12 @@ function ChatPane({
   onStatusChange,
   onWorkerCreated,
 }: ChatPaneProps) {
-  const [messages,     setMessages]     = useState<ChatMessage[]>([])
-  const [status,       setStatus]       = useState<ConnStatus>('connecting')
-  const [isStreaming,  setIsStreaming]   = useState(false)
-  const [isPending,    setIsPending]    = useState(false)  // waiting for API (no text yet)
-  const [input,        setInput]        = useState('')
+  const [messages,        setMessages]        = useState<ChatMessage[]>([])
+  const [status,          setStatus]          = useState<ConnStatus>('connecting')
+  const [isStreaming,     setIsStreaming]      = useState(false)
+  const [isPending,       setIsPending]       = useState(false)  // waiting for API (no text yet)
+  const [pendingQuestion, setPendingQuestion] = useState(false)  // agent is waiting for user answer
+  const [input,           setInput]           = useState('')
   const [completions,  setCompletions]  = useState<string[]>([])
   const [compIndex,    setCompIndex]    = useState(0)
   const [compQuery,    setCompQuery]    = useState<{ atPos: number; dirPart: string; filePart: string } | null>(null)
@@ -285,6 +295,7 @@ function ChatPane({
     inResponseRef.current = false
     setIsPending(false)
     setIsStreaming(false)
+    setPendingQuestion(false)
     setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
   }, [])
 
@@ -321,6 +332,16 @@ function ChatPane({
       case 'interrupted':
         appendBlock({ kind: 'interrupted' })
         completeResponse()
+        break
+      case 'question':
+        ensureAssistantMsg()
+        appendBlock({ kind: 'question', question: frame.question })
+        // Stop streaming cursor — waiting for user to type an answer
+        inResponseRef.current = false
+        setIsStreaming(false)
+        setIsPending(false)
+        setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
+        setPendingQuestion(true)
         break
       case 'system':
         setMessages(prev => [...prev, {
@@ -451,7 +472,24 @@ function ChatPane({
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
-    if (!text || isStreaming) return
+    if (!text) return
+    if (isStreaming && !pendingQuestion) return
+
+    if (pendingQuestion) {
+      setMessages(prev => [...prev, {
+        id: uid(), role: 'user', streaming: false,
+        blocks: [{ kind: 'text', text }],
+      }])
+      if (isTauri()) {
+        const sid = tauriSessionId.current
+        if (sid) tauriInvoke('chat_answer', { sessionId: sid, answer: text })
+      }
+      setPendingQuestion(false)
+      setIsPending(true)
+      setInput('')
+      inputRef.current?.focus()
+      return
+    }
 
     if (canSpawnWorker && text.startsWith('&')) {
       const task = text.slice(1).trim()
@@ -592,10 +630,15 @@ function ChatPane({
     }
   }, [sendMessage, completions, compIndex, acceptCompletion])
 
-  const canSend = !isStreaming && !!input.trim() && (status === 'ready' || status === 'resumed')
-  const placeholder = canSpawnWorker
-    ? 'message… (& task to spawn a worktree)'
-    : 'message…'
+  const canSend = !!input.trim() && (
+    pendingQuestion ||
+    (!isStreaming && (status === 'ready' || status === 'resumed'))
+  )
+  const placeholder = pendingQuestion
+    ? 'your answer…'
+    : canSpawnWorker
+      ? 'message… (& task to spawn a worktree)'
+      : 'message…'
 
   return (
     <div className="chat-pane">
@@ -649,7 +692,7 @@ function ChatPane({
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
             rows={1}
-            disabled={status === 'connecting' || status === 'disconnected'}
+            disabled={!pendingQuestion && (status === 'connecting' || status === 'disconnected')}
           />
           <div className="input-actions">
             {isStreaming
