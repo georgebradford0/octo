@@ -248,13 +248,26 @@ function ChatPane({
     onStatusChangeRef.current(s)
   }, [])
 
-  // Auto-scroll — only when already at the bottom
+  // Track whether user has scrolled up
+  const userScrolledUp = useRef(false)
+
   useEffect(() => {
-    if (!active) return
     const el = scrollContainerRef.current
     if (!el) return
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
-    if (atBottom) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const onScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+      if (atBottom) userScrolledUp.current = false
+      else userScrolledUp.current = true
+    }
+    el.addEventListener('scroll', onScroll)
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // Auto-scroll — only when user hasn't scrolled up
+  useEffect(() => {
+    if (!active) return
+    if (userScrolledUp.current) return
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, active])
 
   // Focus input when tab becomes active
