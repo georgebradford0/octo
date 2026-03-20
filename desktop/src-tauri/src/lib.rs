@@ -1246,20 +1246,35 @@ fn set_repo(repo: String) {
     write_config(&cfg);
 }
 
+/// Parse ANTHROPIC_API_KEY from shell dotfiles, for GUI apps that don't inherit env vars.
+fn read_key_from_shell_files() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let candidates = [".zshrc", ".zprofile", ".bash_profile", ".bashrc", ".profile"];
+    for file in &candidates {
+        let path = format!("{}/{}", home, file);
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                // Match: export ANTHROPIC_API_KEY=value or ANTHROPIC_API_KEY=value
+                let rest = line
+                    .strip_prefix("export ANTHROPIC_API_KEY=")
+                    .or_else(|| line.strip_prefix("ANTHROPIC_API_KEY="))?;
+                let val = rest.trim_matches('"').trim_matches('\'').trim().to_string();
+                if !val.is_empty() {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Resolve API key: environment variable takes precedence over stored config,
 /// falling back to a login shell lookup (for GUI apps launched outside a terminal).
 fn resolve_api_key() -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
         .or_else(|| read_config().api_key)
-        .or_else(|| {
-            let output = std::process::Command::new("zsh")
-                .args(["-l", "-c", "source ~/.zshrc 2>/dev/null; echo $ANTHROPIC_API_KEY"])
-                .output()
-                .ok()?;
-            let val = String::from_utf8(output.stdout).ok()?;
-            let val = val.trim().to_string();
-            if val.is_empty() { None } else { Some(val) }
-        })
+        .or_else(|| read_key_from_shell_files())
 }
 
 #[tauri::command]
