@@ -1255,13 +1255,14 @@ fn read_key_from_shell_files() -> Option<String> {
         if let Ok(contents) = std::fs::read_to_string(&path) {
             for line in contents.lines() {
                 let line = line.trim();
-                // Match: export ANTHROPIC_API_KEY=value or ANTHROPIC_API_KEY=value
                 let rest = line
                     .strip_prefix("export ANTHROPIC_API_KEY=")
-                    .or_else(|| line.strip_prefix("ANTHROPIC_API_KEY="))?;
-                let val = rest.trim_matches('"').trim_matches('\'').trim().to_string();
-                if !val.is_empty() {
-                    return Some(val);
+                    .or_else(|| line.strip_prefix("ANTHROPIC_API_KEY="));
+                if let Some(rest) = rest {
+                    let val = rest.trim_matches('"').trim_matches('\'').trim().to_string();
+                    if !val.is_empty() {
+                        return Some(val);
+                    }
                 }
             }
         }
@@ -1270,7 +1271,7 @@ fn read_key_from_shell_files() -> Option<String> {
 }
 
 /// Resolve API key: environment variable takes precedence over stored config,
-/// falling back to a login shell lookup (for GUI apps launched outside a terminal).
+/// falling back to dotfile parsing (for GUI apps launched outside a terminal).
 fn resolve_api_key() -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
         .or_else(|| read_config().api_key)
