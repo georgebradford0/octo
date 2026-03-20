@@ -835,6 +835,31 @@ export default function App() {
     setActiveTab(prev => prev === id ? 'main' : prev)
   }, [])
 
+  // Alt+` cycles tabs, Alt+1-9 jumps to tab by index
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey) return
+      setTabs(prev => {
+        if (e.key === '`') {
+          e.preventDefault()
+          setActiveTab(cur => {
+            const idx = prev.findIndex(t => t.id === cur)
+            return prev[(idx + 1) % prev.length].id
+          })
+        } else {
+          const n = parseInt(e.key)
+          if (!isNaN(n) && n >= 1 && n <= prev.length) {
+            e.preventDefault()
+            setActiveTab(prev[n - 1].id)
+          }
+        }
+        return prev
+      })
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   const handleStatusChange = useCallback((id: string) => (status: ConnStatus) => {
     setTabStatuses(prev => ({ ...prev, [id]: status }))
   }, [])
