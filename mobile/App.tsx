@@ -1,5 +1,4 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { StatusBar } from 'expo-status-bar'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FlatList,
@@ -7,14 +6,15 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from 'react-native'
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -62,7 +62,6 @@ interface Tab {
   id: string
   label: string
   wsUrl: string
-  worktreePath?: string
   initialMessage?: string
 }
 
@@ -73,31 +72,28 @@ type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 let _id = 0
 const uid = () => `m${++_id}`
 
-// ── Colours & theme ────────────────────────────────────────────────────────────
+// ── Colours ────────────────────────────────────────────────────────────────────
 
 const C = {
-  bg:           '#0f0f0f',
-  surface:      '#1a1a1a',
-  surfaceAlt:   '#222222',
-  border:       '#2a2a2a',
-  borderLight:  '#333333',
-  accent:       '#4f8ef7',
-  accentDim:    '#2a4a80',
-  green:        '#4caf7d',
-  yellow:       '#e8b84b',
-  red:          '#e05a5a',
-  textPrimary:  '#e8e8e8',
-  textSecondary:'#888888',
-  textMuted:    '#555555',
-  userBubble:   '#1e3a5f',
-  userBorder:   '#2a5090',
-  asstBubble:   '#1a1a1a',
-  asstBorder:   '#2a2a2a',
-  infoBubble:   '#161616',
-  toolBg:       '#141414',
-  toolBorder:   '#2a2a2a',
-  inputBg:      '#1a1a1a',
-  inputBorder:  '#333333',
+  bg:            '#0f0f0f',
+  surface:       '#1a1a1a',
+  border:        '#2a2a2a',
+  borderLight:   '#333333',
+  accent:        '#4f8ef7',
+  green:         '#4caf7d',
+  yellow:        '#e8b84b',
+  red:           '#e05a5a',
+  textPrimary:   '#e8e8e8',
+  textSecondary: '#888888',
+  textMuted:     '#555555',
+  userBubble:    '#1e3a5f',
+  userBorder:    '#2a5090',
+  asstBubble:    '#1a1a1a',
+  asstBorder:    '#2a2a2a',
+  infoBubble:    '#141414',
+  toolBg:        '#111111',
+  inputBg:       '#1a1a1a',
+  inputBorder:   '#333333',
 }
 
 // ── ToolUseBlock ──────────────────────────────────────────────────────────────
@@ -112,8 +108,8 @@ function ToolUseBlock({ tool, input }: { tool: string; input: Record<string, unk
         <Text style={s.toolToggle}>{open ? '▲' : '▼'}</Text>
       </TouchableOpacity>
       {open && (
-        <ScrollView horizontal style={s.toolBody}>
-          <Text style={s.toolBodyText}>{JSON.stringify(input, null, 2)}</Text>
+        <ScrollView horizontal nestedScrollEnabled style={s.toolBody}>
+          <Text style={s.monoText}>{JSON.stringify(input, null, 2)}</Text>
         </ScrollView>
       )}
     </View>
@@ -125,19 +121,19 @@ function ToolUseBlock({ tool, input }: { tool: string; input: Record<string, unk
 function ToolResultBlock({ content }: { content: unknown }) {
   const [open, setOpen] = useState(false)
   const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2)
-  const preview = text.slice(0, 55).replace(/\n/g, ' ')
+  const preview = text.slice(0, 60).replace(/\n/g, ' ')
   return (
-    <View style={s.toolResultBlock}>
-      <TouchableOpacity style={s.toolResultHeader} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
+    <View style={s.toolBlock}>
+      <TouchableOpacity style={s.toolHeader} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
         <Text style={s.resultIcon}>↩</Text>
         <Text style={s.resultPreview} numberOfLines={1}>
-          {preview}{text.length > 55 ? '…' : ''}
+          {preview}{text.length > 60 ? '…' : ''}
         </Text>
         <Text style={s.toolToggle}>{open ? '▲' : '▼'}</Text>
       </TouchableOpacity>
       {open && (
-        <ScrollView horizontal style={s.toolBody}>
-          <Text style={s.toolBodyText}>{text}</Text>
+        <ScrollView horizontal nestedScrollEnabled style={s.toolBody}>
+          <Text style={s.monoText}>{text}</Text>
         </ScrollView>
       )}
     </View>
@@ -157,58 +153,55 @@ function BlockRenderer({ block }: { block: Block }) {
     case 'result':
       return (
         <View style={s.resultFooter}>
-          <Text style={s.resultFooterText}>✓ {block.turns} turn{block.turns !== 1 ? 's' : ''}</Text>
-          <Text style={s.resultFooterText}>${block.cost_usd.toFixed(4)}</Text>
+          <Text style={s.resultMeta}>✓ {block.turns} turn{block.turns !== 1 ? 's' : ''}</Text>
+          <Text style={s.resultMeta}>${block.cost_usd.toFixed(4)}</Text>
         </View>
       )
     case 'error':
-      return <Text style={s.errorBlock}>✗ {block.message}</Text>
+      return <Text style={s.errorText}>✗ {block.message}</Text>
     case 'interrupted':
-      return <Text style={s.interruptedBlock}>— interrupted</Text>
+      return <Text style={s.mutedText}>— interrupted</Text>
     case 'question':
       return (
-        <View style={s.questionBlock}>
-          <Text style={s.questionIcon}>?</Text>
+        <View style={s.questionRow}>
+          <Text style={s.questionMark}>?</Text>
           <Text style={s.questionText}>{block.question}</Text>
         </View>
       )
     case 'system':
-      return <Text style={s.systemBlock}>{block.text}</Text>
+      return <Text style={s.systemText}>{block.text}</Text>
     case 'worker_created':
       return (
-        <View style={s.workerCreatedBlock}>
-          <Text style={s.workerCreatedIcon}>⎇</Text>
-          <View>
-            <Text style={s.workerCreatedBranch}>{block.branch}</Text>
-            <Text style={s.workerCreatedPath}>{block.worktree_path}</Text>
+        <View style={s.workerRow}>
+          <Text style={s.workerIcon}>⎇</Text>
+          <View style={s.workerInfo}>
+            <Text style={s.workerBranch}>{block.branch}</Text>
+            <Text style={s.workerPath} numberOfLines={1}>{block.worktree_path}</Text>
           </View>
         </View>
       )
     case 'worker_error':
-      return <Text style={s.errorBlock}>✗ {block.message}</Text>
+      return <Text style={s.errorText}>✗ {block.message}</Text>
   }
 }
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
 function MessageBubble({ message }: { message: ChatMessage }) {
-  const bubbleStyle = message.role === 'user'
-    ? s.userBubble
-    : message.role === 'info'
-      ? s.infoBubble
-      : s.asstBubble
-
+  const isUser = message.role === 'user'
+  const isInfo = message.role === 'info'
   return (
-    <View style={[s.messagePadding, message.role === 'user' && s.messageRight]}>
-      {message.role !== 'info' && (
-        <Text style={[s.messageLabel, message.role === 'user' && s.messageLabelUser]}>
-          {message.role === 'user' ? 'you' : 'claude'}
+    <View style={[s.messageWrap, isUser && s.messageWrapRight]}>
+      {!isInfo && (
+        <Text style={[s.messageLabel, isUser && s.messageLabelRight]}>
+          {isUser ? 'you' : 'claude'}
         </Text>
       )}
-      <View style={[s.bubble, bubbleStyle]}>
-        {message.blocks.map((block, i) => (
-          <BlockRenderer key={i} block={block} />
-        ))}
+      <View style={[
+        s.bubble,
+        isUser ? s.bubbleUser : isInfo ? s.bubbleInfo : s.bubbleAsst,
+      ]}>
+        {message.blocks.map((block, i) => <BlockRenderer key={i} block={block} />)}
         {message.streaming && <Text style={s.cursor}>▋</Text>}
       </View>
     </View>
@@ -218,15 +211,14 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
 interface ChatPaneProps {
-  wsUrl: string
-  active: boolean
-  canSpawnWorker: boolean
-  onStatusChange: (status: ConnStatus) => void
+  wsUrl:           string
+  canSpawnWorker:  boolean
+  onStatusChange:  (s: ConnStatus) => void
   onWorkerCreated: (branch: string, worktreePath: string, task: string) => void
   initialMessage?: string
 }
 
-function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreated, initialMessage }: ChatPaneProps) {
+function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, initialMessage }: ChatPaneProps) {
   const [messages,        setMessages]        = useState<ChatMessage[]>([])
   const [status,          setStatus]          = useState<ConnStatus>('connecting')
   const [isStreaming,     setIsStreaming]      = useState(false)
@@ -261,13 +253,12 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
   const appendBlock = useCallback((block: Block) => {
     setMessages(prev => {
       const last = prev[prev.length - 1]
-      if (!last?.streaming) return prev
+      if (!last?.streaming) { return prev }
       if (block.kind === 'text') {
         const tail = last.blocks[last.blocks.length - 1]
         if (tail?.kind === 'text') {
           return prev.map((m, i) => i < prev.length - 1 ? m : {
-            ...m,
-            blocks: [...m.blocks.slice(0, -1), { kind: 'text' as const, text: tail.text + block.text }],
+            ...m, blocks: [...m.blocks.slice(0, -1), { kind: 'text' as const, text: tail.text + block.text }],
           })
         }
       }
@@ -289,12 +280,10 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
         updateStatus(frame.resumed ? 'resumed' : 'ready')
         break
       case 'text':
-        ensureAssistantMsg()
-        appendBlock({ kind: 'text', text: frame.text })
+        ensureAssistantMsg(); appendBlock({ kind: 'text', text: frame.text })
         break
       case 'tool_use':
-        ensureAssistantMsg()
-        appendBlock({ kind: 'tool_use', tool: frame.tool, input: frame.input })
+        ensureAssistantMsg(); appendBlock({ kind: 'tool_use', tool: frame.tool, input: frame.input })
         break
       case 'tool_result':
         appendBlock({ kind: 'tool_result', content: frame.content })
@@ -308,13 +297,10 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
         completeResponse()
         break
       case 'error':
-        ensureAssistantMsg()
-        appendBlock({ kind: 'error', message: frame.message })
-        completeResponse()
+        ensureAssistantMsg(); appendBlock({ kind: 'error', message: frame.message }); completeResponse()
         break
       case 'interrupted':
-        appendBlock({ kind: 'interrupted' })
-        completeResponse()
+        appendBlock({ kind: 'interrupted' }); completeResponse()
         break
       case 'question':
         ensureAssistantMsg()
@@ -358,19 +344,15 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
     let cancelled = false
 
     const connect = () => {
-      if (cancelled) return
+      if (cancelled) { return }
       updateStatus('connecting')
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onmessage = ({ data }) => {
         let frame: ServerFrame
-        try { frame = JSON.parse(data) } catch { return }
+        try { frame = JSON.parse(data as string) } catch { return }
         handleFrame(frame)
-      }
-
-      ws.onopen = () => {
-        // status set by 'ready' frame from server
       }
 
       ws.onclose = () => {
@@ -378,9 +360,7 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
           if (inResponseRef.current) {
             inResponseRef.current = false
             setIsStreaming(false)
-            setMessages(prev => prev.map((m, i) =>
-              i < prev.length - 1 ? m : { ...m, streaming: false }
-            ))
+            setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
           }
           updateStatus('disconnected')
           setTimeout(connect, 3000)
@@ -399,8 +379,8 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
 
   // Send initial message once ready
   useEffect(() => {
-    if (!initialMessage || initialMessageSent.current) return
-    if (status !== 'ready' && status !== 'resumed') return
+    if (!initialMessage || initialMessageSent.current) { return }
+    if (status !== 'ready' && status !== 'resumed') { return }
     initialMessageSent.current = true
     setMessages(prev => [...prev, {
       id: uid(), role: 'user', streaming: false,
@@ -411,14 +391,11 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
-    if (!text) return
-    if (isStreaming && !pendingQuestion) return
+    if (!text) { return }
+    if (isStreaming && !pendingQuestion) { return }
 
     if (pendingQuestion) {
-      setMessages(prev => [...prev, {
-        id: uid(), role: 'user', streaming: false,
-        blocks: [{ kind: 'text', text }],
-      }])
+      setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'text', text }] }])
       wsRef.current?.send(JSON.stringify({ type: 'answer', answer: text }))
       setPendingQuestion(false)
       setIsPending(true)
@@ -428,17 +405,11 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
 
     if (canSpawnWorker && text.startsWith('&')) {
       const task = text.slice(1).trim()
-      if (!task) return
-      setMessages(prev => [...prev, {
-        id: uid(), role: 'user', streaming: false,
-        blocks: [{ kind: 'system', text: `spawning: ${task}` }],
-      }])
+      if (!task) { return }
+      setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'system', text: `spawning: ${task}` }] }])
       wsRef.current?.send(JSON.stringify({ type: 'spawn_worker', task }))
     } else {
-      setMessages(prev => [...prev, {
-        id: uid(), role: 'user', streaming: false,
-        blocks: [{ kind: 'text', text }],
-      }])
+      setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'text', text }] }])
       wsRef.current?.send(JSON.stringify({ type: 'message', text }))
     }
 
@@ -451,69 +422,61 @@ function ChatPane({ wsUrl, active, canSpawnWorker, onStatusChange, onWorkerCreat
   }, [])
 
   const canSend = !!input.trim() && (pendingQuestion || (!isStreaming && (status === 'ready' || status === 'resumed')))
-  const inputPlaceholder = pendingQuestion
-    ? 'your answer…'
-    : canSpawnWorker
-      ? 'message… (& task to spawn worktree)'
-      : 'message…'
+  const placeholder = pendingQuestion ? 'your answer…' : canSpawnWorker ? 'message… (& task to spawn worktree)' : 'message…'
 
   return (
-    <View style={s.chatPane}>
+    <View style={s.pane}>
       <ScrollView
         ref={scrollRef}
-        style={s.messageScroll}
-        contentContainerStyle={s.messageScrollContent}
+        style={s.messageList}
+        contentContainerStyle={s.messageListContent}
         onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        keyboardDismissMode="interactive"
       >
         {messages.length === 0 && (
           <Text style={s.emptyState}>
-            {status === 'connecting' || status === 'disconnected'
-              ? 'connecting to server…'
-              : 'send a message to begin'}
+            {status === 'connecting' || status === 'disconnected' ? 'connecting to server…' : 'send a message to begin'}
           </Text>
         )}
         {messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}
         {isPending && (
-          <View style={[s.messagePadding]}>
+          <View style={s.messageWrap}>
             <Text style={s.messageLabel}>claude</Text>
-            <View style={[s.bubble, s.asstBubble]}>
+            <View style={[s.bubble, s.bubbleAsst]}>
               <Text style={s.thinkingDots}>• • •</Text>
             </View>
           </View>
         )}
       </ScrollView>
 
-      <View style={s.inputArea}>
+      <View style={s.inputRow}>
         <TextInput
-          style={s.textInput}
+          style={s.input}
           value={input}
           onChangeText={setInput}
-          placeholder={inputPlaceholder}
+          placeholder={placeholder}
           placeholderTextColor={C.textMuted}
           multiline
           maxLength={8000}
           editable={pendingQuestion || status === 'ready' || status === 'resumed'}
-          returnKeyType="default"
         />
-        <View style={s.inputButtons}>
-          {isStreaming ? (
-            <TouchableOpacity style={s.btnInterrupt} onPress={sendInterrupt}>
-              <Text style={s.btnInterruptText}>stop</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity style={[s.btnSend, !canSend && s.btnDisabled]} onPress={sendMessage} disabled={!canSend}>
-              <Text style={[s.btnSendText, !canSend && s.btnDisabledText]}>▶</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+        {isStreaming ? (
+          <TouchableOpacity style={s.btnStop} onPress={sendInterrupt}>
+            <Text style={s.btnStopText}>■</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={[s.btnSend, !canSend && s.btnDisabled]} onPress={sendMessage} disabled={!canSend}>
+            <Text style={s.btnSendText}>▶</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   )
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+// ── Root App ──────────────────────────────────────────────────────────────────
 
-export default function App() {
+function AppInner() {
   const [serverUrl,    setServerUrl]    = useState('')
   const [urlInput,     setUrlInput]     = useState('')
   const [isSetup,      setIsSetup]      = useState(false)
@@ -523,7 +486,7 @@ export default function App() {
   const [branches,     setBranches]     = useState<Branch[]>([])
   const [showBranches, setShowBranches] = useState(false)
 
-  // Load saved server URL
+  // Load saved server URL on mount
   useEffect(() => {
     AsyncStorage.getItem('serverUrl').then(url => {
       if (url) {
@@ -534,9 +497,9 @@ export default function App() {
     })
   }, [])
 
-  // Initialise tab list when serverUrl is set
+  // Init tabs when server URL is set
   useEffect(() => {
-    if (!serverUrl) return
+    if (!serverUrl) { return }
     const wsBase = serverUrl.startsWith('ws') ? serverUrl : `ws://${serverUrl}`
     setTabs([{ id: 'main', label: 'main', wsUrl: `${wsBase}/chat` }])
     setActiveTab('main')
@@ -545,28 +508,28 @@ export default function App() {
 
   // Poll branches
   useEffect(() => {
-    if (!serverUrl) return
-    const httpBase = serverUrl.startsWith('http') ? serverUrl : `http://${serverUrl}`
-    const fetch_ = () => {
+    if (!serverUrl) { return }
+    const httpBase = serverUrl.replace(/^ws/, 'http')
+    const poll = () => {
       fetch(`${httpBase}/branches`)
         .then(r => r.ok ? r.json() : null)
-        .then(d => d && setBranches(d))
+        .then((d: Branch[] | null) => d && setBranches(d))
         .catch(() => {})
     }
-    fetch_()
-    const t = setInterval(fetch_, 10_000)
+    poll()
+    const t = setInterval(poll, 10_000)
     return () => clearInterval(t)
   }, [serverUrl])
 
-  // Auto-close tabs whose worktree is gone
+  // Auto-close tabs whose worktree was removed
   useEffect(() => {
     setTabs(prev => {
       const toClose = prev.filter(t => {
-        if (t.id === 'main') return false
+        if (t.id === 'main') { return false }
         const b = branches.find(b => b.name === t.id)
         return !b || !b.worktree
       })
-      if (toClose.length === 0) return prev
+      if (toClose.length === 0) { return prev }
       const closeIds = new Set(toClose.map(t => t.id))
       setTabStatuses(s => { const n = { ...s }; closeIds.forEach(id => delete n[id]); return n })
       setActiveTab(cur => closeIds.has(cur) ? 'main' : cur)
@@ -574,32 +537,26 @@ export default function App() {
     })
   }, [branches])
 
-  const saveUrl = () => {
+  const connect = () => {
     const url = urlInput.trim().replace(/\/$/, '')
-    if (!url) return
+    if (!url) { return }
     AsyncStorage.setItem('serverUrl', url)
     setServerUrl(url)
     setIsSetup(true)
   }
 
-  const openTab = useCallback((branch: string, worktreePath?: string, initialMessage?: string) => {
+  const openTab = useCallback((branch: string, _worktreePath: string, initialMessage?: string) => {
     const wsBase = serverUrl.startsWith('ws') ? serverUrl : `ws://${serverUrl}`
     setTabs(prev => {
-      if (prev.find(t => t.id === branch)) return prev
-      return [...prev, {
-        id: branch,
-        label: branch,
-        wsUrl: `${wsBase}/workers/${encodeURIComponent(branch)}`,
-        worktreePath,
-        initialMessage,
-      }]
+      if (prev.find(t => t.id === branch)) { return prev }
+      return [...prev, { id: branch, label: branch, wsUrl: `${wsBase}/workers/${encodeURIComponent(branch)}`, initialMessage }]
     })
     setTabStatuses(prev => ({ ...prev, [branch]: prev[branch] ?? 'connecting' }))
     setActiveTab(branch)
   }, [serverUrl])
 
   const closeTab = useCallback((id: string) => {
-    if (id === 'main') return
+    if (id === 'main') { return }
     setTabs(prev => prev.filter(t => t.id !== id))
     setTabStatuses(prev => { const n = { ...prev }; delete n[id]; return n })
     setActiveTab(prev => prev === id ? 'main' : prev)
@@ -613,24 +570,24 @@ export default function App() {
     openTab(branch, worktreePath, task)
   }, [openTab])
 
-  const activeWorktrees = branches.filter(b => b.worktree).length
-
-  const statusColor = (status: ConnStatus) => {
-    if (status === 'ready' || status === 'resumed') return C.green
-    if (status === 'connecting' || status === 'disconnected') return C.yellow
-    return C.red
+  const statusColor = (st: ConnStatus) => {
+    if (st === 'ready' || st === 'resumed') { return C.green }
+    if (st === 'error') { return C.red }
+    return C.yellow
   }
 
-  // ── Setup screen ────────────────────────────────────────────────────────────
+  const activeWorktrees = branches.filter(b => b.worktree).length
+  const openTabIds = new Set(tabs.map(t => t.id))
+
+  // ── Setup screen ───────────────────────────────────────────────────────────
 
   if (!isSetup) {
     return (
-      <SafeAreaView style={s.setupContainer}>
-        <StatusBar style="light" />
-        <View style={s.setupCard}>
+      <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
+        <View style={s.setupCenter}>
           <Text style={s.setupMark}>⬡</Text>
           <Text style={s.setupTitle}>claudulhu</Text>
-          <Text style={s.setupDesc}>Enter the address of your claudulhu server.</Text>
+          <Text style={s.setupDesc}>Server address</Text>
           <TextInput
             style={s.setupInput}
             value={urlInput}
@@ -641,11 +598,11 @@ export default function App() {
             autoCorrect={false}
             keyboardType="url"
             returnKeyType="done"
-            onSubmitEditing={saveUrl}
+            onSubmitEditing={connect}
           />
           <TouchableOpacity
             style={[s.setupBtn, !urlInput.trim() && s.btnDisabled]}
-            onPress={saveUrl}
+            onPress={connect}
             disabled={!urlInput.trim()}
           >
             <Text style={s.setupBtnText}>Connect</Text>
@@ -655,14 +612,10 @@ export default function App() {
     )
   }
 
-  // ── Main UI ────────────────────────────────────────────────────────────────
-
-  const activeTabData = tabs.find(t => t.id === activeTab)
+  // ── Main UI ───────────────────────────────────────────────────────────────
 
   return (
-    <SafeAreaView style={s.container}>
-      <StatusBar style="light" />
-
+    <SafeAreaView style={s.safe} edges={['top']}>
       {/* Header */}
       <View style={s.header}>
         <View style={s.headerLeft}>
@@ -670,20 +623,17 @@ export default function App() {
           <Text style={s.headerTitle}>claudulhu</Text>
         </View>
         <View style={s.headerRight}>
-          <TouchableOpacity style={s.branchesBtn} onPress={() => setShowBranches(true)}>
-            <Text style={s.branchesBtnText}>⎇ {activeWorktrees}</Text>
+          <TouchableOpacity style={s.iconBtn} onPress={() => setShowBranches(true)}>
+            <Text style={s.iconBtnText}>⎇ {activeWorktrees}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={s.settingsBtn}
-            onPress={() => { setIsSetup(false); setTabs([]); setBranches([]) }}
-          >
-            <Text style={s.settingsBtnText}>⚙</Text>
+          <TouchableOpacity style={s.iconBtn} onPress={() => { setIsSetup(false); setTabs([]); setBranches([]) }}>
+            <Text style={s.iconBtnText}>⚙</Text>
           </TouchableOpacity>
         </View>
       </View>
 
       {/* Tab bar */}
-      <ScrollView horizontal style={s.tabBar} contentContainerStyle={s.tabBarContent} showsHorizontalScrollIndicator={false}>
+      <ScrollView horizontal style={s.tabBar} contentContainerStyle={s.tabBarInner} showsHorizontalScrollIndicator={false}>
         {tabs.map(tab => (
           <TouchableOpacity
             key={tab.id}
@@ -694,29 +644,24 @@ export default function App() {
             <View style={[s.tabDot, { backgroundColor: statusColor(tabStatuses[tab.id] ?? 'connecting') }]} />
             <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]} numberOfLines={1}>{tab.label}</Text>
             {tab.id !== 'main' && (
-              <TouchableOpacity
-                style={s.tabClose}
-                onPress={() => closeTab(tab.id)}
-                hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
-              >
-                <Text style={s.tabCloseText}>×</Text>
+              <TouchableOpacity onPress={() => closeTab(tab.id)} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}>
+                <Text style={s.tabClose}>×</Text>
               </TouchableOpacity>
             )}
           </TouchableOpacity>
         ))}
       </ScrollView>
 
-      {/* Chat panes (render all, show active) */}
+      {/* Chat panes — all mounted, only active one visible */}
       <KeyboardAvoidingView
-        style={s.chatArea}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+        style={s.paneArea}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={0}
       >
         {tabs.map(tab => (
-          <View key={tab.id} style={[s.chatPaneWrapper, tab.id !== activeTab && s.hidden]}>
+          <View key={tab.id} style={tab.id === activeTab ? s.paneVisible : s.paneHidden}>
             <ChatPane
               wsUrl={tab.wsUrl}
-              active={tab.id === activeTab}
               canSpawnWorker={tab.id === 'main'}
               onStatusChange={handleStatusChange(tab.id)}
               onWorkerCreated={handleWorkerCreated}
@@ -726,44 +671,40 @@ export default function App() {
         ))}
       </KeyboardAvoidingView>
 
-      {/* Branches modal */}
+      {/* Branches bottom sheet */}
       <Modal visible={showBranches} animationType="slide" transparent onRequestClose={() => setShowBranches(false)}>
-        <Pressable style={s.modalOverlay} onPress={() => setShowBranches(false)}>
-          <Pressable style={s.modalSheet} onPress={e => e.stopPropagation()}>
-            <View style={s.modalHandle} />
-            <View style={s.modalHeader}>
-              <Text style={s.modalTitle}>worktrees</Text>
-              <Text style={s.modalCount}>{activeWorktrees}/{branches.length}</Text>
+        <Pressable style={s.overlay} onPress={() => setShowBranches(false)}>
+          <Pressable style={s.sheet} onPress={e => e.stopPropagation()}>
+            <View style={s.sheetHandle} />
+            <View style={s.sheetHeader}>
+              <Text style={s.sheetTitle}>worktrees</Text>
+              <Text style={s.sheetCount}>{activeWorktrees}/{branches.length}</Text>
             </View>
             <FlatList
               data={branches}
               keyExtractor={b => b.name}
-              style={s.branchesList}
-              ListEmptyComponent={<Text style={s.branchesEmpty}>no branches found</Text>}
-              renderItem={({ item: b }) => {
-                const isOpen = tabs.some(t => t.id === b.name)
-                return (
-                  <TouchableOpacity
-                    style={[s.branchItem, b.worktree && s.branchItemClickable]}
-                    onPress={() => {
-                      if (!b.worktree) return
-                      openTab(b.name, b.worktree)
-                      setShowBranches(false)
-                    }}
-                    activeOpacity={b.worktree ? 0.7 : 1}
-                  >
-                    <View style={[s.branchDot, b.worktree ? s.branchDotActive : s.branchDotInactive]} />
-                    <View style={s.branchInfo}>
-                      <Text style={s.branchName}>{b.name}</Text>
-                      <Text style={s.branchCommit}>{b.commit}</Text>
-                      {b.worktree && <Text style={s.branchWorktree} numberOfLines={1}>{b.worktree}</Text>}
-                    </View>
-                    {b.worktree && (
-                      <Text style={s.branchHint}>{isOpen ? 'open' : 'chat'}</Text>
-                    )}
-                  </TouchableOpacity>
-                )
-              }}
+              ListEmptyComponent={<Text style={s.branchEmpty}>no branches found</Text>}
+              renderItem={({ item: b }) => (
+                <TouchableOpacity
+                  style={s.branchRow}
+                  onPress={() => {
+                    if (!b.worktree) { return }
+                    openTab(b.name, b.worktree)
+                    setShowBranches(false)
+                  }}
+                  activeOpacity={b.worktree ? 0.7 : 1}
+                >
+                  <View style={[s.branchDot, { backgroundColor: b.worktree ? C.green : C.textMuted }]} />
+                  <View style={s.branchInfo}>
+                    <Text style={s.branchName}>{b.name}</Text>
+                    <Text style={s.branchCommit}>{b.commit}</Text>
+                    {b.worktree && <Text style={s.branchPath} numberOfLines={1}>{b.worktree}</Text>}
+                  </View>
+                  {b.worktree && (
+                    <Text style={s.branchHint}>{openTabIds.has(b.name) ? 'open' : 'chat'}</Text>
+                  )}
+                </TouchableOpacity>
+              )}
             />
           </Pressable>
         </Pressable>
@@ -772,136 +713,130 @@ export default function App() {
   )
 }
 
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+      <AppInner />
+    </SafeAreaProvider>
+  )
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
-const s = StyleSheet.create({
-  // Layout
-  container:          { flex: 1, backgroundColor: C.bg },
-  chatArea:           { flex: 1 },
-  chatPaneWrapper:    { flex: 1 },
-  hidden:             { display: 'none' },
+const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace'
 
+const s = StyleSheet.create({
   // Setup
-  setupContainer:     { flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' },
-  setupCard:          { width: '85%', alignItems: 'center', gap: 16 },
-  setupMark:          { fontSize: 40, color: C.accent },
-  setupTitle:         { fontSize: 24, fontWeight: '700', color: C.textPrimary, letterSpacing: 2 },
-  setupDesc:          { fontSize: 14, color: C.textSecondary, textAlign: 'center' },
-  setupInput:         {
-    width: '100%', backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder,
-    borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary,
-    fontSize: 16, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  setupBtn:           { backgroundColor: C.accent, borderRadius: 8, paddingHorizontal: 32, paddingVertical: 12, width: '100%', alignItems: 'center' },
-  setupBtnText:       { color: '#fff', fontWeight: '600', fontSize: 16 },
+  setupSafe:        { flex: 1, backgroundColor: C.bg },
+  setupCenter:      { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 16 },
+  setupMark:        { fontSize: 48, color: C.accent },
+  setupTitle:       { fontSize: 26, fontWeight: '700', color: C.textPrimary, letterSpacing: 2 },
+  setupDesc:        { fontSize: 14, color: C.textSecondary },
+  setupInput:       { width: '100%', backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 10, paddingHorizontal: 16, paddingVertical: 13, color: C.textPrimary, fontSize: 16, fontFamily: MONO },
+  setupBtn:         { width: '100%', backgroundColor: C.accent, borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
+  setupBtnText:     { color: '#fff', fontWeight: '700', fontSize: 16 },
+
+  // Layout
+  safe:             { flex: 1, backgroundColor: C.bg },
+  paneArea:         { flex: 1 },
+  paneVisible:      { flex: 1 },
+  paneHidden:       { flex: 1, display: 'none' },
 
   // Header
-  header:             { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
-  headerLeft:         { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  headerRight:        { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  headerMark:         { fontSize: 18, color: C.accent },
-  headerTitle:        { fontSize: 16, fontWeight: '700', color: C.textPrimary, letterSpacing: 1 },
-  branchesBtn:        { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
-  branchesBtnText:    { color: C.textSecondary, fontSize: 13 },
-  settingsBtn:        { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
-  settingsBtnText:    { color: C.textSecondary, fontSize: 14 },
+  header:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  headerLeft:       { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  headerRight:      { flexDirection: 'row', gap: 8 },
+  headerMark:       { fontSize: 20, color: C.accent },
+  headerTitle:      { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1 },
+  iconBtn:          { backgroundColor: C.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 7, paddingHorizontal: 10, paddingVertical: 6 },
+  iconBtnText:      { color: C.textSecondary, fontSize: 13 },
 
-  // Tabs
-  tabBar:             { flexGrow: 0, backgroundColor: C.surface, borderBottomWidth: 1, borderBottomColor: C.border, maxHeight: 40 },
-  tabBarContent:      { paddingHorizontal: 8, alignItems: 'center', gap: 4 },
-  tab:                { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 8, gap: 5, borderRadius: 4, marginVertical: 4 },
-  tabActive:          { backgroundColor: C.bg },
-  tabDot:             { width: 6, height: 6, borderRadius: 3 },
-  tabLabel:           { color: C.textMuted, fontSize: 13, maxWidth: 100 },
-  tabLabelActive:     { color: C.textPrimary },
-  tabClose:           { marginLeft: 2 },
-  tabCloseText:       { color: C.textMuted, fontSize: 15, lineHeight: 16 },
+  // Tab bar
+  tabBar:           { flexGrow: 0, maxHeight: 42, backgroundColor: C.surface, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  tabBarInner:      { alignItems: 'center', paddingHorizontal: 8, gap: 2 },
+  tab:              { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 9, borderRadius: 6, gap: 6, marginVertical: 4 },
+  tabActive:        { backgroundColor: C.bg },
+  tabDot:           { width: 6, height: 6, borderRadius: 3 },
+  tabLabel:         { color: C.textMuted, fontSize: 13, maxWidth: 110 },
+  tabLabelActive:   { color: C.textPrimary },
+  tabClose:         { color: C.textMuted, fontSize: 16, lineHeight: 17, marginLeft: 2 },
 
   // Chat pane
-  chatPane:           { flex: 1, backgroundColor: C.bg },
-  messageScroll:      { flex: 1 },
-  messageScrollContent: { paddingVertical: 16 },
-  emptyState:         { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 60 },
+  pane:             { flex: 1, backgroundColor: C.bg },
+  messageList:      { flex: 1 },
+  messageListContent: { paddingVertical: 16, paddingBottom: 8 },
+  emptyState:       { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80 },
 
   // Messages
-  messagePadding:     { paddingHorizontal: 14, marginBottom: 14 },
-  messageRight:       { alignItems: 'flex-end' },
-  messageLabel:       { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '500', letterSpacing: 0.5 },
-  messageLabelUser:   { marginLeft: 0, marginRight: 2 },
+  messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
+  messageWrapRight: { alignItems: 'flex-end' },
+  messageLabel:     { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
+  messageLabelRight:{ marginLeft: 0, marginRight: 2 },
 
   // Bubbles
-  bubble:             { borderRadius: 12, padding: 12, maxWidth: '92%' },
-  userBubble:         { backgroundColor: C.userBubble, borderWidth: 1, borderColor: C.userBorder },
-  asstBubble:         { backgroundColor: C.asstBubble, borderWidth: 1, borderColor: C.asstBorder },
-  infoBubble:         { backgroundColor: C.infoBubble, borderWidth: 1, borderColor: C.border },
-  cursor:             { color: C.accent, fontSize: 14 },
+  bubble:           { borderRadius: 14, padding: 12, maxWidth: '92%' },
+  bubbleUser:       { backgroundColor: C.userBubble, borderWidth: 1, borderColor: C.userBorder },
+  bubbleAsst:       { backgroundColor: C.asstBubble, borderWidth: StyleSheet.hairlineWidth, borderColor: C.asstBorder },
+  bubbleInfo:       { backgroundColor: C.infoBubble, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border },
+  cursor:           { color: C.accent, fontSize: 14 },
+  thinkingDots:     { color: C.textMuted, fontSize: 20, letterSpacing: 4 },
 
-  // Blocks
-  textBlock:          { color: C.textPrimary, fontSize: 15, lineHeight: 22 },
-  errorBlock:         { color: C.red, fontSize: 14 },
-  interruptedBlock:   { color: C.textMuted, fontSize: 14, fontStyle: 'italic' },
-  systemBlock:        { color: C.textSecondary, fontSize: 13 },
-  thinkingDots:       { color: C.textMuted, fontSize: 18, letterSpacing: 4 },
+  // Text blocks
+  textBlock:        { color: C.textPrimary, fontSize: 15, lineHeight: 23 },
+  errorText:        { color: C.red, fontSize: 14 },
+  mutedText:        { color: C.textMuted, fontSize: 13, fontStyle: 'italic' },
+  systemText:       { color: C.textSecondary, fontSize: 13 },
 
-  resultFooter:       { flexDirection: 'row', justifyContent: 'space-between', marginTop: 4, paddingTop: 6, borderTopWidth: 1, borderTopColor: C.border },
-  resultFooterText:   { color: C.textMuted, fontSize: 12 },
+  // Result footer
+  resultFooter:     { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 6, marginTop: 4, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
+  resultMeta:       { color: C.textMuted, fontSize: 12 },
 
-  questionBlock:      { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginTop: 2 },
-  questionIcon:       { color: C.yellow, fontSize: 16, fontWeight: '700' },
-  questionText:       { color: C.textPrimary, fontSize: 15, flex: 1, lineHeight: 22 },
+  // Question
+  questionRow:      { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  questionMark:     { color: C.yellow, fontWeight: '700', fontSize: 15 },
+  questionText:     { color: C.textPrimary, fontSize: 15, flex: 1, lineHeight: 22 },
 
-  workerCreatedBlock: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  workerCreatedIcon:  { color: C.accent, fontSize: 16 },
-  workerCreatedBranch:{ color: C.accent, fontSize: 14, fontWeight: '600' },
-  workerCreatedPath:  { color: C.textMuted, fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  // Worker created
+  workerRow:        { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  workerIcon:       { color: C.accent, fontSize: 15 },
+  workerInfo:       { flex: 1 },
+  workerBranch:     { color: C.accent, fontSize: 14, fontWeight: '600' },
+  workerPath:       { color: C.textMuted, fontSize: 11, fontFamily: MONO, marginTop: 2 },
 
   // Tool blocks
-  toolBlock:          { backgroundColor: C.toolBg, borderWidth: 1, borderColor: C.toolBorder, borderRadius: 8, overflow: 'hidden', marginTop: 4 },
-  toolHeader:         { flexDirection: 'row', alignItems: 'center', padding: 8, gap: 6 },
-  toolIcon:           { color: C.yellow, fontSize: 13 },
-  toolName:           { color: C.textSecondary, fontSize: 13, flex: 1, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  toolToggle:         { color: C.textMuted, fontSize: 11 },
-  toolBody:           { maxHeight: 200, padding: 8 },
-  toolBodyText:       { color: C.textSecondary, fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
-
-  toolResultBlock:    { backgroundColor: C.toolBg, borderWidth: 1, borderColor: C.toolBorder, borderRadius: 8, overflow: 'hidden', marginTop: 4 },
-  toolResultHeader:   { flexDirection: 'row', alignItems: 'center', padding: 8, gap: 6 },
-  resultIcon:         { color: C.green, fontSize: 13 },
-  resultPreview:      { color: C.textMuted, fontSize: 12, flex: 1, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  toolBlock:        { backgroundColor: C.toolBg, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 8, overflow: 'hidden', marginTop: 6 },
+  toolHeader:       { flexDirection: 'row', alignItems: 'center', padding: 9, gap: 6 },
+  toolIcon:         { color: C.yellow, fontSize: 12 },
+  toolName:         { color: C.textSecondary, fontSize: 12, flex: 1, fontFamily: MONO },
+  toolToggle:       { color: C.textMuted, fontSize: 10 },
+  resultIcon:       { color: C.green, fontSize: 12 },
+  resultPreview:    { color: C.textMuted, fontSize: 12, flex: 1, fontFamily: MONO },
+  toolBody:         { maxHeight: 180, padding: 8 },
+  monoText:         { color: C.textSecondary, fontSize: 12, fontFamily: MONO, lineHeight: 18 },
 
   // Input
-  inputArea:          { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8, backgroundColor: C.surface },
-  textInput:          {
-    flex: 1, backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder,
-    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, color: C.textPrimary,
-    fontSize: 15, lineHeight: 22, maxHeight: 120,
-  },
-  inputButtons:       { justifyContent: 'flex-end', paddingBottom: 2 },
-  btnSend:            { backgroundColor: C.accent, borderRadius: 8, width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
-  btnSendText:        { color: '#fff', fontSize: 15 },
-  btnInterrupt:       { backgroundColor: C.red, borderRadius: 8, paddingHorizontal: 10, height: 36, alignItems: 'center', justifyContent: 'center' },
-  btnInterruptText:   { color: '#fff', fontSize: 13, fontWeight: '600' },
-  btnDisabled:        { opacity: 0.3 },
-  btnDisabledText:    { color: C.textMuted },
+  inputRow:         { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
+  input:            { flex: 1, backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, color: C.textPrimary, fontSize: 15, lineHeight: 22, maxHeight: 120 },
+  btnSend:          { width: 40, height: 40, backgroundColor: C.accent, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  btnSendText:      { color: '#fff', fontSize: 15 },
+  btnStop:          { width: 40, height: 40, backgroundColor: C.red, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  btnStopText:      { color: '#fff', fontSize: 13 },
+  btnDisabled:      { opacity: 0.3 },
 
   // Branches modal
-  modalOverlay:       { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
-  modalSheet:         { backgroundColor: C.surface, borderTopLeftRadius: 16, borderTopRightRadius: 16, paddingBottom: 32, maxHeight: '70%' },
-  modalHandle:        { width: 36, height: 4, backgroundColor: C.borderLight, borderRadius: 2, alignSelf: 'center', marginTop: 10, marginBottom: 4 },
-  modalHeader:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.border },
-  modalTitle:         { color: C.textPrimary, fontSize: 16, fontWeight: '600' },
-  modalCount:         { color: C.textMuted, fontSize: 14 },
-
-  branchesList:       { paddingHorizontal: 4 },
-  branchesEmpty:      { color: C.textMuted, fontSize: 14, textAlign: 'center', padding: 24 },
-  branchItem:         { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, gap: 10, borderBottomWidth: 1, borderBottomColor: C.border },
-  branchItemClickable:{ },
-  branchDot:          { width: 8, height: 8, borderRadius: 4 },
-  branchDotActive:    { backgroundColor: C.green },
-  branchDotInactive:  { backgroundColor: C.textMuted },
-  branchInfo:         { flex: 1 },
-  branchName:         { color: C.textPrimary, fontSize: 14, fontWeight: '500' },
-  branchCommit:       { color: C.textMuted, fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  branchWorktree:     { color: C.textMuted, fontSize: 11, marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  branchHint:         { color: C.accent, fontSize: 12 },
+  overlay:          { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
+  sheet:            { backgroundColor: C.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '65%', paddingBottom: 32 },
+  sheetHandle:      { width: 38, height: 4, backgroundColor: C.borderLight, borderRadius: 2, alignSelf: 'center', marginTop: 10, marginBottom: 2 },
+  sheetHeader:      { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  sheetTitle:       { color: C.textPrimary, fontSize: 16, fontWeight: '600' },
+  sheetCount:       { color: C.textMuted, fontSize: 14 },
+  branchEmpty:      { color: C.textMuted, textAlign: 'center', padding: 24, fontSize: 14 },
+  branchRow:        { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  branchDot:        { width: 8, height: 8, borderRadius: 4 },
+  branchInfo:       { flex: 1 },
+  branchName:       { color: C.textPrimary, fontSize: 15, fontWeight: '500' },
+  branchCommit:     { color: C.textMuted, fontSize: 12, fontFamily: MONO, marginTop: 1 },
+  branchPath:       { color: C.textMuted, fontSize: 11, fontFamily: MONO, marginTop: 2 },
+  branchHint:       { color: C.accent, fontSize: 12 },
 })
