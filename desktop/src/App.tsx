@@ -377,12 +377,14 @@ function ChatPane({
         break
       case 'worker_session_ready':
         onWorkerCreatedRef.current(frame.branch, frame.worktree_path, frame.task, frame.worker_session_id)
+        completeResponse()
         break
       case 'worker_error':
         setMessages(prev => [...prev, {
           id: uid(), role: 'info', streaming: false,
           blocks: [{ kind: 'worker_error', message: frame.message }],
         }])
+        completeResponse()
         break
     }
   }, [appendBlock, completeResponse, ensureAssistantMsg, updateStatus])
@@ -414,6 +416,10 @@ function ChatPane({
 
       const sid = tauriSessionId.current!
       unlistenFn = await tauriListen<ServerFrame>(`claude-event-${sid}`, handleFrame)
+      if (!mounted) return
+      // For pre-created sessions (worker tabs), the backend emits Ready before we
+      // register the listener. Set status directly so initialMessage is sent.
+      if (externalSessionId) updateStatus('ready')
     }
 
     setup().catch(() => updateStatus('error'))
