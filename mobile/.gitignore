@@ -35,6 +35,7 @@ local.properties
 !debug.keystore
 .kotlin/
 android/gradle.properties
+fastlane/google-play-key.json
 
 # node.js
 #

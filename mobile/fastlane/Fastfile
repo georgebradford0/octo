@@ -1,0 +1,24 @@
+default_platform(:android)
+
+platform :android do
+  desc "Build release AAB and upload to Closed Testing (Alpha) track"
+  lane :closed do
+    gradle(
+      project_dir: "android",
+      task:        "bundle",
+      build_type:  "Release",
+      print_command: false,   # hides passwords from log output
+    )
+
+    upload_to_play_store(
+      track:               "alpha",
+      aab:                 "android/app/build/outputs/bundle/release/app-release.aab",
+      release_status:      "draft",
+      skip_upload_apk:     true,
+      skip_upload_metadata: true,
+      skip_upload_changelogs: true,
+      skip_upload_images:  true,
+      skip_upload_screenshots: true,
+    )
+  end
+end
