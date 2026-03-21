@@ -1095,6 +1095,10 @@ async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
 
 // ── WebSocket Route Handlers ──────────────────────────────────────────────────
 
+async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
 async fn chat_ws_handler(
     ws:              WebSocketUpgrade,
     State(state):    State<Arc<AppState>>,
@@ -1113,10 +1117,12 @@ async fn chat_ws_handler(
             pending_question: Arc::new(tokio::sync::Mutex::new(None)),
         }));
         state.sessions.lock().unwrap().insert(session_id.clone(), session.clone());
+        println!("[{}] /chat connected (repo: {})", session_id, repo);
 
         run_session(socket, session, session_id.clone(), state.clone(), repo).await;
 
         state.sessions.lock().unwrap().remove(&session_id);
+        println!("[{}] /chat disconnected", session_id);
     })
 }
 
@@ -1149,10 +1155,12 @@ async fn worker_ws_handler(
 
         let session_id = Uuid::new_v4().to_string();
         state.sessions.lock().unwrap().insert(session_id.clone(), session.clone());
+        println!("[{}] /workers/{} connected (repo: {})", session_id, branch, repo);
 
         run_session(socket, session, session_id.clone(), state.clone(), repo).await;
 
         state.sessions.lock().unwrap().remove(&session_id);
+        println!("[{}] /workers/{} disconnected", session_id, branch);
     })
 }
 
@@ -1188,6 +1196,7 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/health",          get(health_handler))
         .route("/branches",        get(get_branches_handler))
         .route("/config",          get(get_config_handler).put(update_config_handler))
         .route("/chat",            get(chat_ws_handler))
@@ -1201,6 +1210,7 @@ async fn main() {
     println!("claudulhu server listening on {addr}");
     println!("  WebSocket: ws://{addr}/chat");
     println!("  WebSocket: ws://{addr}/workers/:branch");
+    println!("  HTTP GET:  http://{addr}/health");
     println!("  HTTP GET:  http://{addr}/branches");
     println!("  HTTP GET:  http://{addr}/config");
     println!("  HTTP PUT:  http://{addr}/config");

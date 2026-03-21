@@ -345,17 +345,27 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
 
     const connect = () => {
       if (cancelled) { return }
+      console.log('[ws] connecting to', wsUrl)
       updateStatus('connecting')
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
+      ws.onopen = () => {
+        console.log('[ws] connected to', wsUrl)
+      }
+
       ws.onmessage = ({ data }) => {
         let frame: ServerFrame
-        try { frame = JSON.parse(data as string) } catch { return }
+        try { frame = JSON.parse(data as string) } catch {
+          console.warn('[ws] failed to parse frame:', data)
+          return
+        }
+        console.log('[ws] frame:', frame.type)
         handleFrame(frame)
       }
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
+        console.log('[ws] closed', wsUrl, 'code:', e.code, 'reason:', e.reason)
         if (!cancelled) {
           if (inResponseRef.current) {
             inResponseRef.current = false
@@ -367,7 +377,10 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
         }
       }
 
-      ws.onerror = () => updateStatus('error')
+      ws.onerror = (e) => {
+        console.error('[ws] error on', wsUrl, e)
+        updateStatus('error')
+      }
     }
 
     connect()
@@ -616,48 +629,48 @@ function AppInner() {
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
-      {/* Header */}
-      <View style={s.header}>
-        <View style={s.headerLeft}>
-          <Text style={s.headerMark}>⬡</Text>
-          <Text style={s.headerTitle}>claudulhu</Text>
-        </View>
-        <View style={s.headerRight}>
-          <TouchableOpacity style={s.iconBtn} onPress={() => setShowBranches(true)}>
-            <Text style={s.iconBtnText}>⎇ {activeWorktrees}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={s.iconBtn} onPress={() => { setIsSetup(false); setTabs([]); setBranches([]) }}>
-            <Text style={s.iconBtnText}>⚙</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Tab bar */}
-      <ScrollView horizontal style={s.tabBar} contentContainerStyle={s.tabBarInner} showsHorizontalScrollIndicator={false}>
-        {tabs.map(tab => (
-          <TouchableOpacity
-            key={tab.id}
-            style={[s.tab, activeTab === tab.id && s.tabActive]}
-            onPress={() => setActiveTab(tab.id)}
-            activeOpacity={0.7}
-          >
-            <View style={[s.tabDot, { backgroundColor: statusColor(tabStatuses[tab.id] ?? 'connecting') }]} />
-            <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]} numberOfLines={1}>{tab.label}</Text>
-            {tab.id !== 'main' && (
-              <TouchableOpacity onPress={() => closeTab(tab.id)} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}>
-                <Text style={s.tabClose}>×</Text>
-              </TouchableOpacity>
-            )}
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-
-      {/* Chat panes — all mounted, only active one visible */}
       <KeyboardAvoidingView
         style={s.paneArea}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={0}
       >
+        {/* Header */}
+        <View style={s.header}>
+          <View style={s.headerLeft}>
+            <Text style={s.headerMark}>⬡</Text>
+            <Text style={s.headerTitle}>claudulhu</Text>
+          </View>
+          <View style={s.headerRight}>
+            <TouchableOpacity style={s.iconBtn} onPress={() => setShowBranches(true)}>
+              <Text style={s.iconBtnText}>⎇ {activeWorktrees}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={s.iconBtn} onPress={() => { setIsSetup(false); setTabs([]); setBranches([]) }}>
+              <Text style={s.iconBtnText}>⚙</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Tab bar */}
+        <ScrollView horizontal style={s.tabBar} contentContainerStyle={s.tabBarInner} showsHorizontalScrollIndicator={false}>
+          {tabs.map(tab => (
+            <TouchableOpacity
+              key={tab.id}
+              style={[s.tab, activeTab === tab.id && s.tabActive]}
+              onPress={() => setActiveTab(tab.id)}
+              activeOpacity={0.7}
+            >
+              <View style={[s.tabDot, { backgroundColor: statusColor(tabStatuses[tab.id] ?? 'connecting') }]} />
+              <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]} numberOfLines={1}>{tab.label}</Text>
+              {tab.id !== 'main' && (
+                <TouchableOpacity onPress={() => closeTab(tab.id)} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}>
+                  <Text style={s.tabClose}>×</Text>
+                </TouchableOpacity>
+              )}
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {/* Chat panes — all mounted, only active one visible */}
         {tabs.map(tab => (
           <View key={tab.id} style={tab.id === activeTab ? s.paneVisible : s.paneHidden}>
             <ChatPane
