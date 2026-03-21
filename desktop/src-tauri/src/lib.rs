@@ -372,6 +372,20 @@ fn resolve_path(p: &str, cwd: &str) -> PathBuf {
     if p.starts_with('/') { PathBuf::from(p) } else { PathBuf::from(cwd).join(p) }
 }
 
+const TOOL_OUTPUT_LIMIT: usize = 20_000;
+
+fn truncate_tool_output(s: String) -> String {
+    if s.len() <= TOOL_OUTPUT_LIMIT {
+        s
+    } else {
+        format!(
+            "{}\n[output truncated — {} chars omitted]",
+            &s[..TOOL_OUTPUT_LIMIT],
+            s.len() - TOOL_OUTPUT_LIMIT
+        )
+    }
+}
+
 async fn execute_tool(
     name: &str,
     input: &serde_json::Value,
@@ -393,7 +407,12 @@ async fn execute_tool(
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                    if stderr.is_empty() { stdout } else { format!("{stdout}\n[stderr]: {stderr}") }
+                    let combined = if stderr.is_empty() {
+                        stdout
+                    } else {
+                        format!("{stdout}\n[stderr]: {stderr}")
+                    };
+                    truncate_tool_output(combined)
                 }
                 Err(e) => format!("error: {e}"),
             }
@@ -483,7 +502,7 @@ async fn execute_tool(
                 .output()
                 .await
             {
-                Ok(o)  => String::from_utf8_lossy(&o.stdout).to_string(),
+                Ok(o)  => truncate_tool_output(String::from_utf8_lossy(&o.stdout).to_string()),
                 Err(e) => format!("error: {e}"),
             }
         }
@@ -888,6 +907,55 @@ enum PartialBlock {
     ToolUse { id: String, name: String, partial_json: String },
 }
 
+/// Truncate old tool results in the message history to avoid quadratic context growth.
+/// The most recent `keep_full` tool-result messages are left intact; older ones are
+/// replaced with a short stub so the conversation structure remains valid.
+fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMessage> {
+    const STUB_LIMIT: usize = 400;
+    // Find indices of user messages that contain only ToolResult blocks
+    let tool_result_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "user" && m.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })))
+        .map(|(i, _)| i)
+        .collect();
+
+    let cutoff = tool_result_indices.len().saturating_sub(keep_full);
+    let old_indices: std::collections::HashSet<usize> =
+        tool_result_indices[..cutoff].iter().copied().collect();
+
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if !old_indices.contains(&i) {
+                return m.clone();
+            }
+            ApiMessage {
+                role: m.role.clone(),
+                content: m.content.iter().map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, content } => {
+                        let text = content
+                            .first()
+                            .and_then(|v| v["text"].as_str())
+                            .unwrap_or("");
+                        let stub = if text.len() > STUB_LIMIT {
+                            format!("{}…[truncated]", &text[..STUB_LIMIT])
+                        } else {
+                            text.to_string()
+                        };
+                        ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: vec![serde_json::json!({"type": "text", "text": stub})],
+                        }
+                    }
+                    other => other.clone(),
+                }).collect(),
+            }
+        })
+        .collect()
+}
+
 /// Calls the Anthropic Messages API with streaming and returns (content_blocks, stop_reason, usage).
 /// Emits ChatEvent::Text and ChatEvent::ToolUse to the frontend as they arrive.
 async fn stream_turn(
@@ -901,12 +969,25 @@ async fn stream_turn(
 ) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
     let client = reqwest::Client::new();
 
+    // Build tool list with cache_control on the last entry so the static
+    // tool schema is eligible for prompt caching.
+    let mut tools: Vec<serde_json::Value> = tool_definitions()
+        .into_iter()
+        .map(|t| serde_json::to_value(t).unwrap())
+        .collect();
+    if let Some(last) = tools.last_mut() {
+        last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+    }
+
+    // Compact old tool results to avoid quadratic context growth (keep last 6 full).
+    let compacted = compact_history(messages, 6);
+
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 128000,
-        "system": system,
-        "tools": tool_definitions(),
-        "messages": messages,
+        "max_tokens": 16000,
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "tools": tools,
+        "messages": compacted,
         "stream": true,
     });
 
@@ -914,6 +995,7 @@ async fn stream_turn(
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "prompt-caching-2024-07-31")
         .header("content-type", "application/json")
         .json(&body)
         .send()
