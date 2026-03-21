@@ -841,15 +841,24 @@ export default function App() {
     setActiveTab(prev => prev === id ? 'main' : prev)
   }, [])
 
-  // Alt+` cycles tabs, Alt+1-9 jumps to tab by index
+  // Cmd+` (Mac) / Ctrl+` (PC) cycles tabs forward
+  // Cmd+Shift+` / Ctrl+Shift+` cycles tabs backward
+  // Cmd+1-9 (Mac) / Ctrl+1-9 (PC) jumps to tab by index (main = 1)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!e.altKey) return
+      const isMac = navigator.platform.toUpperCase().includes('MAC')
+      const modKey = isMac ? e.metaKey : e.ctrlKey
+      if (!modKey) return
       setTabs(prev => {
         if (e.key === '`') {
           e.preventDefault()
           setActiveTab(cur => {
             const idx = prev.findIndex(t => t.id === cur)
+            if (e.shiftKey) {
+              // cycle backward
+              return prev[(idx - 1 + prev.length) % prev.length].id
+            }
+            // cycle forward
             return prev[(idx + 1) % prev.length].id
           })
         } else {
