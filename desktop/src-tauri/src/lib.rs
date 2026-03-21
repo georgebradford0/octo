@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
+    io::{BufRead, BufReader},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -418,24 +419,32 @@ async fn execute_tool(
             }
         }
         "read_file" => {
-            let p = input["path"].as_str().unwrap_or("");
-            let full = resolve_path(p, cwd);
+            let p      = input["path"].as_str().unwrap_or("");
+            let full   = resolve_path(p, cwd);
             let offset = input["offset"].as_u64().unwrap_or(0) as usize;
             let limit  = input["limit"].as_u64().map(|v| v as usize);
-            match fs::read_to_string(&full) {
+            match fs::File::open(&full) {
                 Err(e) => format!("error: {e}"),
-                Ok(content) => {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let total = lines.len();
-                    let start = offset.min(total);
-                    let end   = limit.map(|l| (start + l).min(total)).unwrap_or(total);
-                    let numbered: Vec<String> = lines[start..end]
-                        .iter()
-                        .enumerate()
-                        .map(|(i, l)| format!("{:>4}→{}", start + i + 1, l))
-                        .collect();
+                Ok(file) => {
+                    let reader = BufReader::new(file);
+                    let mut numbered = Vec::new();
+                    let mut total = 0usize;
+                    for (i, line) in reader.lines().enumerate() {
+                        let line = match line {
+                            Ok(l)  => l,
+                            Err(e) => return format!("error reading line {}: {e}", i + 1),
+                        };
+                        total += 1;
+                        if i < offset { continue; }
+                        if let Some(lim) = limit {
+                            if numbered.len() >= lim { continue; }
+                        }
+                        numbered.push(format!("{:>4}→{}", i + 1, line));
+                    }
+                    let start = offset + 1;
+                    let end   = offset + numbered.len();
                     if offset > 0 || limit.is_some() {
-                        format!("(lines {}-{} of {})\n{}", start + 1, end, total, numbered.join("\n"))
+                        format!("(lines {start}-{end} of {total})\n{}", numbered.join("\n"))
                     } else {
                         numbered.join("\n")
                     }
@@ -496,8 +505,17 @@ async fn execute_tool(
         "grep" => {
             let pattern = input["pattern"].as_str().unwrap_or("");
             let path    = input["path"].as_str().unwrap_or(".");
+            let context = input["context"].as_u64().unwrap_or(0);
+            let mut args = vec!["-r", "-n", "--include=*"];
+            let ctx_str;
+            if context > 0 {
+                ctx_str = format!("-C{context}");
+                args.push(&ctx_str);
+            }
+            args.push(pattern);
+            args.push(path);
             match tokio::process::Command::new("grep")
-                .args(["-r", "-n", pattern, path])
+                .args(&args)
                 .current_dir(cwd)
                 .output()
                 .await
@@ -731,13 +749,13 @@ fn tool_definitions() -> Vec<AnthropicTool> {
         },
         AnthropicTool {
             name: "read_file".to_string(),
-            description: "Read a file, optionally a line range. Use offset+limit to read only the section you need — avoids loading large files. Lines are returned with line numbers.".to_string(),
+            description: "Read a file. Always use offset+limit to read only the section you need — never read the whole file if you already know the relevant line numbers from grep. offset is 0-based (first line = 0). Lines are returned with 1-based line numbers.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path":   { "type": "string", "description": "File path (relative to repo or absolute)" },
-                    "offset": { "type": "integer", "description": "0-based line to start from (default 0)" },
-                    "limit":  { "type": "integer", "description": "Max lines to return (omit for whole file)" }
+                    "offset": { "type": "integer", "description": "0-based line index to start reading from" },
+                    "limit":  { "type": "integer", "description": "Number of lines to return" }
                 },
                 "required": ["path"]
             }),
@@ -780,12 +798,13 @@ fn tool_definitions() -> Vec<AnthropicTool> {
         },
         AnthropicTool {
             name: "grep".to_string(),
-            description: "Search file contents for a regex pattern. Returns matching lines with line numbers.".to_string(),
+            description: "Search file contents for a regex pattern. Returns matching lines with file:line numbers. Use context to include surrounding lines. Pass the returned line numbers to read_file offset+limit to read more of that section.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex pattern" },
-                    "path":    { "type": "string", "description": "Directory or file to search (default: .)" }
+                    "path":    { "type": "string", "description": "Directory or file to search (default: .)" },
+                    "context": { "type": "integer", "description": "Number of lines to show before and after each match (like grep -C)" }
                 },
                 "required": ["pattern"]
             }),
