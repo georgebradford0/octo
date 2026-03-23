@@ -1,0 +1,8 @@
+target/
+desktop/
+mobile/
+graphics/
+*.png
+*.md
+.git/
+node_modules/

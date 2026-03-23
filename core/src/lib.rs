@@ -956,6 +956,9 @@ pub fn create_worktree(repo_path: &str, branch: &str) -> Result<String, String> 
 // ── Shell Environment Bootstrap ───────────────────────────────────────────────
 
 pub fn init_shell_env() {
+    if std::env::var("CLAUDULHU_SKIP_SHELL_ENV").is_ok() {
+        return;
+    }
     let output = std::process::Command::new("zsh")
         .args(["-l", "-c", "source ~/.zshrc 2>/dev/null; env -0"])
         .output();
