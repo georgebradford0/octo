@@ -32,7 +32,8 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     git \
-    openssh-client \
+    openssh-server \
+    qrencode \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -44,6 +45,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV HOME=/root
 ENV CLAUDULHU_SKIP_SHELL_ENV=1
 
-EXPOSE 8000
+# 8000: claudulhu WebSocket/HTTP  2222: SSH tunnel endpoint
+EXPOSE 8000 2222
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
