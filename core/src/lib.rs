@@ -305,6 +305,14 @@ pub fn tool_definitions() -> Vec<AnthropicTool> {
         AnthropicTool { name: "web_search".into(),
             description: "Search the web via Brave Search. Requires BRAVE_API_KEY env var.".into(),
             input_schema: serde_json::json!({ "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }) },
+        AnthropicTool { name: "create_pull_request".into(),
+            description: "Create a pull request (GitHub) or merge request (GitLab) from the current branch. Requires GIT_TOKEN env var. Detects the host from the repo's git remote URL. Use after pushing a branch to propose merging it into the base branch.".into(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {
+                "title": { "type": "string", "description": "PR/MR title" },
+                "body":  { "type": "string", "description": "PR/MR description (markdown)" },
+                "head":  { "type": "string", "description": "Source branch to merge from (defaults to current branch)" },
+                "base":  { "type": "string", "description": "Target branch to merge into (defaults to main)" }
+            }, "required": ["title"] }) },
     ]
 }
 
@@ -582,6 +590,98 @@ pub async fn execute_tool(
                         }).collect::<Vec<_>>().join("\n\n"),
                     },
                 },
+            }
+        }
+        "create_pull_request" => {
+            let token = match std::env::var("GIT_TOKEN").ok().filter(|s| !s.is_empty()) {
+                Some(t) => t,
+                None    => return "error: GIT_TOKEN environment variable not set".to_string(),
+            };
+            let title = input["title"].as_str().unwrap_or("").to_string();
+            if title.is_empty() { return "error: title is required".to_string(); }
+            let body  = input["body"].as_str().unwrap_or("").to_string();
+            let base  = input["base"].as_str().unwrap_or("main").to_string();
+
+            // Determine head branch
+            let head = if let Some(h) = input["head"].as_str().filter(|s| !s.is_empty()) {
+                h.to_string()
+            } else {
+                match tokio::process::Command::new("git")
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .current_dir(cwd).output().await
+                {
+                    Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                    Err(e) => return format!("error getting current branch: {e}"),
+                }
+            };
+
+            // Get remote URL to detect host and parse owner/repo
+            let remote_url = match tokio::process::Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .current_dir(cwd).output().await
+            {
+                Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                Err(e) => return format!("error getting remote URL: {e}"),
+            };
+
+            // Parse owner/repo from https or ssh remote URLs
+            // https://github.com/owner/repo.git  OR  git@github.com:owner/repo.git
+            let path_part = if remote_url.starts_with("git@") {
+                remote_url.splitn(2, ':').nth(1).unwrap_or("").to_string()
+            } else {
+                remote_url.trim_start_matches("https://")
+                    .splitn(2, '/').skip(1).collect::<Vec<_>>().join("/")
+            };
+            let repo_path = path_part.trim_end_matches(".git").to_string();
+
+            let client = reqwest::Client::new();
+
+            if remote_url.contains("github.com") {
+                let url = format!("https://api.github.com/repos/{repo_path}/pulls");
+                match client.post(&url)
+                    .bearer_auth(&token)
+                    .header("User-Agent", "claudulhu")
+                    .header("Accept", "application/vnd.github+json")
+                    .json(&serde_json::json!({ "title": title, "body": body, "head": head, "base": base }))
+                    .send().await
+                {
+                    Err(e) => format!("error: {e}"),
+                    Ok(resp) => {
+                        let status = resp.status();
+                        match resp.json::<serde_json::Value>().await {
+                            Err(e) => format!("error parsing response: {e}"),
+                            Ok(v) => if status.is_success() {
+                                format!("Pull request created: {}", v["html_url"].as_str().unwrap_or(""))
+                            } else {
+                                format!("HTTP {status}: {}", v["message"].as_str().unwrap_or(&v.to_string()))
+                            },
+                        }
+                    }
+                }
+            } else if remote_url.contains("gitlab.com") || remote_url.contains("gitlab.") {
+                // GitLab: project path must be URL-encoded
+                let encoded = repo_path.replace('/', "%2F");
+                let url = format!("https://gitlab.com/api/v4/projects/{encoded}/merge_requests");
+                match client.post(&url)
+                    .header("PRIVATE-TOKEN", &token)
+                    .json(&serde_json::json!({ "title": title, "description": body, "source_branch": head, "target_branch": base }))
+                    .send().await
+                {
+                    Err(e) => format!("error: {e}"),
+                    Ok(resp) => {
+                        let status = resp.status();
+                        match resp.json::<serde_json::Value>().await {
+                            Err(e) => format!("error parsing response: {e}"),
+                            Ok(v) => if status.is_success() {
+                                format!("Merge request created: {}", v["web_url"].as_str().unwrap_or(""))
+                            } else {
+                                format!("HTTP {status}: {}", v["message"].as_str().unwrap_or(&v.to_string()))
+                            },
+                        }
+                    }
+                }
+            } else {
+                format!("error: unsupported git host in remote URL: {remote_url}")
             }
         }
         _ => format!("unknown tool: {name}"),
