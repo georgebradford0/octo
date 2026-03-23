@@ -463,13 +463,7 @@ function ChatPane({
 
       ws.onclose = () => {
         if (!cancelled) {
-          if (inResponseRef.current) {
-            inResponseRef.current = false
-            setIsStreaming(false)
-            setMessages(prev => prev.map((m, i) =>
-              i < prev.length - 1 ? m : { ...m, streaming: false }
-            ))
-          }
+          completeResponse()
           updateStatus('disconnected')
           setTimeout(connect, 3000)
         }
@@ -715,7 +709,7 @@ function ChatPane({
             disabled={!pendingQuestion && (status === 'connecting' || status === 'disconnected')}
           />
           <div className="input-actions">
-            {isStreaming
+            {isStreaming || isPending
               ? <button className="btn btn--interrupt" onClick={sendInterrupt}>stop</button>
               : <button className="btn btn--send" onClick={sendMessage} disabled={!canSend}>send</button>
             }
