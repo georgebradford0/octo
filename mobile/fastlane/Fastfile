@@ -5,7 +5,7 @@ platform :android do
   lane :closed do
     gradle(
       project_dir: "android",
-      task:        "bundle",
+      task:        "clean bundle",
       build_type:  "Release",
       print_command: false,   # hides passwords from log output
     )
