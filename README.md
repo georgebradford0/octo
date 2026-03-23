@@ -7,22 +7,27 @@ An agentic coding assistant that runs a Rust server, exposing a WebSocket API fo
 The server is available as a multi-platform Docker image (`linux/amd64`, `linux/arm64`):
 
 ```sh
-docker run -p 8000:8000 \
+docker run -p 2222:2222 \
+  -e PUBLIC_HOST=1.2.3.4 \
   -e GIT_URL=https://github.com/user/repo \
   -e GIT_TOKEN=ghp_... \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   ghcr.io/georgebradford0/claudulhu-server:latest
 ```
 
+On startup the container prints a QR code. Scan it with the mobile app to connect — the app establishes an SSH tunnel (port 2222) and routes all traffic through it. No TLS certificate required.
+
 ### Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
+| `PUBLIC_HOST` | Yes | Public IP or hostname of the server (encoded in the QR code) |
 | `GIT_URL` | Yes | URL of the repository to clone |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
 | `GIT_TOKEN` | No | GitHub/GitLab personal access token (required for pushing to private repos or creating PRs) |
 | `GIT_USER_NAME` | No | Git commit author name (default: `claudulhu`) |
 | `GIT_USER_EMAIL` | No | Git commit author email (default: `claudulhu@localhost`) |
+| `SSH_PORT` | No | Port for the SSH tunnel endpoint (default: `2222`) |
 
 ### Git URL schemes
 
@@ -39,11 +44,11 @@ Two URL schemes are supported:
 
 ### Multiple repos
 
-Each container is independent. Run one per repo on different host ports:
+Each container is independent. Run one per repo on different SSH ports:
 
 ```sh
-docker run -d -p 8000:8000 -e GIT_URL=https://github.com/user/repo-a ...
-docker run -d -p 8001:8000 -e GIT_URL=https://github.com/user/repo-b ...
+docker run -d -p 2222:2222 -e PUBLIC_HOST=1.2.3.4 -e SSH_PORT=2222 -e GIT_URL=https://github.com/user/repo-a ...
+docker run -d -p 2223:2223 -e PUBLIC_HOST=1.2.3.4 -e SSH_PORT=2223 -e GIT_URL=https://github.com/user/repo-b ...
 ```
 
 ### PR/MR creation
