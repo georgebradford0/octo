@@ -7,10 +7,8 @@ export interface Spec extends TurboModule {
    *
    * @param host        SSH server hostname or IP address
    * @param port        SSH server port (typically 22)
-   * @param hostPubKey  Base64-encoded OpenSSH wire-format Ed25519 public key
-   *                    (the second field of an ssh-ed25519 .pub file — "hk" in the QR)
-   * @param clientPrivKey Base64-encoded OpenSSH private key PEM file contents
-   *                      including BEGIN/END headers ("ck" in the QR)
+   * @param hostPubKey  Base64-encoded raw 32-byte Ed25519 host public key ("hk" in the QR)
+   * @param clientPrivKey Base64-encoded raw 32-byte Ed25519 private key seed ("ck" in the QR)
    * @returns           The local port number that was bound for forwarding to
    *                    remote localhost:8000
    */

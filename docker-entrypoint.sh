@@ -60,10 +60,18 @@ EOF
 echo "[claudulhu] SSH server listening on port ${SSH_PORT}"
 
 # ── QR code ───────────────────────────────────────────────────────────────────
-# hk: base64 portion of the host public key (OpenSSH wire format)
-# ck: entire client private key file, base64-encoded (no newlines)
-HOST_PUB_KEY=$(awk '{print $2}' /etc/ssh/ssh_host_ed25519_key.pub)
-CLIENT_PRIV_KEY=$(base64 -w0 "${CLIENT_KEY_FILE}")
+# hk: base64(raw 32-byte Ed25519 host public key)
+#     Extracted from OpenSSH wire format: skip 4+11+4 = 19 bytes header
+# ck: base64(raw 32-byte Ed25519 private key seed)
+#     Extracted from OpenSSH binary blob: offset 125 =
+#       15 (magic) + 8 (ciphername "none") + 8 (kdfname "none") + 4 (kdfoptions)
+#       + 4 (num_keys) + 55 (pubkey blob w/ 4-byte len) + 4 (priv section len)
+#       + 4 (checkint1) + 4 (checkint2) + 15 (keytype "ssh-ed25519" w/ 4-byte len)
+#       + 4 (priv key len) = 125
+HOST_PUB_KEY=$(awk '{print $2}' /etc/ssh/ssh_host_ed25519_key.pub \
+    | base64 -d | dd bs=1 skip=19 count=32 2>/dev/null | base64 -w0)
+CLIENT_PRIV_KEY=$(grep -v -- '-----' "${CLIENT_KEY_FILE}" | tr -d '\n' \
+    | base64 -d | dd bs=1 skip=125 count=32 2>/dev/null | base64 -w0)
 
 QR_DATA=$(printf '{"v":1,"host":"%s","port":%s,"hk":"%s","ck":"%s"}' \
     "${PUBLIC_HOST}" "${SSH_PORT}" "${HOST_PUB_KEY}" "${CLIENT_PRIV_KEY}")
@@ -71,7 +79,7 @@ QR_DATA=$(printf '{"v":1,"host":"%s","port":%s,"hk":"%s","ck":"%s"}' \
 echo ""
 echo "[claudulhu] Scan this QR code with the app to connect:"
 echo ""
-printf '%s' "${QR_DATA}" | qrencode -t UTF8 -o -
+printf '%s' "${QR_DATA}" | qrencode -l L -m 1 -t UTF8 -o -
 echo ""
 
 # Private key no longer needed on disk — app has it from the QR

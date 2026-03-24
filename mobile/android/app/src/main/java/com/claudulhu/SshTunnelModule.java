@@ -17,13 +17,10 @@ import com.jcraft.jsch.UserInfo;
 import com.jcraft.jsch.Identity;
 import com.jcraft.jsch.JSchException;
 
-import org.bouncycastle.crypto.params.AsymmetricKeyParameter;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
-import org.bouncycastle.crypto.util.OpenSSHPrivateKeyUtil;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Properties;
 
@@ -70,14 +67,10 @@ public class SshTunnelModule extends NativeSshTunnelSpec {
      *
      * @param host          SSH server hostname / IP
      * @param port          SSH server port (typically 22)
-     * @param hostPubKey    Base64-encoded OpenSSH wire-format public key — the
-     *                      second field of an ssh-ed25519 .pub file. Decodes to
-     *                      the standard 51-byte blob: [uint32 11]["ssh-ed25519"]
-     *                      [uint32 32][32-byte key]. Matches what the Docker
-     *                      container prints in the QR code ("hk" field).
-     * @param clientPrivKey Base64-encoded contents of the OpenSSH Ed25519 private
-     *                      key PEM file (including BEGIN/END headers). Matches the
-     *                      "ck" field in the QR code.
+     * @param hostPubKey    Base64-encoded raw 32-byte Ed25519 host public key
+     *                      (the "hk" field in the QR code).
+     * @param clientPrivKey Base64-encoded raw 32-byte Ed25519 private key seed
+     *                      (the "ck" field in the QR code).
      * @param promise       Resolves with the local port bound for forwarding,
      *                      or rejects with an error message.
      */
@@ -93,37 +86,27 @@ public class SshTunnelModule extends NativeSshTunnelSpec {
         new Thread(() -> {
             try {
                 // ------------------------------------------------------------------
-                // 1. Parse host public key from OpenSSH wire format
-                //    "hk" in the QR = awk '{print $2}' ssh_host_ed25519_key.pub
-                //    Decodes to [uint32 len]["ssh-ed25519"][uint32 32][32-byte key]
+                // 1. Decode raw 32-byte Ed25519 host public key
+                //    "hk" in the QR = base64(raw 32-byte pubkey)
                 // ------------------------------------------------------------------
-                byte[] wireFormat = Base64.decode(hostPubKey, Base64.DEFAULT);
-                byte[] rawPub = PinnedHostKeyRepository.extractEd25519PublicKey(wireFormat);
-                if (rawPub == null) {
+                byte[] rawPub = Base64.decode(hostPubKey, Base64.DEFAULT);
+                if (rawPub == null || rawPub.length != 32) {
                     promise.reject("SSH_KEY_ERROR",
-                            "hostPubKey is not a valid Ed25519 SSH wire-format public key");
+                            "hostPubKey must be a base64-encoded 32-byte Ed25519 public key");
                     return;
                 }
 
                 // ------------------------------------------------------------------
-                // 2. Parse client private key from OpenSSH PEM file
-                //    "ck" in the QR = base64 -w0 of the entire private key file
+                // 2. Decode raw 32-byte Ed25519 private key seed
+                //    "ck" in the QR = base64(raw 32-byte seed)
                 // ------------------------------------------------------------------
-                byte[] pemBytes = Base64.decode(clientPrivKey, Base64.DEFAULT);
-                String pemStr = new String(pemBytes, StandardCharsets.UTF_8);
-                // Strip PEM armour and whitespace to get the raw base64 blob.
-                String inner = pemStr
-                        .replace("-----BEGIN OPENSSH PRIVATE KEY-----", "")
-                        .replace("-----END OPENSSH PRIVATE KEY-----", "")
-                        .replaceAll("\\s+", "");
-                byte[] blob = Base64.decode(inner, Base64.DEFAULT);
-                AsymmetricKeyParameter keyParam = OpenSSHPrivateKeyUtil.parsePrivateKeyBlob(blob);
-                if (!(keyParam instanceof Ed25519PrivateKeyParameters)) {
+                byte[] seed = Base64.decode(clientPrivKey, Base64.DEFAULT);
+                if (seed == null || seed.length != 32) {
                     promise.reject("SSH_KEY_ERROR",
-                            "clientPrivKey is not an Ed25519 private key");
+                            "clientPrivKey must be a base64-encoded 32-byte Ed25519 seed");
                     return;
                 }
-                Ed25519PrivateKeyParameters bcPriv = (Ed25519PrivateKeyParameters) keyParam;
+                Ed25519PrivateKeyParameters bcPriv = new Ed25519PrivateKeyParameters(seed, 0);
                 Ed25519PublicKeyParameters bcPub = bcPriv.generatePublicKey();
 
                 // ------------------------------------------------------------------
