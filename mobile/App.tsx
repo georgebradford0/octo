@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -22,11 +23,12 @@ import SshTunnel from './src/NativeSshTunnel'
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 interface SshConnectionInfo {
-  v:    number
-  host: string
-  port: number
-  hk:   string   // base64(SHA-256 fingerprint of ECDSA host key) — converted from QR base32
-  ck:   string   // base64(raw 32-byte Ed25519 private seed) — converted from QR base32
+  v:      number
+  host:   string
+  port:   number
+  hk:     string    // base64(SHA-256 fingerprint of ECDSA host key) — converted from QR base32
+  ck:     string    // base64(raw 32-byte Ed25519 private seed) — converted from QR base32
+  label?: string    // repo name, populated after first successful connect
 }
 
 type ServerFrame =
@@ -579,6 +581,34 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
   )
 }
 
+// ── ConnRow ───────────────────────────────────────────────────────────────────
+
+function ConnRow({ conn, isConnecting, error, onSelect, onDelete }: {
+  conn:         SshConnectionInfo
+  isConnecting: boolean
+  error:        string | null
+  onSelect:     () => void
+  onDelete:     () => void
+}) {
+  return (
+    <TouchableOpacity style={s.connRow} onPress={onSelect} activeOpacity={0.7}>
+      <View style={s.connInfo}>
+        <Text style={s.connLabel}>{conn.label ?? `${conn.host}:${conn.port}`}</Text>
+        <Text style={s.connHost}>{conn.host}:{conn.port}</Text>
+        {error && <Text style={s.connError} numberOfLines={2}>{error}</Text>}
+      </View>
+      {isConnecting
+        ? <ActivityIndicator size="small" color={C.accent} />
+        : (
+          <TouchableOpacity onPress={onDelete} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Text style={s.connDelete}>✕</Text>
+          </TouchableOpacity>
+        )
+      }
+    </TouchableOpacity>
+  )
+}
+
 // ── Root App ──────────────────────────────────────────────────────────────────
 
 function AppInner() {
@@ -592,23 +622,34 @@ function AppInner() {
   const [branches,     setBranches]     = useState<Branch[]>([])
   const [showBranches, setShowBranches] = useState(false)
   const [repoName,     setRepoName]     = useState<string | null>(null)
+  const [savedConns,   setSavedConns]   = useState<SshConnectionInfo[]>([])
 
-  // ── Load stored connection on mount ────────────────────────────────────────
+  // ── Load stored connections on mount (migrate old single-key format) ────────
   useEffect(() => {
-    AsyncStorage.getItem('sshConnection').then(json => {
-      if (!json) { return }
-      try {
-        const conn = JSON.parse(json) as SshConnectionInfo
-        setSshConn(conn)
-      } catch {}
+    AsyncStorage.multiGet(['sshConnections', 'sshConnection']).then(([[, newJson], [, oldJson]]) => {
+      let conns: SshConnectionInfo[] = []
+      if (newJson) {
+        try { conns = JSON.parse(newJson) } catch {}
+      } else if (oldJson) {
+        try {
+          conns = [JSON.parse(oldJson) as SshConnectionInfo]
+          AsyncStorage.setItem('sshConnections', JSON.stringify(conns))
+          AsyncStorage.removeItem('sshConnection')
+        } catch {}
+      }
+      setSavedConns(conns)
+      if (conns.length === 1) { setSshConn(conns[0]) }
     })
   }, [])
 
   // ── Establish SSH tunnel whenever sshConn changes ──────────────────────────
   useEffect(() => {
-    if (!sshConn) { return }
     setTunnelPort(null)
     setTunnelError(null)
+    setRepoName(null)
+    setBranches([])
+    setTabs([])
+    if (!sshConn) { return }
 
     SshTunnel.connect(sshConn.host, sshConn.port, sshConn.hk, sshConn.ck)
       .then(port => { setTunnelPort(port) })
@@ -627,14 +668,24 @@ function AppInner() {
 
   // ── Fetch repo name ────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!tunnelPort) { return }
+    if (!tunnelPort || !sshConn) { return }
     fetch(`http://127.0.0.1:${tunnelPort}/config`)
       .then(r => r.ok ? r.json() : null)
       .then((d: { repo?: string | null; name?: string | null } | null) => {
-        setRepoName(d?.name ?? null)
+        const name = d?.name ?? null
+        setRepoName(name)
+        if (name) {
+          setSavedConns(prev => {
+            const updated = prev.map(c =>
+              c.host === sshConn.host && c.port === sshConn.port ? { ...c, label: name } : c
+            )
+            AsyncStorage.setItem('sshConnections', JSON.stringify(updated))
+            return updated
+          })
+        }
       })
       .catch(() => {})
-  }, [tunnelPort])
+  }, [tunnelPort, sshConn])
 
   // ── Poll branches ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -676,7 +727,14 @@ function AppInner() {
       setTunnelError('Invalid QR code — not a claudulhu connection QR')
       return
     }
-    AsyncStorage.setItem('sshConnection', JSON.stringify(conn))
+    setSavedConns(prev => {
+      const updated = [
+        ...prev.filter(c => !(c.host === conn.host && c.port === conn.port)),
+        conn,
+      ]
+      AsyncStorage.setItem('sshConnections', JSON.stringify(updated))
+      return updated
+    })
     setSshConn(conn)
   }, [])
 
@@ -687,6 +745,21 @@ function AppInner() {
     }
     setScanning(true)
   }, [])
+
+  const selectConn = useCallback((c: SshConnectionInfo) => {
+    setSshConn(c)
+  }, [])
+
+  const deleteConn = useCallback((c: SshConnectionInfo) => {
+    setSavedConns(prev => {
+      const updated = prev.filter(x => !(x.host === c.host && x.port === c.port))
+      AsyncStorage.setItem('sshConnections', JSON.stringify(updated))
+      return updated
+    })
+    if (sshConn?.host === c.host && sshConn?.port === c.port) {
+      setSshConn(null)
+    }
+  }, [sshConn])
 
   const openTab = useCallback((branch: string, _worktreePath: string, initialMessage?: string) => {
     if (!tunnelPort) { return }
@@ -736,32 +809,42 @@ function AppInner() {
   if (!tunnelPort) {
     return (
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
-        <View style={s.setupCenter}>
-          <Text style={s.setupMark}>⬡</Text>
-          <Text style={s.setupTitle}>claudulhu</Text>
-
-          {!sshConn && (
-            <>
-              <Text style={s.setupDesc}>Scan the QR code printed by the Docker container</Text>
-              <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
-                <Text style={s.setupBtnText}>Scan QR code</Text>
+        {savedConns.length === 0 ? (
+          <View style={s.setupCenter}>
+            <Text style={s.setupMark}>⬡</Text>
+            <Text style={s.setupTitle}>claudulhu</Text>
+            <Text style={s.setupDesc}>Scan the QR code printed by the Docker container</Text>
+            <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
+              <Text style={s.setupBtnText}>Scan QR code</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={s.pickerWrap}>
+            <View style={s.pickerHeader}>
+              <Text style={s.setupMark}>⬡</Text>
+              <Text style={s.setupTitle}>claudulhu</Text>
+            </View>
+            <FlatList
+              data={savedConns}
+              keyExtractor={c => `${c.host}:${c.port}`}
+              style={s.connList}
+              renderItem={({ item }) => (
+                <ConnRow
+                  conn={item}
+                  isConnecting={sshConn?.host === item.host && sshConn?.port === item.port && !tunnelError}
+                  error={sshConn?.host === item.host && sshConn?.port === item.port ? tunnelError : null}
+                  onSelect={() => selectConn(item)}
+                  onDelete={() => deleteConn(item)}
+                />
+              )}
+            />
+            <View style={s.pickerFooter}>
+              <TouchableOpacity style={[s.setupBtn, s.pickerScanBtn]} onPress={requestCameraAndScan}>
+                <Text style={s.setupBtnText}>Scan new QR code</Text>
               </TouchableOpacity>
-            </>
-          )}
-
-          {sshConn && !tunnelError && (
-            <Text style={s.setupStatus}>Connecting to {sshConn.host}:{sshConn.port}…</Text>
-          )}
-
-          {tunnelError && (
-            <>
-              <Text style={s.setupError}>{tunnelError}</Text>
-              <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
-                <Text style={s.setupBtnText}>Re-scan QR code</Text>
-              </TouchableOpacity>
-            </>
-          )}
-        </View>
+            </View>
+          </View>
+        )}
       </SafeAreaView>
     )
   }
@@ -787,7 +870,7 @@ function AppInner() {
             <TouchableOpacity style={s.iconBtn} onPress={() => setShowBranches(true)}>
               <Text style={s.iconBtnText}>⎇ {activeWorktrees}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={s.iconBtn} onPress={requestCameraAndScan}>
+            <TouchableOpacity style={s.iconBtn} onPress={() => setSshConn(null)}>
               <Text style={s.iconBtnText}>⬡</Text>
             </TouchableOpacity>
           </View>
@@ -893,6 +976,19 @@ const s = StyleSheet.create({
   setupError:       { fontSize: 14, color: C.red, textAlign: 'center', lineHeight: 20 },
   setupBtn:         { backgroundColor: C.accent, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 32, alignItems: 'center', marginTop: 8 },
   setupBtnText:     { color: '#fff', fontWeight: '700', fontSize: 16 },
+
+  // Connection picker
+  pickerWrap:       { flex: 1 },
+  pickerHeader:     { alignItems: 'center', paddingTop: 48, paddingBottom: 24, gap: 8 },
+  pickerFooter:     { paddingHorizontal: 24, paddingBottom: 24, paddingTop: 16 },
+  pickerScanBtn:    { width: '100%' },
+  connList:         { flex: 1 },
+  connRow:          { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  connInfo:         { flex: 1 },
+  connLabel:        { color: C.textPrimary, fontSize: 16, fontWeight: '600' },
+  connHost:         { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  connError:        { color: C.red, fontSize: 12, marginTop: 4 },
+  connDelete:       { color: C.textMuted, fontSize: 18, paddingLeft: 16 },
 
   // QR scanner
   scannerFull:      { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
