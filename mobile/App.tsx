@@ -25,8 +25,8 @@ interface SshConnectionInfo {
   v:    number
   host: string
   port: number
-  hk:   string   // base64 OpenSSH wire-format host public key ("hk" from QR)
-  ck:   string   // base64 OpenSSH private key PEM file ("ck" from QR)
+  hk:   string   // base64(raw 32-byte Ed25519 host pubkey) — converted from QR base32
+  ck:   string   // base64(raw 32-byte Ed25519 private seed) — converted from QR base32
 }
 
 type ServerFrame =
@@ -83,13 +83,33 @@ type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 let _id = 0
 const uid = () => `m${++_id}`
 
+// Convert a base32 string (no padding) to a base64 string.
+// Used to decode the compact QR format where keys are base32-encoded.
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+function base32ToBase64(b32: string): string {
+  let bits = 0, val = 0
+  const bytes: number[] = []
+  for (const c of b32) {
+    const idx = B32.indexOf(c)
+    if (idx < 0) continue
+    val = (val << 5) | idx
+    bits += 5
+    if (bits >= 8) { bytes.push((val >>> (bits - 8)) & 0xff); bits -= 8 }
+  }
+  return btoa(String.fromCharCode(...bytes))
+}
+
 function parseQrData(raw: string): SshConnectionInfo | null {
-  try {
-    const p = JSON.parse(raw)
-    if (typeof p.host !== 'string' || typeof p.port !== 'number' ||
-        typeof p.hk   !== 'string' || typeof p.ck   !== 'string') { return null }
-    return { v: p.v ?? 1, host: p.host, port: p.port, hk: p.hk, ck: p.ck }
-  } catch { return null }
+  // Compact format v1: "1:host:port:hk_base32:ck_base32"
+  // All chars are in QR alphanumeric set → smaller QR code version.
+  const parts = raw.split(':')
+  if (parts[0] === '1' && parts.length === 5) {
+    const [, host, portStr, hk32, ck32] = parts
+    const port = parseInt(portStr, 10)
+    if (!host || isNaN(port)) return null
+    return { v: 1, host, port, hk: base32ToBase64(hk32), ck: base32ToBase64(ck32) }
+  }
+  return null
 }
 
 // ── Colours ────────────────────────────────────────────────────────────────────
