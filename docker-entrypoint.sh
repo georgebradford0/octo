@@ -11,8 +11,12 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
     exit 1
 fi
 if [ -z "$PUBLIC_HOST" ]; then
-    echo "ERROR: PUBLIC_HOST is required (your server's public IP or hostname)" >&2
-    exit 1
+    PUBLIC_HOST=$(curl -sf --max-time 5 https://api.ipify.org || wget -qO- --timeout=5 https://api.ipify.org 2>/dev/null)
+    if [ -z "$PUBLIC_HOST" ]; then
+        echo "ERROR: Could not auto-detect public IP. Set PUBLIC_HOST explicitly." >&2
+        exit 1
+    fi
+    echo "[claudulhu] Detected public IP: ${PUBLIC_HOST}"
 fi
 
 SSH_PORT="${SSH_PORT:-2222}"

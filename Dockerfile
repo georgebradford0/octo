@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y \
     openssh-server \
     qrencode \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/claudulhu-server /usr/local/bin/claudulhu-server

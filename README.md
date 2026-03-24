@@ -8,7 +8,6 @@ The server is available as a multi-platform Docker image (`linux/amd64`, `linux/
 
 ```sh
 docker run -p 2222:2222 \
-  -e PUBLIC_HOST=1.2.3.4 \
   -e GIT_URL=https://github.com/user/repo \
   -e GIT_TOKEN=ghp_... \
   -e ANTHROPIC_API_KEY=sk-ant-... \
@@ -21,7 +20,7 @@ On startup the container prints a QR code. Scan it with the mobile app to connec
 
 | Variable | Required | Description |
 |---|---|---|
-| `PUBLIC_HOST` | Yes | Public IP or hostname of the server (encoded in the QR code) |
+| `PUBLIC_HOST` | No | Public IP or hostname of the server. Auto-detected via `api.ipify.org` if not set. |
 | `GIT_URL` | Yes | URL of the repository to clone |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
 | `GIT_TOKEN` | No | GitHub/GitLab personal access token (required for pushing to private repos or creating PRs) |
