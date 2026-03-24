@@ -110,6 +110,8 @@ public class SshTunnelModule extends NativeSshTunnelSpec {
                 }
                 Ed25519PrivateKeyParameters bcPriv = new Ed25519PrivateKeyParameters(seed, 0);
                 Ed25519PublicKeyParameters bcPub = bcPriv.generatePublicKey();
+                android.util.Log.d("SshTunnel", "client pubkey (base64): "
+                        + Base64.encodeToString(bcPub.getEncoded(), Base64.NO_WRAP));
 
                 // ------------------------------------------------------------------
                 // 3. Configure JSch
@@ -122,7 +124,7 @@ public class SshTunnelModule extends NativeSshTunnelSpec {
                 // 4. Open SSH session
                 // ------------------------------------------------------------------
                 int sshPort = (int) port;
-                Session session = jsch.getSession("claude", host, sshPort);
+                Session session = jsch.getSession("root", host, sshPort);
 
                 Properties config = new Properties();
                 config.put("StrictHostKeyChecking", "yes");
