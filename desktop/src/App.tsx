@@ -767,6 +767,7 @@ export default function App() {
   ])
   const [activeTab,   setActiveTab]   = useState('main')
   const [tabStatuses, setTabStatuses] = useState<Record<string, ConnStatus>>({ main: 'connecting' })
+  const [mainPaneKey, setMainPaneKey] = useState(0)
   const [branches,    setBranches]    = useState<Branch[]>([])
   const [repoPath,    setRepoPath]    = useState<string | null>(null)
   const [repoReady,   setRepoReady]   = useState(!isTauri())
@@ -791,6 +792,10 @@ export default function App() {
     await tauriInvoke('set_repo', { repo: folder })
     setRepoPath(folder)
     setRepoReady(true)
+    setTabs([{ id: 'main', label: 'main', wsUrl: MAIN_WS_URL }])
+    setActiveTab('main')
+    setTabStatuses({ main: 'connecting' })
+    setMainPaneKey(k => k + 1)
   }, [])
 
   const saveApiKey = useCallback(async () => {
@@ -1016,7 +1021,7 @@ export default function App() {
           <div className="chat-panes">
             {tabs.map(tab => (
               <div
-                key={tab.id}
+                key={tab.id === 'main' ? `main-${mainPaneKey}` : tab.id}
                 className={`chat-pane-wrapper${activeTab === tab.id ? ' chat-pane-wrapper--active' : ''}`}
               >
                 <ChatPane
