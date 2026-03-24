@@ -74,7 +74,7 @@ QR_DATA="1:${PUBLIC_HOST}:${SSH_PORT}:${HOST_PUB_KEY}:${CLIENT_PRIV_KEY}"
 echo ""
 echo "[claudulhu] Scan this QR code with the app to connect:"
 echo ""
-printf '%s' "${QR_DATA}" | qrencode -l L -m 1 -t ANSIUTF8 -o -
+printf '%s' "${QR_DATA}" | qrencode -l L -m 4 -t UTF8 -o -
 echo ""
 
 # Private key no longer needed on disk — app has it from the QR
