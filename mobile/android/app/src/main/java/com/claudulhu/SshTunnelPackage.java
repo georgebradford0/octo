@@ -45,7 +45,7 @@ public class SshTunnelPackage extends TurboReactPackage {
                     SshTunnelModule.NAME,   // className
                     false,                  // canOverrideExistingModule
                     false,                  // needsEagerInit
-                    true,                   // isCxxModule (false → Java)
+                    false,                  // isCxxModule — false for Java TurboModules
                     true                    // isTurboModule
                 )
             );

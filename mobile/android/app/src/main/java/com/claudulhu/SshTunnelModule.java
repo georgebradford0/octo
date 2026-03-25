@@ -136,6 +136,11 @@ public class SshTunnelModule extends NativeSshTunnelSpec {
                 // Prevent JSch from prompting for passwords or pass-phrases.
                 session.setUserInfo(new SilentUserInfo());
 
+                // Send a keepalive every 30 s so mobile NATs don't drop the
+                // idle SSH connection between tunnel setup and WebSocket use.
+                session.setServerAliveInterval(30_000);
+                session.setServerAliveCountMax(3);
+
                 session.connect(30_000 /* ms */);
 
                 // ------------------------------------------------------------------
