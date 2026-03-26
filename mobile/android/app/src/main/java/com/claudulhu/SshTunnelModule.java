@@ -161,8 +161,9 @@ public class SshTunnelModule extends NativeSshTunnelSpec {
 
                 promise.resolve(assignedPort);
 
-            } catch (Exception e) {
-                promise.reject("SSH_CONNECT_ERROR", e.getMessage(), e);
+            } catch (Throwable t) {
+                promise.reject("SSH_CONNECT_ERROR",
+                        t.getClass().getName() + ": " + t.getMessage(), new Exception(t));
             }
         }, "SshTunnelThread").start();
     }
