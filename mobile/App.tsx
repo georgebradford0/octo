@@ -394,7 +394,9 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
     setIsPending(false)
     setIsStreaming(false)
     setPendingQuestion(false)
-    setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
+    // Clear streaming on ALL messages, not just the last — belt-and-suspenders in
+    // case an earlier bubble was left streaming by a skipped completeResponse.
+    setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
   }, [])
 
   const handleFrame = useCallback((frame: ServerFrame) => {
@@ -410,6 +412,13 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
         ensureAssistantMsg(); appendBlock({ kind: 'tool_use', tool: frame.tool, input: frame.input })
         break
       case 'tool_result':
+        if (!inResponseRef.current) {
+          // Spurious tool_result (e.g. duplicate, resumed session mid-tool-call).
+          // appendBlock would silently drop it anyway, and setting isPending=true
+          // here with nothing to clear it is what causes the hanging dots.
+          console.warn('[chat] tool_result outside active response – ignoring')
+          break
+        }
         appendBlock({ kind: 'tool_result', content: frame.content })
         console.log('[chat] tool_result → isPending=true, inResponse=false')
         inResponseRef.current = false
@@ -509,6 +518,11 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
 
       ws.onerror = (e) => {
         console.error('[ws] error on', wsUrl, e)
+        inResponseRef.current = false
+        setIsStreaming(false)
+        setIsPending(false)
+        setPendingQuestion(false)
+        setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
         updateStatus('error')
       }
     }
