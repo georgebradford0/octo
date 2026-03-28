@@ -190,8 +190,15 @@ private func runHandshake(remoteFd: Int32, serverPub: Data) throws -> NoiseTrans
     hs.mixHash(Data())
 
     // Message 1: → e
+    // Noise spec: after each token/payload, (Encrypt|Decrypt)AndHash is called.
+    // For M1's empty payload with no key, this is just MixHash("").
+    // snow calls encrypt_and_mix_hash("") at the end of every write_message, even
+    // for the empty payload.  Without this the hash state diverges from snow's.
     NSLog("[Noise] sending M1 (fd=%d)", remoteFd)
+    NSLog("[Noise] M1: ePub=%@", ePub.map { String(format: "%02x", $0) }.joined())
     hs.mixHash(ePub)
+    hs.mixHash(Data())                   // M1 empty-payload: MixHash("") per Noise spec §5.2
+    NSLog("[Noise] M1: h after mixHash(ePub)+mixHash(empty)=%@", hs.h.map { String(format: "%02x", $0) }.joined())
     try fdWriteFrame(remoteFd, ePub)
     NSLog("[Noise] M1 sent, reading M2")
 
@@ -201,21 +208,38 @@ private func runHandshake(remoteFd: Int32, serverPub: Data) throws -> NoiseTrans
     guard msg2.count == 96 else { throw NoiseError.badFrame("msg2 length \(msg2.count)") }
 
     let rePub = Data(msg2.prefix(32))
+    NSLog("[Noise] M2: rePub=%@", rePub.map { String(format: "%02x", $0) }.joined())
     hs.mixHash(rePub)
+    NSLog("[Noise] M2: h after mixHash(rePub)=%@", hs.h.map { String(format: "%02x", $0) }.joined())
 
+    NSLog("[Noise] M2: computing ee")
     let ee = try x25519(priv: ePriv, pubBytes: rePub)
+    NSLog("[Noise] M2: ee=%@", ee.map { String(format: "%02x", $0) }.joined())
     hs.mixKey(ee)
+    NSLog("[Noise] M2: ck after mixKey(ee)=%@", hs.ck.map { String(format: "%02x", $0) }.joined())
+    NSLog("[Noise] M2: k after mixKey(ee)=%@", hs.k.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "nil")
 
     let encRs = Data(msg2[32..<80])
+    NSLog("[Noise] M2: encRs=%@", encRs.map { String(format: "%02x", $0) }.joined())
+    NSLog("[Noise] M2: h_aad=%@", hs.h.map { String(format: "%02x", $0) }.joined())
+    NSLog("[Noise] M2: decrypting encRs (48 bytes, nonce=%llu)", hs.n)
     let rsPub = try hs.decryptAndHash(encRs)
+    NSLog("[Noise] M2: rsPub=%@", rsPub.map { String(format: "%02x", $0) }.joined())
+    NSLog("[Noise] M2: serverPub=%@", serverPub.map { String(format: "%02x", $0) }.joined())
 
     guard rsPub == serverPub else { throw NoiseError.identityMismatch }
+    NSLog("[Noise] M2: identity verified")
 
+    NSLog("[Noise] M2: computing es")
     let es = try x25519(priv: ePriv, pubBytes: rsPub)
+    NSLog("[Noise] M2: es=%@", es.map { String(format: "%02x", $0) }.joined())
     hs.mixKey(es)
+    NSLog("[Noise] M2: k after mixKey(es)=%@", hs.k.map { $0.map { String(format: "%02x", $0) }.joined() } ?? "nil")
 
     let encEmpty2 = Data(msg2[80...])
+    NSLog("[Noise] M2: decrypting encEmpty2 (16 bytes, nonce=%llu)", hs.n)
     _ = try hs.decryptAndHash(encEmpty2)
+    NSLog("[Noise] M2: encEmpty2 verified")
 
     // Message 3: → s, se
     NSLog("[Noise] sending M3")

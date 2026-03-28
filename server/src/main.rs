@@ -100,15 +100,18 @@ async fn noise_handshake(
 
     // Message 1: ← e
     let msg1 = read_noise_frame(stream).await?;
+    eprintln!("[noise-dbg] msg1 ({} bytes): {}", msg1.len(), hex::encode(&msg1));
     hs.read_message(&msg1, &mut payload)?;
 
     // Message 2: → e, ee, s, es
     let mut msg2 = vec![0u8; 65535];
     let n = hs.write_message(&[], &mut msg2)?;
+    eprintln!("[noise-dbg] msg2 ({} bytes): {}", n, hex::encode(&msg2[..n]));
     write_noise_frame(stream, &msg2[..n]).await?;
 
     // Message 3: ← s, se
     let msg3 = read_noise_frame(stream).await?;
+    eprintln!("[noise-dbg] msg3 ({} bytes): {}", msg3.len(), hex::encode(&msg3));
     hs.read_message(&msg3, &mut payload)?;
 
     Ok(hs.into_transport_mode()?)
