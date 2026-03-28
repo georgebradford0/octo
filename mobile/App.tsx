@@ -360,6 +360,7 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
   }, [])
 
   const ensureAssistantMsg = useCallback(() => {
+    console.log('[chat] ensureAssistantMsg inResponse=', inResponseRef.current)
     if (!inResponseRef.current) {
       inResponseRef.current = true
       setIsPending(false)
@@ -371,7 +372,10 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
   const appendBlock = useCallback((block: Block) => {
     setMessages(prev => {
       const last = prev[prev.length - 1]
-      if (!last?.streaming) { return prev }
+      if (!last?.streaming) {
+        console.warn('[chat] appendBlock dropped – last msg not streaming, kind=', block.kind, 'last.streaming=', last?.streaming)
+        return prev
+      }
       if (block.kind === 'text') {
         const tail = last.blocks[last.blocks.length - 1]
         if (tail?.kind === 'text') {
@@ -385,6 +389,7 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
   }, [])
 
   const completeResponse = useCallback(() => {
+    console.log('[chat] completeResponse')
     inResponseRef.current = false
     setIsPending(false)
     setIsStreaming(false)
@@ -393,6 +398,7 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
   }, [])
 
   const handleFrame = useCallback((frame: ServerFrame) => {
+    console.log('[chat] handleFrame type=', frame.type, 'inResponse=', inResponseRef.current)
     switch (frame.type) {
       case 'ready':
         updateStatus(frame.resumed ? 'resumed' : 'ready')
@@ -405,20 +411,23 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
         break
       case 'tool_result':
         appendBlock({ kind: 'tool_result', content: frame.content })
+        console.log('[chat] tool_result → isPending=true, inResponse=false')
         inResponseRef.current = false
         setIsStreaming(false)
         setIsPending(true)
         setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
         break
       case 'result':
-        appendBlock({ kind: 'result', cost_usd: frame.cost_usd, turns: frame.turns })
+        // ensureAssistantMsg in case result arrives while pending (tool_result → result
+        // with no intervening text/tool_use frame), so appendBlock has a streaming msg.
+        ensureAssistantMsg(); appendBlock({ kind: 'result', cost_usd: frame.cost_usd, turns: frame.turns })
         completeResponse()
         break
       case 'error':
         ensureAssistantMsg(); appendBlock({ kind: 'error', message: frame.message }); completeResponse()
         break
       case 'interrupted':
-        appendBlock({ kind: 'interrupted' }); completeResponse()
+        ensureAssistantMsg(); appendBlock({ kind: 'interrupted' }); completeResponse()
         break
       case 'question':
         ensureAssistantMsg()
@@ -484,13 +493,15 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
       }
 
       ws.onclose = (e) => {
-        console.log('[ws] closed', wsUrl, 'code:', e.code, 'reason:', e.reason)
+        console.log('[ws] closed', wsUrl, 'code:', e.code, 'reason:', e.reason, 'inResponse=', inResponseRef.current)
         if (!cancelled) {
-          if (inResponseRef.current) {
-            inResponseRef.current = false
-            setIsStreaming(false)
-            setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
-          }
+          // Clear ALL in-flight state regardless of inResponseRef — isPending can be
+          // true even when inResponseRef=false (between tool_result and the next frame).
+          inResponseRef.current = false
+          setIsStreaming(false)
+          setIsPending(false)
+          setPendingQuestion(false)
+          setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
           updateStatus('disconnected')
           setTimeout(connect, 3000)
         }
@@ -525,15 +536,20 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
     const text = input.trim()
     if (!text) { return }
     if (isStreaming && !pendingQuestion) { return }
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn('[chat] sendMessage: ws not open, dropping send')
+      return
+    }
 
     if (pendingQuestion) {
       setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'text', text }] }])
-      wsRef.current?.send(JSON.stringify({ type: 'answer', answer: text }))
+      ws.send(JSON.stringify({ type: 'answer', answer: text }))
       setPendingQuestion(false)
       setIsPending(true)
     } else {
       setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'text', text }] }])
-      wsRef.current?.send(JSON.stringify({ type: 'message', text }))
+      ws.send(JSON.stringify({ type: 'message', text }))
       setIsPending(true)
     }
     setInput('')
@@ -542,7 +558,12 @@ function ChatPane({ wsUrl, canSpawnWorker, onStatusChange, onWorkerCreated, init
   const spawnWorker = useCallback(() => {
     const text = input.trim()
     if (!text || isStreaming) { return }
-    wsRef.current?.send(JSON.stringify({ type: 'spawn_worker', task: text }))
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn('[chat] spawnWorker: ws not open, dropping send')
+      return
+    }
+    ws.send(JSON.stringify({ type: 'spawn_worker', task: text }))
     setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'text', text }] }])
     setInput('')
     setIsPending(true)
