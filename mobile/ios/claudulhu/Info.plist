@@ -35,9 +35,7 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Camera is used to scan QR codes for server connection setup.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
-	<key>RCTNewArchEnabled</key>
+<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
