@@ -9,6 +9,9 @@ import Darwin
 //
 // After handshake a NoiseTransport encrypts/decrypts transport messages.
 // Each local TCP connection gets its own Noise session (no multiplexing needed).
+//
+// I/O uses raw BSD send()/recv() on blocking sockets throughout — CFStreamCreatePairWithSocket
+// internally sets the fd to non-blocking mode which breaks synchronous reads.
 
 // MARK: - Crypto primitives
 
@@ -127,9 +130,47 @@ private final class NoiseTransport {
     }
 }
 
+// MARK: - BSD socket I/O helpers (blocking, no CFStream/NSStream)
+
+private func fdWriteAll(_ fd: Int32, _ data: Data) throws {
+    var off = 0
+    while off < data.count {
+        let n = data.withUnsafeBytes { ptr in
+            Darwin.send(fd, ptr.baseAddress!.advanced(by: off), data.count - off, 0)
+        }
+        guard n > 0 else { throw NoiseError.ioError }
+        off += n
+    }
+}
+
+private func fdReadFully(_ fd: Int32, _ count: Int) throws -> Data {
+    var buf = Data(count: count)
+    var off = 0
+    while off < count {
+        let n = buf.withUnsafeMutableBytes { ptr in
+            Darwin.recv(fd, ptr.baseAddress!.advanced(by: off), count - off, 0)
+        }
+        guard n > 0 else { throw NoiseError.ioError }
+        off += n
+    }
+    return buf
+}
+
+/// Write a 2-byte-length-framed message.
+private func fdWriteFrame(_ fd: Int32, _ data: Data) throws {
+    try fdWriteAll(fd, Data([UInt8(data.count >> 8), UInt8(data.count & 0xff)]) + data)
+}
+
+/// Read a 2-byte-length-framed message.
+private func fdReadFrame(_ fd: Int32) throws -> Data {
+    let lenBuf = try fdReadFully(fd, 2)
+    let len    = Int(lenBuf[0]) << 8 | Int(lenBuf[1])
+    return try fdReadFully(fd, len)
+}
+
 // MARK: - Handshake runner
 
-private func runHandshake(remoteIn: InputStream, remoteOut: OutputStream, serverPub: Data) throws -> NoiseTransport {
+private func runHandshake(remoteFd: Int32, serverPub: Data) throws -> NoiseTransport {
     let proto = "Noise_XX_25519_ChaChaPoly_SHA256".data(using: .utf8)! // exactly 32 bytes
     var hs    = HandshakeState(proto)
 
@@ -140,16 +181,16 @@ private func runHandshake(remoteIn: InputStream, remoteOut: OutputStream, server
 
     // Message 1: → e
     hs.mixHash(ePub)
-    try ioWriteFrame(remoteOut, ePub)
+    try fdWriteFrame(remoteFd, ePub)
 
     // Message 2: ← e, ee, s, es  (96 bytes)
-    let msg2 = try ioReadFrame(remoteIn)
+    let msg2 = try fdReadFrame(remoteFd)
     guard msg2.count == 96 else { throw NoiseError.badFrame("msg2 length \(msg2.count)") }
 
-    let rePub = msg2.prefix(32)
-    hs.mixHash(Data(rePub))
+    let rePub = Data(msg2.prefix(32))
+    hs.mixHash(rePub)
 
-    let ee = try x25519(priv: ePriv, pubBytes: Data(rePub))
+    let ee = try x25519(priv: ePriv, pubBytes: rePub)
     hs.mixKey(ee)
 
     let encRs = Data(msg2[32..<80])
@@ -164,62 +205,14 @@ private func runHandshake(remoteIn: InputStream, remoteOut: OutputStream, server
     _ = try hs.decryptAndHash(encEmpty2)
 
     // Message 3: → s, se
-    let encS     = try hs.encryptAndHash(sPub)
-    let se       = try x25519(priv: sPriv, pubBytes: Data(rePub))
+    let encS      = try hs.encryptAndHash(sPub)
+    let se        = try x25519(priv: sPriv, pubBytes: rePub)
     hs.mixKey(se)
     let encEmpty3 = try hs.encryptAndHash(Data())
-    try ioWriteFrame(remoteOut, encS + encEmpty3)
+    try fdWriteFrame(remoteFd, encS + encEmpty3)
 
     let (sendKey, recvKey) = hs.split()
     return NoiseTransport(sendKey: sendKey, recvKey: recvKey)
-}
-
-// MARK: - Stream I/O helpers (NSStream over BSD fd)
-
-private func ioWriteFrame(_ s: OutputStream, _ data: Data) throws {
-    var packet = Data([UInt8(data.count >> 8), UInt8(data.count & 0xff)]) + data
-    var off = 0
-    while off < packet.count {
-        let n = packet.withUnsafeBytes { ptr in
-            s.write(ptr.baseAddress!.advanced(by: off).assumingMemoryBound(to: UInt8.self),
-                    maxLength: packet.count - off)
-        }
-        guard n > 0 else { throw NoiseError.ioError }
-        off += n
-    }
-}
-
-private func ioReadFrame(_ s: InputStream) throws -> Data {
-    var lenBuf = Data(count: 2)
-    try ioReadFully(s, &lenBuf, 2)
-    let len = Int(lenBuf[0]) << 8 | Int(lenBuf[1])
-    var buf = Data(count: len)
-    try ioReadFully(s, &buf, len)
-    return buf
-}
-
-private func ioReadFully(_ s: InputStream, _ buf: inout Data, _ count: Int) throws {
-    var off = 0
-    while off < count {
-        let n = buf.withUnsafeMutableBytes { ptr in
-            s.read(ptr.baseAddress!.advanced(by: off).assumingMemoryBound(to: UInt8.self),
-                   maxLength: count - off)
-        }
-        guard n > 0 else { throw NoiseError.ioError }
-        off += n
-    }
-}
-
-private func ioWriteAll(_ s: OutputStream, _ data: Data) throws {
-    var off = 0
-    while off < data.count {
-        let n = data.withUnsafeBytes { ptr in
-            s.write(ptr.baseAddress!.advanced(by: off).assumingMemoryBound(to: UInt8.self),
-                    maxLength: data.count - off)
-        }
-        guard n > 0 else { throw NoiseError.ioError }
-        off += n
-    }
 }
 
 // MARK: - BSD socket helpers
@@ -232,7 +225,7 @@ private func makeServerSocket() -> (fd: Int32, port: Int) {
 
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_addr   = in_addr(s_addr: 0x0100007f) // 127.0.0.1 big-endian
+    addr.sin_addr   = in_addr(s_addr: 0x0100007f) // 127.0.0.1 in host byte order on LE
     addr.sin_port   = 0
 
     let bindOK = withUnsafePointer(to: &addr) {
@@ -271,20 +264,6 @@ private func connectSocket(host: String, port: Int) -> Int32 {
     }
     guard ok == 0 else { Darwin.close(fd); return -1 }
     return fd
-}
-
-private func streams(for fd: Int32) -> (InputStream, OutputStream)? {
-    var rs: Unmanaged<CFReadStream>?
-    var ws: Unmanaged<CFWriteStream>?
-    CFStreamCreatePairWithSocket(kCFAllocatorDefault, CFSocketNativeHandle(fd), &rs, &ws)
-    guard let rsRetained = rs, let wsRetained = ws else { return nil }
-    // Set close-native-socket on one stream so the fd is freed when both streams close.
-    CFReadStreamSetProperty(rsRetained.takeUnretainedValue(),
-                            CFStreamPropertyKey(kCFStreamPropertyShouldCloseNativeSocket), kCFBooleanTrue)
-    let ins  = rsRetained.takeRetainedValue() as InputStream
-    let outs = wsRetained.takeRetainedValue() as OutputStream
-    ins.open(); outs.open()
-    return (ins, outs)
 }
 
 // MARK: - React Native Module
@@ -359,41 +338,40 @@ final class NoiseConnection: NSObject {
     }
 
     private func proxyConnection(localFd: Int32, host: String, port: Int, serverPub: Data) {
-        guard let (localIn, localOut) = streams(for: localFd) else {
-            Darwin.close(localFd); return
-        }
         let remoteFd = connectSocket(host: host, port: port)
-        guard remoteFd >= 0, let (remoteIn, remoteOut) = streams(for: remoteFd) else {
-            localIn.close(); localOut.close(); Darwin.close(localFd); return
+        guard remoteFd >= 0 else {
+            NSLog("[NoiseConnection] failed to connect to \(host):\(port)")
+            Darwin.close(localFd)
+            return
         }
 
         do {
-            let noise = try runHandshake(remoteIn: remoteIn, remoteOut: remoteOut, serverPub: serverPub)
+            let noise = try runHandshake(remoteFd: remoteFd, serverPub: serverPub)
             let g = DispatchGroup()
 
             // local → encrypt → remote
             g.enter()
             DispatchQueue.global(qos: .utility).async {
-                defer { g.leave(); remoteOut.close() }
+                defer { g.leave() }
                 var buf = Data(count: 65000)
                 while true {
                     let n = buf.withUnsafeMutableBytes {
-                        localIn.read($0.baseAddress!.assumingMemoryBound(to: UInt8.self), maxLength: 65000)
+                        Darwin.recv(localFd, $0.baseAddress!, 65000, 0)
                     }
                     guard n > 0,
                           let enc = try? noise.encrypt(buf.prefix(n)),
-                          (try? ioWriteFrame(remoteOut, enc)) != nil else { break }
+                          (try? fdWriteFrame(remoteFd, enc)) != nil else { break }
                 }
             }
 
             // remote → decrypt → local
             g.enter()
             DispatchQueue.global(qos: .utility).async {
-                defer { g.leave(); localOut.close() }
+                defer { g.leave() }
                 while true {
-                    guard let enc = try? ioReadFrame(remoteIn),
+                    guard let enc = try? fdReadFrame(remoteFd),
                           let dec = try? noise.decrypt(enc),
-                          (try? ioWriteAll(localOut, dec)) != nil else { break }
+                          (try? fdWriteAll(localFd, dec)) != nil else { break }
                 }
             }
 
@@ -401,8 +379,9 @@ final class NoiseConnection: NSObject {
         } catch {
             NSLog("[NoiseConnection] session error: \(error)")
         }
-        localIn.close(); localOut.close()
-        remoteIn.close(); remoteOut.close()
+
+        Darwin.close(localFd)
+        Darwin.close(remoteFd)
     }
 }
 
