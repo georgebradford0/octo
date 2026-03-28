@@ -48,12 +48,31 @@ Two URL schemes are supported:
 
 ### Multiple repos
 
-Each container is independent. Run one per repo on different ports:
+Each container is independent. Set `NOISE_PORT` to the host port you want to expose — the server binds on that port inside the container and encodes it in the QR code:
 
 ```sh
-docker run -d -p 9000:9000 -v claudulhu-noise-key-a:/etc/claudulhu -e PUBLIC_HOST=1.2.3.4 -e GIT_URL=https://github.com/user/repo-a ...
-docker run -d -p 9001:9000 -v claudulhu-noise-key-b:/etc/claudulhu -e PUBLIC_HOST=1.2.3.4 -e GIT_URL=https://github.com/user/repo-b ...
+docker run -d \
+  --name claudulhu-repo-a \
+  -p 9000:9000 \
+  -v claudulhu-key-a:/etc/claudulhu \
+  -e NOISE_PORT=9000 \
+  -e PUBLIC_HOST=1.2.3.4 \
+  -e GIT_URL=https://github.com/user/repo-a \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  ghcr.io/georgebradford0/claudulhu-server:latest
+
+docker run -d \
+  --name claudulhu-repo-b \
+  -p 9001:9001 \
+  -v claudulhu-key-b:/etc/claudulhu \
+  -e NOISE_PORT=9001 \
+  -e PUBLIC_HOST=1.2.3.4 \
+  -e GIT_URL=https://github.com/user/repo-b \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  ghcr.io/georgebradford0/claudulhu-server:latest
 ```
+
+Ports 9000–9099 are available on the default AWS deployment. Each container needs its own named volume so keypairs (and therefore QR codes) persist independently across restarts.
 
 ### PR/MR creation
 
