@@ -153,14 +153,10 @@ jobs:
 
       - name: Upload to TestFlight
         env:
-          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
-          API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
         run: |
-          mkdir -p "$HOME/.appstoreconnect/private_keys"
-          echo "$API_KEY_CONTENT" | base64 --decode > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
-          xcrun altool --upload-app \
-            --type ios \
-            --file ios/build/ipa/claudulhu.ipa \
-            --apiKey "$API_KEY_ID" \
-            --apiIssuer "$API_ISSUER_ID"
+          IPA_PATH=$(find ios/build/ipa -name "*.ipa" | head -1)
+          echo "Uploading: $IPA_PATH"
+          IPA_PATH="$IPA_PATH" bundle exec fastlane ios testflight
