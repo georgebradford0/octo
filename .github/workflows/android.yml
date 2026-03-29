@@ -87,5 +87,5 @@ jobs:
 
       - name: Deploy to Google Play
         env:
-          SUPPLY_JSON_KEY: /tmp/play-service-account.json
+          GOOGLE_PLAY_JSON_KEY: /tmp/play-service-account.json
         run: bundle exec fastlane android ${{ inputs.track }}
