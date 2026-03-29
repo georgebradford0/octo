@@ -125,46 +125,27 @@ const C = {
 
 // ── ToolUseBlock ──────────────────────────────────────────────────────────────
 
+const PRIMARY_KEYS = ['command', 'path', 'query', 'input', 'content', 'url', 'pattern', 'prompt']
+
+function primaryArg(input: Record<string, unknown>): string {
+  for (const key of PRIMARY_KEYS) {
+    if (typeof input[key] === 'string') return input[key] as string
+  }
+  const first = Object.values(input)[0]
+  return first !== undefined ? String(first) : ''
+}
+
 function ToolUseBlock({ tool, input }: { tool: string; input: Record<string, unknown> }) {
-  const [open, setOpen] = useState(false)
+  const arg = primaryArg(input)
   return (
-    <View style={s.toolRow}>
-      <TouchableOpacity style={s.toolInline} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
-        <Text style={s.toolIcon}>⚙</Text>
-        <Text style={s.toolName}>{tool}</Text>
-        <Text style={s.toolToggle}>{open ? '▲' : '▼'}</Text>
-      </TouchableOpacity>
-      {open && (
-        <ScrollView horizontal nestedScrollEnabled style={s.toolBody}>
-          <Text style={s.monoText}>{JSON.stringify(input, null, 2)}</Text>
-        </ScrollView>
-      )}
-    </View>
+    <Text style={s.toolLine}>{tool}("{arg}")</Text>
   )
 }
 
 // ── ToolResultBlock ────────────────────────────────────────────────────────────
 
-function ToolResultBlock({ content }: { content: unknown }) {
-  const [open, setOpen] = useState(false)
-  const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2)
-  const preview = text.slice(0, 60).replace(/\n/g, ' ')
-  return (
-    <View style={s.toolRow}>
-      <TouchableOpacity style={s.toolInline} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
-        <Text style={s.resultIcon}>↩</Text>
-        <Text style={s.resultPreview} numberOfLines={1}>
-          {preview}{text.length > 60 ? '…' : ''}
-        </Text>
-        <Text style={s.toolToggle}>{open ? '▲' : '▼'}</Text>
-      </TouchableOpacity>
-      {open && (
-        <ScrollView horizontal nestedScrollEnabled style={s.toolBody}>
-          <Text style={s.monoText}>{text}</Text>
-        </ScrollView>
-      )}
-    </View>
-  )
+function ToolResultBlock({ content: _ }: { content: unknown }) {
+  return null
 }
 
 // ── BlockRenderer ─────────────────────────────────────────────────────────────
@@ -1105,14 +1086,7 @@ const s = StyleSheet.create({
   workerPath:       { color: C.textMuted, fontSize: 11, fontFamily: MONO, marginTop: 2 },
 
   // Tool blocks
-  toolRow:          { marginTop: 4 },
-  toolInline:       { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  toolIcon:         { color: C.yellow, fontSize: 11 },
-  toolName:         { color: C.textSecondary, fontSize: 12, flex: 1, fontFamily: MONO },
-  toolToggle:       { color: C.textMuted, fontSize: 10 },
-  resultIcon:       { color: C.green, fontSize: 11 },
-  resultPreview:    { color: C.textMuted, fontSize: 12, flex: 1, fontFamily: MONO },
-  toolBody:         { maxHeight: 180, paddingTop: 4, paddingLeft: 16 },
+  toolLine:         { color: C.textMuted, fontSize: 12, fontFamily: MONO, marginTop: 4 },
   monoText:         { color: C.textSecondary, fontSize: 12, fontFamily: MONO, lineHeight: 18 },
 
   // Input
