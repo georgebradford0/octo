@@ -1,0 +1,83 @@
+name: Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      track:
+        description: 'Deploy track'
+        type: choice
+        options:
+          - closed
+          - production
+        default: closed
+
+jobs:
+  distribute:
+    name: Google Play (${{ inputs.track }})
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: mobile
+
+    # Required GitHub Secrets:
+    #   ANDROID_KEYSTORE                  — base64: base64 -i claudulhu-upload-key.keystore | pbcopy
+    #   ANDROID_KEYSTORE_PASSWORD         — keystore password
+    #   ANDROID_KEY_ALIAS                 — key alias
+    #   ANDROID_KEY_PASSWORD              — key password
+    #   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON  — base64: base64 -i service-account.json | pbcopy
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+
+      - name: Decode keystore
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: echo "$ANDROID_KEYSTORE" | base64 --decode > /tmp/claudulhu-upload-key.keystore
+
+      - name: Set signing properties
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "ORG_GRADLE_PROJECT_RELEASE_STORE_FILE=/tmp/claudulhu-upload-key.keystore" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_RELEASE_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> $GITHUB_ENV
+
+      - name: Decode service account JSON
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: echo "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" | base64 --decode > /tmp/play-service-account.json
+
+      - name: Install Ruby gems
+        run: bundle install --jobs 4 --retry 3
+
+      - name: Deploy to Google Play
+        env:
+          SUPPLY_JSON_KEY: /tmp/play-service-account.json
+        run: bundle exec fastlane android ${{ inputs.track }}
