@@ -7,9 +7,9 @@ platform :ios do
       key_filepath: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
     )
     upload_to_testflight(
-      ipa:                               ENV["IPA_PATH"],
-      api_key:                           api_key,
-      skip_waiting_for_build_processing: true,
+      ipa:     ENV["IPA_PATH"],
+      api_key: api_key,
+      groups:  ["internal"],
     )
   end
 end
