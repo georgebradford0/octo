@@ -125,10 +125,17 @@ jobs:
           cp /tmp/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/${UUID}.mobileprovision
           echo "PROFILE_UUID=$UUID" >> $GITHUB_ENV
 
+      - name: Install Ruby gems
+        run: bundle install --jobs 4 --retry 3
+
       - name: Set build number
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
         run: |
-          cd ios
-          agvtool new-version -all ${{ github.run_number }}
+          echo "$APP_STORE_CONNECT_API_KEY_CONTENT" | base64 --decode > /tmp/api_key.p8
+          APP_STORE_CONNECT_API_KEY_PATH="/tmp/api_key.p8" bundle exec fastlane ios bump_build_number
 
       - name: Archive
         run: |
@@ -171,9 +178,6 @@ jobs:
             -exportPath ios/build/ipa \
             -exportOptionsPlist /tmp/ExportOptions.plist \
             | xcpretty
-
-      - name: Install Ruby gems
-        run: bundle install --jobs 4 --retry 3
 
       - name: Upload to TestFlight
         env:
