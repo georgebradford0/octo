@@ -181,6 +181,7 @@ jobs:
           APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
         run: |
+          echo "$APP_STORE_CONNECT_API_KEY_CONTENT" | base64 --decode > /tmp/api_key.p8
           IPA_PATH=$(find ios/build/ipa -name "*.ipa" | head -1)
           echo "Uploading: $IPA_PATH"
-          IPA_PATH="$IPA_PATH" bundle exec fastlane ios testflight
+          APP_STORE_CONNECT_API_KEY_PATH="/tmp/api_key.p8" IPA_PATH="$IPA_PATH" bundle exec fastlane ios testflight
