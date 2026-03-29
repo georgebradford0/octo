@@ -1054,10 +1054,10 @@ const s = StyleSheet.create({
   cursor:           { color: C.accent, fontSize: 14 },
 
   // Text blocks
-  textBlock:        { color: C.textPrimary, fontSize: 15, lineHeight: 23 },
-  errorText:        { color: C.red, fontSize: 14 },
-  mutedText:        { color: C.textMuted, fontSize: 13, fontStyle: 'italic' },
-  systemText:       { color: C.textSecondary, fontSize: 13 },
+  textBlock:        { color: C.textPrimary, fontSize: 17, lineHeight: 26 },
+  errorText:        { color: C.red, fontSize: 16 },
+  mutedText:        { color: C.textMuted, fontSize: 15, fontStyle: 'italic' },
+  systemText:       { color: C.textSecondary, fontSize: 15 },
 
   // Result footer
   resultFooter:     { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 6, marginTop: 4, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
@@ -1081,7 +1081,7 @@ const s = StyleSheet.create({
 
   // Input
   inputRow:         { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
-  input:            { flex: 1, backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, color: C.textPrimary, fontSize: 15, lineHeight: 22, maxHeight: 120 },
+  input:            { flex: 1, backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 17, lineHeight: 24, maxHeight: 140 },
   btnSend:          { width: 40, height: 40, backgroundColor: C.accent, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   btnSendText:      { color: '#fff', fontSize: 15 },
   btnStop:          { width: 40, height: 40, backgroundColor: C.red, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
