@@ -172,6 +172,9 @@ jobs:
             -exportOptionsPlist /tmp/ExportOptions.plist \
             | xcpretty
 
+      - name: Install Ruby gems
+        run: bundle install --jobs 4 --retry 3
+
       - name: Upload to TestFlight
         env:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
