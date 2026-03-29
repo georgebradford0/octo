@@ -307,7 +307,7 @@ pub fn tool_definitions() -> Vec<AnthropicTool> {
             description: "Search the web via Brave Search. Requires BRAVE_API_KEY env var.".into(),
             input_schema: serde_json::json!({ "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }) },
         AnthropicTool { name: "create_pull_request".into(),
-            description: "Create a pull request (GitHub) or merge request (GitLab) from the current branch. Requires GIT_TOKEN env var. Detects the host from the repo's git remote URL. Use after pushing a branch to propose merging it into the base branch.".into(),
+            description: "Create a pull request (GitHub) or merge request (GitLab) from the current branch. Requires GH_TOKEN env var. Detects the host from the repo's git remote URL. Use after pushing a branch to propose merging it into the base branch.".into(),
             input_schema: serde_json::json!({ "type": "object", "properties": {
                 "title": { "type": "string", "description": "PR/MR title" },
                 "body":  { "type": "string", "description": "PR/MR description (markdown)" },
@@ -594,9 +594,9 @@ pub async fn execute_tool(
             }
         }
         "create_pull_request" => {
-            let token = match std::env::var("GIT_TOKEN").ok().filter(|s| !s.is_empty()) {
+            let token = match std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty()) {
                 Some(t) => t,
-                None    => return "error: GIT_TOKEN environment variable not set".to_string(),
+                None    => return "error: GH_TOKEN environment variable not set".to_string(),
             };
             let title = input["title"].as_str().unwrap_or("").to_string();
             if title.is_empty() { return "error: title is required".to_string(); }

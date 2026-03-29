@@ -5,7 +5,7 @@ services:
       - "${SSH_PORT:-2222}:${SSH_PORT:-2222}"
     environment:
       - GIT_URL=${GIT_URL}
-      - GIT_TOKEN=${GIT_TOKEN:-}
+      - GH_TOKEN=${GH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GIT_USER_NAME=${GIT_USER_NAME:-claudulhu}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL:-claudulhu@localhost}
@@ -14,7 +14,7 @@ services:
     volumes:
       - workspace:/workspace
       - claudulhu-data:/root/.claudulhu
-      # Uncomment to use SSH key auth instead of GIT_TOKEN:
+      # Uncomment to use SSH key auth instead of GH_TOKEN:
       # - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
 
 volumes:

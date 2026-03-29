@@ -41,8 +41,8 @@ printf '%s' "${QR_DATA}" | qrencode -l L -m 4 -t UTF8 -o -
 echo ""
 
 # ── Git authentication ────────────────────────────────────────────────────────
-if [ -n "$GIT_TOKEN" ]; then
-    CLONE_URL=$(echo "$GIT_URL" | sed 's|https://\(.*@\)\?|https://'"$GIT_TOKEN"'@|')
+if [ -n "$GH_TOKEN" ]; then
+    CLONE_URL=$(echo "$GIT_URL" | sed 's|https://\(.*@\)\?|https://'"$GH_TOKEN"'@|')
 else
     CLONE_URL="$GIT_URL"
     if [ -f /root/.ssh/id_rsa ]; then
@@ -67,9 +67,9 @@ GIT_USER_EMAIL="${GIT_USER_EMAIL:-claudulhu@localhost}"
 git -C "$WORKSPACE" config user.name  "$GIT_USER_NAME"
 git -C "$WORKSPACE" config user.email "$GIT_USER_EMAIL"
 
-if [ -n "$GIT_TOKEN" ]; then
+if [ -n "$GH_TOKEN" ]; then
     git -C "$WORKSPACE" config credential.helper \
-        "!f() { echo username=x-token; echo password=$GIT_TOKEN; }; f"
+        "!f() { echo username=x-token; echo password=$GH_TOKEN; }; f"
 fi
 
 # ── Write claudulhu config ────────────────────────────────────────────────────

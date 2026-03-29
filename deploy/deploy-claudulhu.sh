@@ -20,7 +20,7 @@ INSTANCE_TYPE="t3.micro"
 REGION="${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || echo us-east-1)}"
 GIT_URL=""
 API_KEY=""
-GIT_TOKEN=""
+GH_TOKEN=""
 KEY_NAME=""
 PUBLIC_HOST=""
 
@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --git-url)       GIT_URL="$2";       shift 2 ;;
     --api-key)       API_KEY="$2";       shift 2 ;;
-    --git-token)     GIT_TOKEN="$2";     shift 2 ;;
+    --git-token)     GH_TOKEN="$2";     shift 2 ;;
     --region)        REGION="$2";        shift 2 ;;
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --key-name)      KEY_NAME="$2";      shift 2 ;;
@@ -123,9 +123,9 @@ if [[ -n "$PUBLIC_HOST" ]]; then
   PUBLIC_HOST_LINE="-e PUBLIC_HOST=\"${PUBLIC_HOST}\" \\"
 fi
 
-GIT_TOKEN_LINE=""
-if [[ -n "$GIT_TOKEN" ]]; then
-  GIT_TOKEN_LINE="-e GIT_TOKEN=\"${GIT_TOKEN}\" \\"
+GH_TOKEN_LINE=""
+if [[ -n "$GH_TOKEN" ]]; then
+  GH_TOKEN_LINE="-e GH_TOKEN=\"${GH_TOKEN}\" \\"
 fi
 
 USER_DATA=$(cat <<USERDATA
@@ -147,7 +147,7 @@ docker run -d \
   -v claudulhu-keys-${REPO_SLUG}:/etc/claudulhu \
   -e GIT_URL="${GIT_URL}" \
   -e ANTHROPIC_API_KEY="${API_KEY}" \
-  ${GIT_TOKEN_LINE}
+  ${GH_TOKEN_LINE}
   ${PUBLIC_HOST_LINE}
   ${IMAGE}
 USERDATA
