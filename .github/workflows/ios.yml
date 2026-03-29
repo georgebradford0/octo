@@ -186,6 +186,4 @@ jobs:
           echo "Key file size: $(wc -c < /tmp/api_key.p8) bytes"
           IPA_PATH=$(find ios/build/ipa -name "*.ipa" | head -1)
           echo "Uploading: $IPA_PATH"
-          echo "Key ID length: ${#APP_STORE_CONNECT_API_KEY_ID} (should be 10)"
-          echo "Issuer ID length: ${#APP_STORE_CONNECT_API_KEY_ISSUER_ID} (should be 36)"
-          APP_STORE_CONNECT_API_KEY_PATH="/tmp/api_key.p8" IPA_PATH="$IPA_PATH" bundle exec fastlane ios upload_tf
+APP_STORE_CONNECT_API_KEY_PATH="/tmp/api_key.p8" IPA_PATH="$IPA_PATH" bundle exec fastlane ios upload_tf
