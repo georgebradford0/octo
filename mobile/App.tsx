@@ -128,8 +128,8 @@ const C = {
 function ToolUseBlock({ tool, input }: { tool: string; input: Record<string, unknown> }) {
   const [open, setOpen] = useState(false)
   return (
-    <View style={s.toolBlock}>
-      <TouchableOpacity style={s.toolHeader} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
+    <View style={s.toolRow}>
+      <TouchableOpacity style={s.toolInline} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
         <Text style={s.toolIcon}>⚙</Text>
         <Text style={s.toolName}>{tool}</Text>
         <Text style={s.toolToggle}>{open ? '▲' : '▼'}</Text>
@@ -150,8 +150,8 @@ function ToolResultBlock({ content }: { content: unknown }) {
   const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2)
   const preview = text.slice(0, 60).replace(/\n/g, ' ')
   return (
-    <View style={s.toolBlock}>
-      <TouchableOpacity style={s.toolHeader} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
+    <View style={s.toolRow}>
+      <TouchableOpacity style={s.toolInline} onPress={() => setOpen(o => !o)} activeOpacity={0.7}>
         <Text style={s.resultIcon}>↩</Text>
         <Text style={s.resultPreview} numberOfLines={1}>
           {preview}{text.length > 60 ? '…' : ''}
@@ -1105,14 +1105,14 @@ const s = StyleSheet.create({
   workerPath:       { color: C.textMuted, fontSize: 11, fontFamily: MONO, marginTop: 2 },
 
   // Tool blocks
-  toolBlock:        { backgroundColor: C.toolBg, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 8, overflow: 'hidden', marginTop: 6 },
-  toolHeader:       { flexDirection: 'row', alignItems: 'center', padding: 9, gap: 6 },
-  toolIcon:         { color: C.yellow, fontSize: 12 },
+  toolRow:          { marginTop: 4 },
+  toolInline:       { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  toolIcon:         { color: C.yellow, fontSize: 11 },
   toolName:         { color: C.textSecondary, fontSize: 12, flex: 1, fontFamily: MONO },
   toolToggle:       { color: C.textMuted, fontSize: 10 },
-  resultIcon:       { color: C.green, fontSize: 12 },
+  resultIcon:       { color: C.green, fontSize: 11 },
   resultPreview:    { color: C.textMuted, fontSize: 12, flex: 1, fontFamily: MONO },
-  toolBody:         { maxHeight: 180, padding: 8 },
+  toolBody:         { maxHeight: 180, paddingTop: 4, paddingLeft: 16 },
   monoText:         { color: C.textSecondary, fontSize: 12, fontFamily: MONO, lineHeight: 18 },
 
   // Input
