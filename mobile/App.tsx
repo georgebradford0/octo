@@ -366,9 +366,13 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
   const onWorkerCreatedRef = useRef(onWorkerCreated)
 
   // Session-resumption refs — persisted across reconnects via AsyncStorage.
-  const sessionIdRef  = useRef<string | null>(null)  // server-assigned session UUID
-  const storedSeqRef  = useRef<number>(0)             // event count at last save
-  const eventCountRef = useRef<number>(0)             // running event count this session
+  const sessionIdRef     = useRef<string | null>(null)   // server-assigned session UUID
+  const storedSeqRef     = useRef<number>(0)              // event count at last save
+  const eventCountRef    = useRef<number>(0)              // running event count this session
+  // Clean message state at the last save point. On every reconnect we reset messages
+  // to this before replaying events so that events from the previous connection are
+  // not duplicated on top of the current UI state.
+  const storedMessagesRef = useRef<ChatMessage[]>([])
 
   onStatusChangeRef.current  = onStatusChange
   onWorkerCreatedRef.current = onWorkerCreated
@@ -394,6 +398,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       if (messagesJson) {
         try {
           const msgs = JSON.parse(messagesJson) as ChatMessage[]
+          storedMessagesRef.current = msgs
           setMessages(msgs)
         } catch {}
       }
@@ -443,7 +448,8 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
     // Also persist the completed state so it survives app closure.
     setMessages(prev => {
       const updated = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-      storedSeqRef.current = eventCountRef.current
+      storedSeqRef.current      = eventCountRef.current
+      storedMessagesRef.current = updated
       AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
       AsyncStorage.setItem(`seq_${storageKey}`, String(eventCountRef.current)).catch(() => {})
       return updated
@@ -462,10 +468,20 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
         AsyncStorage.setItem(`session_${storageKey}`, frame.session_id).catch(() => {})
         if (!frame.resumed) {
           // New session — clear any stale local state.
-          storedSeqRef.current  = 0
-          eventCountRef.current = 0
+          storedSeqRef.current      = 0
+          eventCountRef.current     = 0
+          storedMessagesRef.current = []
           setMessages([])
           AsyncStorage.multiRemove([`messages_${storageKey}`, `seq_${storageKey}`]).catch(() => {})
+        } else {
+          // Reset messages to the last clean save point so that replayed events
+          // are applied to a known-good base rather than the previous connection's
+          // potentially partial UI state.
+          inResponseRef.current = false
+          setIsStreaming(false)
+          setIsPending(false)
+          setPendingQuestion(false)
+          setMessages(storedMessagesRef.current)
         }
         updateStatus(frame.resumed ? 'resumed' : 'ready')
         break
@@ -646,6 +662,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
     if (pendingQuestion) {
       setMessages(prev => {
         const updated = [...prev, { id: uid(), role: 'user' as const, streaming: false, blocks: [{ kind: 'text' as const, text }] }]
+        storedMessagesRef.current = updated
         AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
         return updated
       })
@@ -655,6 +672,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
     } else {
       setMessages(prev => {
         const updated = [...prev, { id: uid(), role: 'user' as const, streaming: false, blocks: [{ kind: 'text' as const, text }] }]
+        storedMessagesRef.current = updated
         AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
         return updated
       })
