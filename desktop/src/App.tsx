@@ -1021,7 +1021,7 @@ export default function App() {
           <div className="chat-panes">
             {tabs.map(tab => (
               <div
-                key={tab.id === 'main' ? `main-${mainPaneKey}` : tab.id}
+                key={tab.id === 'main' ? `main-${mainPaneKey}-${repoPath ?? 'none'}` : tab.id}
                 className={`chat-pane-wrapper${activeTab === tab.id ? ' chat-pane-wrapper--active' : ''}`}
               >
                 <ChatPane
