@@ -85,7 +85,7 @@ type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 let _id = 0
-const uid = () => `m${++_id}`
+const uid = () => `m${Date.now()}_${++_id}`
 
 function parseQrData(raw: string): NoiseConnectionInfo | null {
   // Format v2: "2:host:port:pk_base32"
