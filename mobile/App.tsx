@@ -707,6 +707,9 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         } else {
           dbg('AppState active: socket not OPEN (', ws?.readyState, '), skipping close')
         }
+      } else {
+        // App going to background — reset so input re-focuses on next active.
+        hasFocusedInput.current = false
       }
     })
     return () => sub.remove()
