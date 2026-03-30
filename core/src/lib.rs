@@ -13,12 +13,22 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
+// ── Data directory ────────────────────────────────────────────────────────────
+
+/// Root data directory: $CLAUDULHU_DATA_DIR if set, otherwise $HOME/.claudulhu.
+/// In Docker this is set to /data so sessions survive image updates via a named volume.
+pub fn data_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("CLAUDULHU_DATA_DIR") {
+        PathBuf::from(d)
+    } else {
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claudulhu")
+    }
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 pub fn config_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".claudulhu")
-        .join("config.json")
+    data_dir().join("config.json")
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -167,9 +177,7 @@ pub struct TaskStore {
 }
 
 pub fn tasks_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".claudulhu")
-        .join("tasks.json")
+    data_dir().join("tasks.json")
 }
 
 pub fn read_task_store() -> TaskStore {
@@ -1040,8 +1048,7 @@ pub fn create_worktree(repo_path: &str, branch: &str) -> Result<String, String> 
     let repo_name = PathBuf::from(repo_path).file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".to_string());
-    let worktree_path = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".claudulhu").join("worktrees").join(&repo_name).join(branch);
+    let worktree_path = data_dir().join("worktrees").join(&repo_name).join(branch);
     if let Some(parent) = worktree_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }

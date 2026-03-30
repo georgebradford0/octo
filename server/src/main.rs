@@ -200,10 +200,16 @@ async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port: u1
 
 // ── Session Persistence ───────────────────────────────────────────────────────
 
+fn data_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("CLAUDULHU_DATA_DIR") {
+        PathBuf::from(d)
+    } else {
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claudulhu")
+    }
+}
+
 fn sessions_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".claudulhu")
-        .join("sessions")
+    data_dir().join("sessions")
 }
 
 fn session_dir(session_id: &str) -> PathBuf {

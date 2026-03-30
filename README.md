@@ -17,6 +17,7 @@ docker run -d \
   --name claudulhu \
   -p 9000:9000 \
   -v claudulhu-noise-key:/etc/claudulhu \
+  -v claudulhu-data:/data \
   -e GIT_URL=https://github.com/user/repo \
   -e GH_TOKEN=ghp_... \
   -e ANTHROPIC_API_KEY=sk-ant-... \
@@ -26,6 +27,8 @@ docker run -d \
 On startup the container prints a QR code. Scan it with the mobile app to connect — the app establishes an encrypted Noise Protocol tunnel (port 9000) and routes all traffic through it. No TLS certificate required.
 
 The named volume (`claudulhu-noise-key`) persists the server's Curve25519 keypair across container restarts, so the QR code remains valid. Without it, the key regenerates on every restart and the app must re-scan.
+
+The named volume (`claudulhu-data`) persists conversation history, config, and worktrees at `/data` inside the container. Without it, all chat history is lost when the container is replaced or the image is updated.
 
 ### Environment variables
 
@@ -61,6 +64,7 @@ docker run -d \
   --name claudulhu-repo-a \
   -p 9000:9000 \
   -v claudulhu-key-a:/etc/claudulhu \
+  -v claudulhu-data-a:/data \
   -e NOISE_PORT=9000 \
   -e PUBLIC_HOST=1.2.3.4 \
   -e GIT_URL=https://github.com/user/repo-a \
@@ -71,6 +75,7 @@ docker run -d \
   --name claudulhu-repo-b \
   -p 9001:9001 \
   -v claudulhu-key-b:/etc/claudulhu \
+  -v claudulhu-data-b:/data \
   -e NOISE_PORT=9001 \
   -e PUBLIC_HOST=1.2.3.4 \
   -e GIT_URL=https://github.com/user/repo-b \
@@ -78,7 +83,7 @@ docker run -d \
   ghcr.io/georgebradford0/claudulhu-server:latest
 ```
 
-Ports 9000–9099 are available on the default AWS deployment. Each container needs its own named volume so keypairs (and therefore QR codes) persist independently across restarts.
+Ports 9000–9099 are available on the default AWS deployment. Each container needs its own named volumes so keypairs (and therefore QR codes) and conversation history persist independently across restarts.
 
 ### PR/MR creation
 

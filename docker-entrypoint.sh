@@ -87,9 +87,10 @@ if [ -n "$GH_TOKEN" ]; then
 fi
 
 # ── Write claudulhu config ────────────────────────────────────────────────────
-mkdir -p /root/.claudulhu
+CLAUDULHU_DATA_DIR="${CLAUDULHU_DATA_DIR:-/data}"
+mkdir -p "$CLAUDULHU_DATA_DIR"
 REPO_NAME=$(basename "$GIT_URL" .git)
-printf '{"repo":"%s","name":"%s"}\n' "$WORKSPACE" "$REPO_NAME" > /root/.claudulhu/config.json
+printf '{"repo":"%s","name":"%s"}\n' "$WORKSPACE" "$REPO_NAME" > "$CLAUDULHU_DATA_DIR/config.json"
 
 echo "[claudulhu] Starting server (repo: $WORKSPACE)"
 exec claudulhu-server
