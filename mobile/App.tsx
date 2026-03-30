@@ -579,7 +579,17 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       const ws = new WebSocket(connectUrl)
       wsRef.current = ws
 
+      // Timeout: if the socket stays in CONNECTING for too long (e.g. the Noise
+      // tunnel is dead), force-close it so onclose fires and we retry.
+      const connectTimer = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          console.warn('[ws] connect timeout, retrying')
+          ws.close()
+        }
+      }, 10000)
+
       ws.onopen = () => {
+        clearTimeout(connectTimer)
         console.log('[ws] connected to', connectUrl)
         // Reset the running event counter to the last saved position so we can
         // track how many new events arrive in this connection.
@@ -597,6 +607,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       }
 
       ws.onclose = (e) => {
+        clearTimeout(connectTimer)
         console.log('[ws] closed', wsUrl, 'code:', e.code, 'reason:', e.reason)
         if (!cancelled) {
           // Clear ALL in-flight state regardless of inResponseRef — isPending can be
@@ -612,13 +623,17 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       }
 
       ws.onerror = (e) => {
+        clearTimeout(connectTimer)
         console.error('[ws] error on', wsUrl, e)
-        inResponseRef.current = false
-        setIsStreaming(false)
-        setIsPending(false)
-        setPendingQuestion(false)
-        setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
-        updateStatus('error')
+        if (!cancelled) {
+          inResponseRef.current = false
+          setIsStreaming(false)
+          setIsPending(false)
+          setPendingQuestion(false)
+          setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
+          updateStatus('error')
+          // onclose will also fire after onerror and schedule the retry.
+        }
       }
     }
 
@@ -631,10 +646,15 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
 
   // Force-reconnect when returning to foreground — iOS silently kills the socket
   // while backgrounded, leaving readyState=OPEN but the connection dead.
+  // Only close if the socket is already OPEN; closing a CONNECTING socket aborts an
+  // in-progress reconnect and can leave the UI stuck on "connecting to server…".
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
-        wsRef.current?.close()
+        const ws = wsRef.current
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close()
+        }
       }
     })
     return () => sub.remove()
