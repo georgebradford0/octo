@@ -367,6 +367,8 @@ struct ChatQuery {
     /// Last event seq the client successfully received (0-indexed count of events received).
     /// Server replays from this index onwards.
     seq: Option<usize>,
+    /// Optional client identifier (e.g. "mobile").
+    client: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -635,6 +637,12 @@ async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
 
 // ── WebSocket Route Handlers ──────────────────────────────────────────────────
 
+const MOBILE_SYSTEM_PROMPT_SUFFIX: &str = "\n\n\
+You are being accessed from a mobile client where screen space is limited. \
+Do not narrate, explain, or comment while you work. \
+Perform all tool calls silently. \
+Only after all work is complete, provide a single short summary of what was done and the outcome.";
+
 async fn chat_ws_handler(
     ws:           WebSocketUpgrade,
     Query(query): Query<ChatQuery>,
@@ -662,7 +670,10 @@ async fn chat_ws_handler(
             } else {
                 // Session not found — create fresh.
                 let new_id = Uuid::new_v4().to_string();
-                let system = build_system_prompt(&repo, None, None);
+                let mut system = build_system_prompt(&repo, None, None);
+                if query.client.as_deref() == Some("mobile") {
+                    system.push_str(MOBILE_SYSTEM_PROMPT_SUFFIX);
+                }
                 let active = new_active_session(new_id.clone(), system.clone(), repo.clone());
                 persist_meta(&new_id, &repo, &system);
                 state.sessions.lock().unwrap().insert(new_id.clone(), active.clone());
@@ -672,7 +683,10 @@ async fn chat_ws_handler(
         } else {
             // Brand-new session.
             let session_id = Uuid::new_v4().to_string();
-            let system     = build_system_prompt(&repo, None, None);
+            let mut system = build_system_prompt(&repo, None, None);
+            if query.client.as_deref() == Some("mobile") {
+                system.push_str(MOBILE_SYSTEM_PROMPT_SUFFIX);
+            }
             let active     = new_active_session(session_id.clone(), system.clone(), repo.clone());
             persist_meta(&session_id, &repo, &system);
             state.sessions.lock().unwrap().insert(session_id.clone(), active.clone());

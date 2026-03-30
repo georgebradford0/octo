@@ -976,7 +976,7 @@ function AppInner() {
   // ── Init tabs when tunnel is ready ─────────────────────────────────────────
   useEffect(() => {
     if (!tunnelPort) { return }
-    setTabs([{ id: 'main', label: 'main', wsUrl: `ws://127.0.0.1:${tunnelPort}/chat` }])
+    setTabs([{ id: 'main', label: 'main', wsUrl: `ws://127.0.0.1:${tunnelPort}/chat?client=mobile` }])
     setActiveTab('main')
     setTabStatuses({ main: 'connecting' })
   }, [tunnelPort])
