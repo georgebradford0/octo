@@ -700,6 +700,13 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
       dbg('AppState change:', nextState, 'ws.readyState=', ws?.readyState,
           '(0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED null=none)')
       if (nextState === 'active') {
+        // Always clear in-flight state when returning to foreground — the server
+        // will have dropped any streaming response and we don't want the send
+        // button or TextInput to stay disabled due to a stale isStreaming/isPending.
+        inResponseRef.current = false
+        setIsStreaming(false)
+        setIsPending(false)
+        setPendingQuestion(false)
         if (ws && ws.readyState === WebSocket.OPEN) {
           dbg('AppState active: closing OPEN socket to force reconnect')
           reconnectImmediatelyRef.current = true
@@ -707,6 +714,9 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         } else {
           dbg('AppState active: socket not OPEN (', ws?.readyState, '), skipping close')
         }
+      } else {
+        // App going to background — reset so input re-focuses on next active.
+        hasFocusedInput.current = false
       }
     })
     return () => sub.remove()
