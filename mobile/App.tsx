@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, memo, useMemo, useRef, useState } from 'react'
 import {
   Animated,
   ActivityIndicator,
@@ -152,7 +152,7 @@ function ToolResultBlock({ content: _ }: { content: unknown }) {
 
 // ── BlockRenderer ─────────────────────────────────────────────────────────────
 
-function BlockRenderer({ block }: { block: Block }) {
+const BlockRenderer = memo(function BlockRenderer({ block }: { block: Block }) {
   switch (block.kind) {
     case 'text':
       return <Text style={s.textBlock}>{block.text}</Text>
@@ -193,7 +193,7 @@ function BlockRenderer({ block }: { block: Block }) {
     case 'worker_error':
       return <Text style={s.errorText}>✗ {block.message}</Text>
   }
-}
+})
 
 // ── PendingEllipsis ───────────────────────────────────────────────────────────
 
@@ -229,7 +229,7 @@ function PendingEllipsis() {
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user'
   const isInfo = message.role === 'info'
   return (
@@ -243,7 +243,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       {message.streaming && <Text style={s.cursor}>▋</Text>}
     </View>
   )
-}
+})
 
 // ── CreatureAnim ──────────────────────────────────────────────────────────────
 
@@ -377,7 +377,9 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
   onStatusChangeRef.current  = onStatusChange
   onWorkerCreatedRef.current = onWorkerCreated
 
-  const dbg = (...args: unknown[]) => console.log(`[chat:${storageKey}]`, ...args)
+  // Stable debug logger — useMemo so it doesn't recreate on every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const dbg = useMemo(() => (...args: unknown[]) => console.log(`[chat:${storageKey}]`, ...args), [])
 
   // Load persisted session state (session_id, messages, seq) before connecting.
   useEffect(() => {
@@ -801,7 +803,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
         ref={scrollRef}
         style={s.messageList}
         contentContainerStyle={s.messageListContent}
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
       >
         {messages.length === 0 && (
           <Text style={s.emptyState}>
