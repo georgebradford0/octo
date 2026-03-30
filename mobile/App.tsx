@@ -6,6 +6,7 @@ import {
   AppState,
   FlatList,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   PermissionsAndroid,
@@ -347,6 +348,7 @@ function parseAtCompletion(text: string): { atPos: number; dirPart: string; file
 
 const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onStatusChange, onWorkerCreated, initialMessage }: ChatPaneProps) {
   const insets = useSafeAreaInsets()
+  const [keyboardVisible, setKeyboardVisible] = useState(false)
 
   const [messages,        setMessages]        = useState<ChatMessage[]>([])
   const [status,          setStatus]          = useState<ConnStatus>('connecting')
@@ -391,6 +393,13 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
       inputRef.current?.focus()
     }
   }, [status])
+
+  // Track keyboard visibility so we can tighten bottom padding while it's open.
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true))
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardVisible(false))
+    return () => { show.remove(); hide.remove() }
+  }, [])
 
   // Stable debug logger — useMemo so it doesn't recreate on every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -843,7 +852,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
           ))}
         </ScrollView>
       )}
-      <View style={[s.inputRow, Platform.OS === 'ios' && { paddingBottom: insets.bottom + 10 }]}>
+      <View style={[s.inputRow, Platform.OS === 'ios' && { paddingBottom: keyboardVisible ? 8 : insets.bottom + 8 }]}>
         {canSpawnWorker && messages.length > 0 && !isStreaming && !isPending && (
           <TouchableOpacity style={s.btnNewChat} onPress={startNewChat}>
             <Text style={s.btnNewChatText}>↺</Text>
