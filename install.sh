@@ -12,14 +12,19 @@ if [ ! -d "$APP_SRC" ]; then
   exit 1
 fi
 
-echo "Quitting existing app..."
-osascript -e 'quit app "claudulhu"' 2>/dev/null || true
+echo "Killing existing app..."
+pkill -9 -x claudulhu 2>/dev/null || true
 sleep 1
-pkill -x claudulhu 2>/dev/null || true
-rm -rf "$APP_DEST"
 
 echo "Installing to $APP_DEST..."
+rm -rf "$APP_DEST"
 cp -r "$APP_SRC" "$APP_DEST"
+
+# Strip quarantine so macOS doesn't translocate the bundle to a random path
+xattr -rd com.apple.quarantine "$APP_DEST" 2>/dev/null || true
+
+# Force Launch Services to re-register the new bundle
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_DEST"
 
 echo "Launching claudulhu..."
 open "$APP_DEST"
