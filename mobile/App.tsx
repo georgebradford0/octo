@@ -377,16 +377,20 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
   onStatusChangeRef.current  = onStatusChange
   onWorkerCreatedRef.current = onWorkerCreated
 
+  const dbg = (...args: unknown[]) => console.log(`[chat:${storageKey}]`, ...args)
+
   // Load persisted session state (session_id, messages, seq) before connecting.
   useEffect(() => {
+    dbg('load effect: reading AsyncStorage')
     let cancelled = false
     AsyncStorage.multiGet([
       `session_${storageKey}`,
       `messages_${storageKey}`,
       `seq_${storageKey}`,
     ]).then(pairs => {
-      if (cancelled) { return }
+      if (cancelled) { dbg('load effect: cancelled before applying'); return }
       const [[, sessionId], [, messagesJson], [, seqStr]] = pairs
+      dbg('load effect: sessionId=', sessionId, 'seq=', seqStr, 'hasMessages=', !!messagesJson)
       if (sessionId) { sessionIdRef.current = sessionId }
       if (seqStr !== null) {
         const n = parseInt(seqStr, 10)
@@ -400,15 +404,17 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
           const msgs = JSON.parse(messagesJson) as ChatMessage[]
           storedMessagesRef.current = msgs
           setMessages(msgs)
-        } catch {}
+          dbg('load effect: restored', msgs.length, 'messages')
+        } catch (e) { dbg('load effect: failed to parse messages', e) }
       }
-    }).catch(() => {}).finally(() => {
-      if (!cancelled) { setSessionLoaded(true) }
+    }).catch(e => dbg('load effect: AsyncStorage error', e)).finally(() => {
+      if (!cancelled) { dbg('load effect: setSessionLoaded(true)'); setSessionLoaded(true) }
     })
-    return () => { cancelled = true }
+    return () => { dbg('load effect: cleanup'); cancelled = true }
   }, [storageKey])
 
   const updateStatus = useCallback((s: ConnStatus) => {
+    dbg('updateStatus', s)
     setStatus(s)
     onStatusChangeRef.current(s)
   }, [])
@@ -439,6 +445,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
   }, [])
 
   const completeResponse = useCallback(() => {
+    dbg('completeResponse: eventCount=', eventCountRef.current)
     inResponseRef.current = false
     setIsPending(false)
     setIsStreaming(false)
@@ -463,6 +470,9 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
     }
     switch (frame.type) {
       case 'ready':
+        dbg('ready frame: session_id=', frame.session_id, 'resumed=', frame.resumed,
+            'storedSeq=', storedSeqRef.current, 'storedMessages=', storedMessagesRef.current.length,
+            'inResponse=', inResponseRef.current, 'isStreaming=', /* read at call time */ '(see next log)')
         // Persist the session ID so we can resume after app restarts.
         sessionIdRef.current = frame.session_id
         AsyncStorage.setItem(`session_${storageKey}`, frame.session_id).catch(() => {})
@@ -473,10 +483,12 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
           storedMessagesRef.current = []
           setMessages([])
           AsyncStorage.multiRemove([`messages_${storageKey}`, `seq_${storageKey}`]).catch(() => {})
+          dbg('ready: new session, cleared state')
         } else {
           // Reset messages to the last clean save point so that replayed events
           // are applied to a known-good base rather than the previous connection's
           // potentially partial UI state.
+          dbg('ready: resuming, resetting to', storedMessagesRef.current.length, 'stored messages')
           inResponseRef.current = false
           setIsStreaming(false)
           setIsPending(false)
@@ -555,7 +567,8 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
 
   // WebSocket connection — only starts after AsyncStorage has been read.
   useEffect(() => {
-    if (!sessionLoaded) { return }
+    dbg('ws effect: running, sessionLoaded=', sessionLoaded, 'wsUrl=', wsUrl)
+    if (!sessionLoaded) { dbg('ws effect: waiting for session load'); return }
     let cancelled = false
 
     // Build the WebSocket URL, appending session resumption params.
@@ -572,9 +585,9 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
     }
 
     const connect = () => {
-      if (cancelled) { return }
+      if (cancelled) { dbg('connect: skipped (cancelled)'); return }
       const connectUrl = buildConnectUrl()
-      console.log('[ws] connecting to', connectUrl)
+      dbg('connect: url=', connectUrl, 'sessionId=', sessionIdRef.current, 'seq=', storedSeqRef.current)
       updateStatus('connecting')
       const ws = new WebSocket(connectUrl)
       wsRef.current = ws
@@ -583,14 +596,14 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       // tunnel is dead), force-close it so onclose fires and we retry.
       const connectTimer = setTimeout(() => {
         if (ws.readyState === WebSocket.CONNECTING) {
-          console.warn('[ws] connect timeout, retrying')
+          dbg('connect: timeout (10s), force-closing')
           ws.close()
         }
       }, 10000)
 
       ws.onopen = () => {
         clearTimeout(connectTimer)
-        console.log('[ws] connected to', connectUrl)
+        dbg('ws onopen: readyState=', ws.readyState, 'eventCount=', eventCountRef.current, 'storedSeq=', storedSeqRef.current)
         // Reset the running event counter to the last saved position so we can
         // track how many new events arrive in this connection.
         eventCountRef.current = storedSeqRef.current
@@ -599,16 +612,17 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       ws.onmessage = ({ data }) => {
         let frame: ServerFrame
         try { frame = JSON.parse(data as string) } catch {
-          console.warn('[ws] failed to parse frame:', data)
+          dbg('ws onmessage: parse error', data)
           return
         }
-        console.log('[ws] frame:', frame.type)
+        dbg('ws frame:', frame.type)
         handleFrame(frame)
       }
 
       ws.onclose = (e) => {
         clearTimeout(connectTimer)
-        console.log('[ws] closed', wsUrl, 'code:', e.code, 'reason:', e.reason)
+        dbg('ws onclose: code=', e.code, 'reason=', e.reason, 'cancelled=', cancelled,
+            'readyState=', ws.readyState, 'inResponse=', inResponseRef.current)
         if (!cancelled) {
           // Clear ALL in-flight state regardless of inResponseRef — isPending can be
           // true even when inResponseRef=false (between tool_result and the next frame).
@@ -618,13 +632,16 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
           setPendingQuestion(false)
           setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
           updateStatus('disconnected')
+          dbg('ws onclose: scheduling reconnect in 3s')
           setTimeout(connect, 3000)
+        } else {
+          dbg('ws onclose: cancelled, not reconnecting')
         }
       }
 
       ws.onerror = (e) => {
         clearTimeout(connectTimer)
-        console.error('[ws] error on', wsUrl, e)
+        dbg('ws onerror: cancelled=', cancelled, 'readyState=', ws.readyState, 'error=', e)
         if (!cancelled) {
           inResponseRef.current = false
           setIsStreaming(false)
@@ -639,6 +656,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
 
     connect()
     return () => {
+      dbg('ws effect: cleanup, setting cancelled=true')
       cancelled = true
       wsRef.current?.close()
     }
@@ -650,10 +668,15 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
   // in-progress reconnect and can leave the UI stuck on "connecting to server…".
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
+      const ws = wsRef.current
+      dbg('AppState change:', nextState, 'ws.readyState=', ws?.readyState,
+          '(0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED null=none)')
       if (nextState === 'active') {
-        const ws = wsRef.current
         if (ws && ws.readyState === WebSocket.OPEN) {
+          dbg('AppState active: closing OPEN socket to force reconnect')
           ws.close()
+        } else {
+          dbg('AppState active: socket not OPEN (', ws?.readyState, '), skipping close')
         }
       }
     })
@@ -716,6 +739,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
   }, [input, isStreaming])
 
   const startNewChat = useCallback(() => {
+    dbg('startNewChat')
     sessionIdRef.current  = null
     storedSeqRef.current  = 0
     eventCountRef.current = 0
