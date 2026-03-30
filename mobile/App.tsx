@@ -803,13 +803,15 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
 
   const canSend = !!input.trim() && (pendingQuestion || (!isStreaming && (status === 'ready' || status === 'resumed')))
 
+  const scrollToBottom = useCallback(() => scrollRef.current?.scrollToEnd({ animated: false }), [])
+
   return (
     <View style={s.pane}>
       <ScrollView
         ref={scrollRef}
         style={s.messageList}
         contentContainerStyle={s.messageListContent}
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+        onContentSizeChange={scrollToBottom}
       >
         {messages.length === 0 && (
           <Text style={s.emptyState}>
@@ -909,12 +911,18 @@ function AppInner() {
 
   // ── Load stored connections on mount ──────────────────────────────────────
   useEffect(() => {
+    // cancelled flag prevents the StrictMode double-invocation from calling
+    // setConn twice (different object references → two tunnel effect runs →
+    // potential double Noise handshake → ~6s startup freeze).
+    let cancelled = false
     AsyncStorage.getItem('noiseConnections').then(json => {
+      if (cancelled) { return }
       let conns: NoiseConnectionInfo[] = []
       if (json) { try { conns = JSON.parse(json) } catch {} }
       setSavedConns(conns)
       if (conns.length === 1) { setConn(conns[0]) }
     })
+    return () => { cancelled = true }
   }, [])
 
   // ── Establish Noise tunnel whenever conn changes ──────────────────────────
@@ -978,7 +986,9 @@ function AppInner() {
     const poll = () => {
       fetch(`http://127.0.0.1:${tunnelPort}/branches`)
         .then(r => r.ok ? r.json() : null)
-        .then((d: Branch[] | null) => d && setBranches(d))
+        .then((d: Branch[] | null) => d && setBranches(prev =>
+          JSON.stringify(prev) === JSON.stringify(d) ? prev : d
+        ))
         .catch(() => {})
     }
     poll()
