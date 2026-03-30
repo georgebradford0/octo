@@ -373,6 +373,9 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
   // to this before replaying events so that events from the previous connection are
   // not duplicated on top of the current UI state.
   const storedMessagesRef = useRef<ChatMessage[]>([])
+  // Set to true by the AppState handler before closing the socket so that
+  // onclose reconnects immediately instead of waiting the 3-second backoff.
+  const reconnectImmediatelyRef = useRef(false)
 
   onStatusChangeRef.current  = onStatusChange
   onWorkerCreatedRef.current = onWorkerCreated
@@ -626,6 +629,8 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         dbg('ws onclose: code=', e.code, 'reason=', e.reason, 'cancelled=', cancelled,
             'readyState=', ws.readyState, 'inResponse=', inResponseRef.current)
         if (!cancelled) {
+          const immediate = reconnectImmediatelyRef.current
+          reconnectImmediatelyRef.current = false
           // Clear ALL in-flight state regardless of inResponseRef — isPending can be
           // true even when inResponseRef=false (between tool_result and the next frame).
           inResponseRef.current = false
@@ -634,8 +639,8 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
           setPendingQuestion(false)
           setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
           updateStatus('disconnected')
-          dbg('ws onclose: scheduling reconnect in 3s')
-          setTimeout(connect, 3000)
+          dbg('ws onclose: scheduling reconnect in', immediate ? '0ms (foreground)' : '3s')
+          setTimeout(connect, immediate ? 0 : 3000)
         } else {
           dbg('ws onclose: cancelled, not reconnecting')
         }
@@ -676,6 +681,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
       if (nextState === 'active') {
         if (ws && ws.readyState === WebSocket.OPEN) {
           dbg('AppState active: closing OPEN socket to force reconnect')
+          reconnectImmediatelyRef.current = true
           ws.close()
         } else {
           dbg('AppState active: socket not OPEN (', ws?.readyState, '), skipping close')
