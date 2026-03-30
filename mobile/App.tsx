@@ -345,7 +345,7 @@ function parseAtCompletion(text: string): { atPos: number; dirPart: string; file
   return { atPos: atIdx, dirPart, filePart }
 }
 
-function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onStatusChange, onWorkerCreated, initialMessage }: ChatPaneProps) {
+const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onStatusChange, onWorkerCreated, initialMessage }: ChatPaneProps) {
   const [messages,        setMessages]        = useState<ChatMessage[]>([])
   const [status,          setStatus]          = useState<ConnStatus>('connecting')
   const [isStreaming,     setIsStreaming]      = useState(false)
@@ -856,7 +856,7 @@ function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onS
       </View>
     </View>
   )
-}
+})
 
 // ── ConnRow ───────────────────────────────────────────────────────────────────
 
@@ -1047,8 +1047,15 @@ function AppInner() {
     setActiveTab(prev => prev === id ? 'main' : prev)
   }, [])
 
-  const handleStatusChange = useCallback((id: string) => (status: ConnStatus) => {
-    setTabStatuses(prev => ({ ...prev, [id]: status }))
+  // Stable per-tab callbacks stored in a ref so ChatPane never sees a new
+  // onStatusChange reference, keeping React.memo(ChatPane) effective.
+  const statusCallbacksRef = useRef<Record<string, (s: ConnStatus) => void>>({})
+  const handleStatusChange = useCallback((id: string) => {
+    if (!statusCallbacksRef.current[id]) {
+      statusCallbacksRef.current[id] = (s: ConnStatus) =>
+        setTabStatuses(prev => ({ ...prev, [id]: s }))
+    }
+    return statusCallbacksRef.current[id]
   }, [])
 
   const handleWorkerCreated = useCallback((branch: string, worktreePath: string, task: string) => {
