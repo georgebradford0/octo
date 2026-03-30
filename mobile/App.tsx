@@ -1162,6 +1162,9 @@ function AppInner() {
         {/* Header */}
         <View style={s.header}>
           <View style={s.headerLeft}>
+            <TouchableOpacity style={s.backBtn} onPress={() => setConn(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={s.backBtnText}>‹</Text>
+            </TouchableOpacity>
             <View>
               <Text style={s.headerTitle}>claudulhu</Text>
               {repoName && <Text style={s.headerRepo}>{repoName}</Text>}
@@ -1170,9 +1173,6 @@ function AppInner() {
           <View style={s.headerRight}>
             <TouchableOpacity style={s.iconBtn} onPress={() => setShowBranches(true)}>
               <Text style={s.iconBtnText}>⎇ {activeWorktrees}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={s.iconBtn} onPress={() => setConn(null)}>
-              <Text style={s.iconBtnText}>⬡</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1323,6 +1323,8 @@ const s = StyleSheet.create({
   headerLeft:       { flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerRight:      { flexDirection: 'row', gap: 8 },
   headerMark:       { fontSize: 20, color: C.accent },
+  backBtn:          { paddingRight: 4, paddingVertical: 2 },
+  backBtnText:      { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300' },
   headerTitle:      { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1 },
   headerRepo:       { fontSize: 11, color: C.textSecondary, marginTop: 1 },
   iconBtn:          { backgroundColor: C.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 7, paddingHorizontal: 10, paddingVertical: 6 },
