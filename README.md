@@ -28,7 +28,7 @@ On startup the container prints a QR code. Scan it with the mobile app to connec
 
 The named volume (`claudulhu-noise-key`) persists the server's Curve25519 keypair across container restarts, so the QR code remains valid. Without it, the key regenerates on every restart and the app must re-scan.
 
-The named volume (`claudulhu-data`) persists conversation history, config, and worktrees at `/data` inside the container. Without it, all chat history is lost when the container is replaced or the image is updated.
+The named volume (`claudulhu-data`) persists conversation history, config, and worktrees at `/data` inside the container. Without it, history survives container restarts (`docker stop`/`start`) but is lost when the container is removed or replaced with a new image.
 
 ### Environment variables
 
