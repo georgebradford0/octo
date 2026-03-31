@@ -980,8 +980,9 @@ pub fn build_system_prompt(repo_path: &str, branch: Option<&str>, worktree_path:
 
     match (branch, worktree_path) {
         (Some(branch), Some(wt)) => format!(
-            "You are an AI coding assistant working on branch '{branch}' of the git repository at {repo_path}.\
-             Your working directory is the worktree at {wt}.{claude_md}{tool_guidance}"
+            "You are an AI coding assistant working on branch '{branch}' in the git worktree at {wt}.\
+             This is your working directory — use it for all file operations and git commands.\
+             Do not cd to any other directory.{claude_md}{tool_guidance}"
         ),
         _ => format!(
             "You are an AI assistant helping manage the git repository at {repo_path}.\
