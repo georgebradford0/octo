@@ -1033,9 +1033,7 @@ export default function App() {
       )}
       <header className="app-header">
         <div className="app-title">
-          <span className="title-mark">⬡</span>
-          <span>claudulhu</span>
-          {repoName && <span className="header-repo">{repoName}</span>}
+          {repoName && <span>{repoName}</span>}
         </div>
         {isTauri() && (
           <div className="header-actions">
