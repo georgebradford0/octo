@@ -790,12 +790,32 @@ pub async fn stream_turn(
 
     let compacted = compact_history(messages, 6);
 
+    // Serialize messages to JSON so we can inject cache_control without
+    // polluting the ContentBlock data model with API transport concerns.
+    let mut messages_json: Vec<serde_json::Value> = compacted
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
+
+    // Place a cache breakpoint on the last content block of the second-to-last
+    // message — the most recent stable point before the current user input.
+    // Everything up to that block is eligible for cache reads on subsequent
+    // turns, cutting those input tokens to ~10% of the normal rate.
+    if messages_json.len() >= 2 {
+        let stable_idx = messages_json.len() - 2;
+        if let Some(content) = messages_json[stable_idx]["content"].as_array_mut() {
+            if let Some(last_block) = content.last_mut() {
+                last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
+        }
+    }
+
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 16000,
         "system": [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
         "tools": tools,
-        "messages": compacted,
+        "messages": messages_json,
         "stream": true,
     });
 
