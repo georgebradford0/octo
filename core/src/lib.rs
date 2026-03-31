@@ -241,11 +241,36 @@ pub fn resolve_path(p: &str, cwd: &str) -> PathBuf {
     if p.starts_with('/') { PathBuf::from(p) } else { PathBuf::from(cwd).join(p) }
 }
 
-pub const TOOL_OUTPUT_LIMIT: usize = 20_000;
+/// Per-tool character limits for tool output fed back into the model.
+/// Sized to preserve all actionable information while keeping history tokens low.
+pub fn tool_output_limit(tool: &str) -> usize {
+    match tool {
+        // Shell commands and file reads can produce large but meaningful output.
+        "bash"        => 20_000,
+        "read_file"   => 20_000,
+        // Web pages contain lots of useful prose; strip_html already reduces them.
+        "web_fetch"   => 20_000,
+        // Task output is subprocess/agent output — can be substantial.
+        "task_output" =>  8_000,
+        // Search results: 10 results × ~400 chars each saturates well under 4 k.
+        "web_search"  =>  4_000,
+        // Match lists: more than ~6 k of grep hits is noise the model won't act on.
+        "grep"        =>  6_000,
+        // Task records are short structured JSON.
+        "task_get"    =>  2_000,
+        // Task lists and file-path lists are inherently short.
+        "task_list"   =>  3_000,
+        "glob"        =>  3_000,
+        // Everything else (edit_file, write_file, task_create, task_update,
+        // task_stop, ask_user, create_pull_request) returns a short fixed string;
+        // 2 000 is a safe ceiling that costs nothing in practice.
+        _             =>  2_000,
+    }
+}
 
-pub fn truncate_tool_output(s: String) -> String {
-    if s.len() <= TOOL_OUTPUT_LIMIT { return s; }
-    let boundary = (0..=TOOL_OUTPUT_LIMIT).rev()
+pub fn truncate_tool_output(s: String, limit: usize) -> String {
+    if s.len() <= limit { return s; }
+    let boundary = (0..=limit).rev()
         .find(|&i| s.is_char_boundary(i))
         .unwrap_or(0);
     format!(
@@ -375,9 +400,7 @@ pub async fn execute_tool(
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                    let combined = if stderr.is_empty() { stdout }
-                                   else { format!("{stdout}\n[stderr]: {stderr}") };
-                    truncate_tool_output(combined)
+                    if stderr.is_empty() { stdout } else { format!("{stdout}\n[stderr]: {stderr}") }
                 }
                 Err(e) => format!("error: {e}"),
             }
@@ -479,7 +502,7 @@ pub async fn execute_tool(
                 .args(&args)
                 .current_dir(cwd).output().await
             {
-                Ok(o)  => truncate_tool_output(String::from_utf8_lossy(&o.stdout).to_string()),
+                Ok(o)  => String::from_utf8_lossy(&o.stdout).to_string(),
                 Err(e) => format!("error: {e}"),
             }
         }
@@ -590,11 +613,8 @@ pub async fn execute_tool(
                         Err(e)   => format!("error reading response: {e}"),
                         Ok(body) => {
                             let text = strip_html(&body);
-                            let truncated = if text.len() > 50_000 {
-                                format!("{}\n[truncated at 50000 chars]", &text[..50_000])
-                            } else { text };
-                            if status.is_success() { truncated }
-                            else { format!("HTTP {status}\n{truncated}") }
+                            if status.is_success() { text }
+                            else { format!("HTTP {status}\n{text}") }
                         }
                     }
                 }
@@ -996,7 +1016,10 @@ pub async fn run_agentic_loop(
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
-                        let result = execute_tool(name, input, &cwd, &tx, pending_question.clone()).await;
+                        let result = truncate_tool_output(
+                            execute_tool(name, input, &cwd, &tx, pending_question.clone()).await,
+                            tool_output_limit(name),
+                        );
                         tx.send(ChatEvent::ToolResult {
                             tool_use_id: id.clone(),
                             content: serde_json::Value::String(result.clone()),
