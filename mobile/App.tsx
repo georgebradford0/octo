@@ -856,6 +856,8 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
 
   return (
     <View style={s.pane}>
+      {/* Fills the home-indicator zone with the input bar colour so there's no colour mismatch below the sticky view */}
+      <View style={[s.bottomFill, { height: insets.bottom }]} />
       <FlatList
         ref={scrollRef}
         style={s.messageList}
@@ -1415,6 +1417,7 @@ const s = StyleSheet.create({
   emptyState:       { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80 },
   reconnectBanner:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 7, backgroundColor: '#fffbeb', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#fef3c7' },
   reconnectText:    { color: C.yellow, fontSize: 12, fontWeight: '500' },
+  bottomFill:       { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.surface },
 
   // Messages
   messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
