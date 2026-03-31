@@ -5,9 +5,17 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
 };
+
+// ── Shared HTTP client ────────────────────────────────────────────────────────
+
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+}
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -572,10 +580,9 @@ pub async fn execute_tool(
         "web_fetch" => {
             let url = input["url"].as_str().unwrap_or("");
             if url.is_empty() { return "error: url is required".to_string(); }
-            let client = reqwest::Client::builder()
-                .user_agent("Mozilla/5.0 (compatible; claudulhu/1.0)")
-                .build().unwrap();
-            match client.get(url).send().await {
+            match http_client().get(url)
+                .header("User-Agent", "Mozilla/5.0 (compatible; claudulhu/1.0)")
+                .send().await {
                 Err(e)   => format!("error: {e}"),
                 Ok(resp) => {
                     let status = resp.status();
@@ -600,8 +607,7 @@ pub async fn execute_tool(
                 Some(k) => k,
                 None    => return "error: BRAVE_API_KEY environment variable not set".to_string(),
             };
-            let client = reqwest::Client::new();
-            match client
+            match http_client()
                 .get("https://api.search.brave.com/res/v1/web/search")
                 .query(&[("q", query), ("count", "10")])
                 .header("Accept", "application/json")
@@ -665,11 +671,9 @@ pub async fn execute_tool(
             };
             let repo_path = path_part.trim_end_matches(".git").to_string();
 
-            let client = reqwest::Client::new();
-
             if remote_url.contains("github.com") {
                 let url = format!("https://api.github.com/repos/{repo_path}/pulls");
-                match client.post(&url)
+                match http_client().post(&url)
                     .bearer_auth(&token)
                     .header("User-Agent", "claudulhu")
                     .header("Accept", "application/vnd.github+json")
@@ -693,7 +697,7 @@ pub async fn execute_tool(
                 // GitLab: project path must be URL-encoded
                 let encoded = repo_path.replace('/', "%2F");
                 let url = format!("https://gitlab.com/api/v4/projects/{encoded}/merge_requests");
-                match client.post(&url)
+                match http_client().post(&url)
                     .header("PRIVATE-TOKEN", &token)
                     .json(&serde_json::json!({ "title": title, "description": body, "source_branch": head, "target_branch": base }))
                     .send().await
@@ -780,8 +784,6 @@ pub async fn stream_turn(
     aborted:   &AtomicBool,
     tx:        &mpsc::Sender<ChatEvent>,
 ) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
-    let client = reqwest::Client::new();
-
     let mut tools: Vec<serde_json::Value> = tool_definitions()
         .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
     if let Some(last) = tools.last_mut() {
@@ -819,7 +821,7 @@ pub async fn stream_turn(
         "stream": true,
     });
 
-    let response = client
+    let response = http_client()
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
@@ -1079,7 +1081,6 @@ pub fn get_branches_for_repo(repo: &str) -> Result<Vec<Branch>, String> {
 }
 
 pub async fn generate_branch_name(task: &str, api_key: &str) -> String {
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 32,
@@ -1089,7 +1090,7 @@ pub async fn generate_branch_name(task: &str, api_key: &str) -> String {
         )}]
     });
     let name: String = async {
-        let resp = client
+        let resp = http_client()
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
