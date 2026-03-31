@@ -757,41 +757,76 @@ enum PartialBlock {
     ToolUse { id: String, name: String, partial_json: String },
 }
 
-/// Truncate old tool results in the message history to avoid quadratic context growth.
-/// The most recent `keep_full` tool-result messages are left intact; older ones are
-/// replaced with a short stub so the conversation structure remains valid.
+/// Compact old turns in the message history to avoid quadratic context growth.
+///
+/// The most recent `keep_full` tool-result user messages and their paired assistant
+/// turns are kept intact. Older pairs are stubbed:
+///
+/// - Tool-result user messages: content replaced with an outcome+size summary
+///   (`[ok — N chars, truncated]` or `[error — N chars, truncated]`).
+/// - Paired assistant messages: `Text` blocks replaced with `[truncated]`;
+///   `ToolUse` blocks retain `id` and `name` (required for API validity) but
+///   the `input` is dropped (`{}`).
 pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMessage> {
-    const STUB_LIMIT: usize = 400;
+    // Collect indices of user messages whose content is entirely ToolResult blocks.
     let tool_result_indices: Vec<usize> = messages.iter().enumerate()
         .filter(|(_, m)| m.role == "user" && m.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })))
-        .map(|(i, _)| i).collect();
+        .map(|(i, _)| i)
+        .collect();
 
     let cutoff = tool_result_indices.len().saturating_sub(keep_full);
-    let old_indices: std::collections::HashSet<usize> =
+
+    let old_tool_result: std::collections::HashSet<usize> =
         tool_result_indices[..cutoff].iter().copied().collect();
 
+    // The assistant turn immediately before each old tool-result message is also stale.
+    let old_assistant: std::collections::HashSet<usize> =
+        old_tool_result.iter().filter_map(|&i| i.checked_sub(1)).collect();
+
     messages.iter().enumerate().map(|(i, m)| {
-        if !old_indices.contains(&i) { return m.clone(); }
-        ApiMessage {
-            role: m.role.clone(),
-            content: m.content.iter().map(|b| match b {
-                ContentBlock::ToolResult { tool_use_id, content } => {
-                    let text = content.first().and_then(|v| v["text"].as_str()).unwrap_or("");
-                    let stub = if text.len() > STUB_LIMIT {
-                        // Find the largest char boundary ≤ STUB_LIMIT to avoid
-                        // slicing inside a multi-byte UTF-8 character.
-                        let boundary = (0..=STUB_LIMIT).rev()
-                            .find(|&i| text.is_char_boundary(i))
-                            .unwrap_or(0);
-                        format!("{}…[truncated]", &text[..boundary])
-                    } else { text.to_string() };
-                    ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: vec![serde_json::json!({"type":"text","text":stub})],
+        if old_tool_result.contains(&i) {
+            // Replace raw tool-result content with an outcome+size stub.
+            ApiMessage {
+                role: m.role.clone(),
+                content: m.content.iter().map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, content } => {
+                        let text = content.first().and_then(|v| v["text"].as_str()).unwrap_or("");
+                        let stub = if text.is_empty() {
+                            "[empty]".to_string()
+                        } else {
+                            let outcome = if text.starts_with("error:") || text.starts_with("HTTP ") {
+                                "error"
+                            } else {
+                                "ok"
+                            };
+                            format!("[{outcome} — {} chars, truncated]", text.len())
+                        };
+                        ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: vec![serde_json::json!({"type":"text","text":stub})],
+                        }
                     }
-                }
-                other => other.clone(),
-            }).collect(),
+                    other => other.clone(),
+                }).collect(),
+            }
+        } else if old_assistant.contains(&i) {
+            // Stub text blocks; preserve ToolUse id+name so API structure stays valid.
+            ApiMessage {
+                role: m.role.clone(),
+                content: m.content.iter().map(|b| match b {
+                    ContentBlock::Text { .. } =>
+                        ContentBlock::Text { text: "[truncated]".to_string() },
+                    ContentBlock::ToolUse { id, name, .. } =>
+                        ContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: serde_json::Value::Object(serde_json::Map::new()),
+                        },
+                    other => other.clone(),
+                }).collect(),
+            }
+        } else {
+            m.clone()
         }
     }).collect()
 }
