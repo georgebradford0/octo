@@ -77,6 +77,7 @@ interface Tab {
   id: string
   label: string
   wsUrl: string
+  storageKey: string  // conn-scoped key used for AsyncStorage — never shared across connections
   initialMessage?: string
 }
 
@@ -86,6 +87,14 @@ type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 
 let _id = 0
 const uid = () => `m${Date.now()}_${++_id}`
+
+/** Stable, filesystem-safe key that uniquely identifies a server connection.
+ *  Built from the server's static public key (already globally unique) with
+ *  host:port as a human-readable prefix.  Used to namespace AsyncStorage keys
+ *  so that sessions from different containers never collide even when they run
+ *  on the same host machine with differently-named volume mounts. */
+const connKeyFor = (conn: NoiseConnectionInfo): string =>
+  `${conn.host}_${conn.port}_${conn.pk.slice(0, 16)}`
 
 function parseQrData(raw: string): NoiseConnectionInfo | null {
   // Format v2: "2:host:port:pk_base32"
@@ -1040,10 +1049,11 @@ function AppInner() {
   // ── Init tabs when tunnel is ready ─────────────────────────────────────────
   useEffect(() => {
     if (!tunnelPort) { return }
-    setTabs([{ id: 'main', label: 'main', wsUrl: `ws://127.0.0.1:${tunnelPort}/chat?client=mobile` }])
+    const ck = conn ? connKeyFor(conn) : 'unknown'
+    setTabs([{ id: 'main', label: 'main', wsUrl: `ws://127.0.0.1:${tunnelPort}/chat?client=mobile`, storageKey: `${ck}::main` }])
     setActiveTab('main')
     setTabStatuses({ main: 'connecting' })
-  }, [tunnelPort])
+  }, [tunnelPort, conn])
 
   // ── Fetch repo name ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1146,7 +1156,7 @@ function AppInner() {
     if (!tunnelPort) { return }
     setTabs(prev => {
       if (prev.find(t => t.id === branch)) { return prev }
-      return [...prev, { id: branch, label: branch, wsUrl: `ws://127.0.0.1:${tunnelPort}/workers/${encodeURIComponent(branch)}`, initialMessage }]
+      return [...prev, { id: branch, label: branch, wsUrl: `ws://127.0.0.1:${tunnelPort}/workers/${encodeURIComponent(branch)}`, storageKey: `${conn ? connKeyFor(conn) : 'unknown'}::${branch}`, initialMessage }]
     })
     setTabStatuses(prev => ({ ...prev, [branch]: prev[branch] ?? 'connecting' }))
     setActiveTab(branch)
@@ -1284,7 +1294,7 @@ function AppInner() {
           <View key={tab.id} style={tab.id === activeTab ? s.paneVisible : s.paneHidden}>
             <ChatPane
               wsUrl={tab.wsUrl}
-              storageKey={tab.id}
+              storageKey={tab.storageKey}
               tunnelPort={tunnelPort}
               branches={branches}
               canSpawnWorker={tab.id === 'main'}
