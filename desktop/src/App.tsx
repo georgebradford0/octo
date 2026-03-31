@@ -18,6 +18,21 @@ async function tauriListen<T>(
   return listen<T>(event, e => handler(e.payload))
 }
 
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+// Lazy log helpers — silently no-op in the browser.
+async function logInfo(msg: string)  { if (!isTauri()) return; const { info }  = await import('@tauri-apps/plugin-log'); info(msg).catch(() => {}) }
+async function logWarn(msg: string)  { if (!isTauri()) return; const { warn }  = await import('@tauri-apps/plugin-log'); warn(msg).catch(() => {}) }
+async function logError(msg: string) { if (!isTauri()) return; const { error } = await import('@tauri-apps/plugin-log'); error(msg).catch(() => {}) }
+
+// Forward console.error / console.warn to the Tauri log file.
+if (isTauri()) {
+  const _consoleError = console.error.bind(console)
+  const _consoleWarn  = console.warn.bind(console)
+  console.error = (...args: unknown[]) => { _consoleError(...args); logError(args.map(String).join(' ')) }
+  console.warn  = (...args: unknown[]) => { _consoleWarn(...args);  logWarn(args.map(String).join(' ')) }
+}
+
 async function tauriPickFolder(): Promise<string | null> {
   const { open } = await import('@tauri-apps/plugin-dialog')
   const result = await open({ directory: true, title: 'Select Repository' })
@@ -317,6 +332,7 @@ function ChatPane({
   const handleFrame = useCallback((frame: ServerFrame) => {
     switch (frame.type) {
       case 'ready':
+        logInfo(`session ready (resumed=${frame.resumed})`)
         updateStatus(frame.resumed ? 'resumed' : 'ready')
         break
       case 'text':
@@ -324,6 +340,7 @@ function ChatPane({
         appendBlock({ kind: 'text', text: frame.text })
         break
       case 'tool_use':
+        logInfo(`tool_use: ${frame.tool}`)
         ensureAssistantMsg()
         appendBlock({ kind: 'tool_use', tool: frame.tool, input: frame.input })
         break
@@ -337,16 +354,19 @@ function ChatPane({
         onRefreshBranchesRef.current()
         break
       case 'result':
+        logInfo(`session result: turns=${frame.turns} cost=$${frame.cost_usd?.toFixed(4)}`)
         appendBlock({ kind: 'result', cost_usd: frame.cost_usd, turns: frame.turns })
         completeResponse()
         onRefreshBranchesRef.current()
         break
       case 'error':
+        logError(`session error: ${frame.message}`)
         ensureAssistantMsg()
         appendBlock({ kind: 'error', message: frame.message })
         completeResponse()
         break
       case 'interrupted':
+        logInfo('session interrupted')
         appendBlock({ kind: 'interrupted' })
         completeResponse()
         break
@@ -367,18 +387,22 @@ function ChatPane({
         }])
         break
       case 'spawning':
+        logInfo(`spawning worker: ${frame.task}`)
         break
       case 'worker_created':
+        logInfo(`worker created: branch=${frame.branch} path=${frame.worktree_path}`)
         setMessages(prev => [...prev, {
           id: uid(), role: 'info', streaming: false,
           blocks: [{ kind: 'worker_created', branch: frame.branch, worktree_path: frame.worktree_path }],
         }])
         break
       case 'worker_session_ready':
+        logInfo(`worker session ready: branch=${frame.branch} sid=${frame.worker_session_id}`)
         onWorkerCreatedRef.current(frame.branch, frame.worktree_path, frame.task, frame.worker_session_id)
         completeResponse()
         break
       case 'worker_error':
+        logError(`worker error: ${frame.message}`)
         setMessages(prev => [...prev, {
           id: uid(), role: 'info', streaming: false,
           blocks: [{ kind: 'worker_error', message: frame.message }],

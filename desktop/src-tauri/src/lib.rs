@@ -76,7 +76,7 @@ fn set_api_key(key: String) {
 
 #[tauri::command]
 fn get_branches(repo: String) -> Result<Vec<Branch>, String> {
-    get_branches_for_repo(&repo)
+    get_branches_for_repo(&repo).map_err(|e| { log::warn!("get_branches failed: {e}"); e })
 }
 
 #[tauri::command]
@@ -94,6 +94,7 @@ fn chat_new_session(
     let session_id    = Uuid::new_v4().to_string();
     let cwd           = worktree_path.clone().unwrap_or_else(|| repo.clone());
     let system_prompt = build_system_prompt(&repo, branch.as_deref(), worktree_path.as_deref());
+    log::info!("new session {session_id} branch={branch:?} cwd={cwd}");
 
     let session = Arc::new(Mutex::new(Session {
         messages: Vec::new(),
@@ -127,7 +128,10 @@ async fn chat_send(
     let session = session.ok_or_else(|| "session not found".to_string())?;
 
     let cfg     = read_config();
-    let api_key = resolve_api_key().ok_or_else(|| "no API key configured".to_string())?;
+    let api_key = resolve_api_key().ok_or_else(|| {
+        log::error!("chat_send {session_id}: no API key configured");
+        "no API key configured".to_string()
+    })?;
     let model   = cfg.model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
     {
@@ -139,6 +143,7 @@ async fn chat_send(
         });
     }
 
+    log::info!("chat_send {session_id}: running agentic loop (model={model})");
     run_agentic_loop_desktop(app, session, session_id, api_key, model).await;
     Ok(())
 }
@@ -183,15 +188,21 @@ async fn spawn_worker(
     task: String,
     repo: String,
 ) -> Result<(), String> {
+    log::info!("spawn_worker {session_id}: task={task:?}");
     emit(&app, &session_id, ChatEvent::Spawning { task: task.clone() });
 
     let api_key = resolve_api_key().unwrap_or_default();
     let branch  = generate_branch_name(&task, &api_key).await;
     let branch  = if branch.is_empty() { Uuid::new_v4().to_string()[..8].to_string() } else { branch };
+    log::info!("spawn_worker {session_id}: branch={branch}");
 
     let worktree_path = match create_worktree(&repo, &branch) {
-        Ok(p)  => p,
-        Err(e) => { emit(&app, &session_id, ChatEvent::WorkerError { message: e }); return Ok(()); }
+        Ok(p)  => { log::info!("spawn_worker {session_id}: worktree created at {p}"); p }
+        Err(e) => {
+            log::error!("spawn_worker {session_id}: worktree creation failed: {e}");
+            emit(&app, &session_id, ChatEvent::WorkerError { message: e });
+            return Ok(());
+        }
     };
 
     emit(&app, &session_id, ChatEvent::WorkerCreated {
@@ -271,13 +282,20 @@ pub fn run() {
             sessions: Mutex::new(HashMap::new()),
         })
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .target(tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::LogDir { file_name: Some("claudulhu".into()) },
+                    ))
+                    .target(tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::Stdout,
+                    ))
+                    .max_file_size(10_000_000)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                    .build(),
+            )?;
+            log::info!("claudulhu started");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
