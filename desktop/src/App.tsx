@@ -806,10 +806,12 @@ export default function App() {
   const [apiKeyInput, setApiKeyInput] = useState('')
 
   // Tauri: load stored repo + API key on mount
+  // Skip loading saved repo when opened as a fresh window (CMD+N / CTRL+N)
+  const isFreshWindow = new URLSearchParams(window.location.search).get('fresh') === 'true'
   useEffect(() => {
     if (!isTauri()) return
     Promise.all([
-      tauriInvoke<string | null>('get_repo'),
+      isFreshWindow ? Promise.resolve(null) : tauriInvoke<string | null>('get_repo'),
       tauriInvoke<string | null>('get_api_key'),
     ]).then(([repo, key]) => {
       if (repo) { setRepoPath(repo); setRepoReady(true) }
@@ -908,11 +910,17 @@ export default function App() {
   // Cmd+` (Mac) / Ctrl+` (PC) cycles tabs forward
   // Cmd+Shift+` / Ctrl+Shift+` cycles tabs backward
   // Cmd+1-9 (Mac) / Ctrl+1-9 (PC) jumps to tab by index (main = 1)
+  // Cmd+N (Mac) / Ctrl+N (PC) opens a new window without a saved repo
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toUpperCase().includes('MAC')
       const modKey = isMac ? e.metaKey : e.ctrlKey
       if (!modKey) return
+      if (e.key === 'n' && isTauri()) {
+        e.preventDefault()
+        tauriInvoke('new_window').catch(() => {})
+        return
+      }
       setTabs(prev => {
         if (e.key === '`') {
           e.preventDefault()

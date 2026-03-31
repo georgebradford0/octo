@@ -271,6 +271,24 @@ fn get_completions(roots: Vec<String>, dir_part: String, file_part: String) -> V
     results
 }
 
+// ── Window Management ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+    let label = format!("window-{}", uuid::Uuid::new_v4().simple());
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        label,
+        tauri::WebviewUrl::App("index.html?fresh=true".into()),
+    )
+    .title("claudulhu")
+    .inner_size(1280.0, 800.0)
+    .min_inner_size(800.0, 600.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── App Setup ─────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -310,6 +328,7 @@ pub fn run() {
             chat_answer,
             chat_interrupt,
             spawn_worker,
+            new_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
