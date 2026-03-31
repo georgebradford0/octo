@@ -202,6 +202,7 @@ interface ChatPaneProps {
   initialMessage?: string
   onStatusChange: (status: ConnStatus) => void
   onWorkerCreated: (branch: string, worktreePath: string, task: string, workerSessionId: string) => void
+  onRefreshBranches: () => void
   worktreePath?: string  // pre-set cwd for this pane (passed into chat_new_session)
 }
 
@@ -217,6 +218,7 @@ function ChatPane({
   initialMessage,
   onStatusChange,
   onWorkerCreated,
+  onRefreshBranches,
 }: ChatPaneProps) {
   const [messages,        setMessages]        = useState<ChatMessage[]>([])
   const [status,          setStatus]          = useState<ConnStatus>('connecting')
@@ -236,12 +238,14 @@ function ChatPane({
   const messagesEndRef      = useRef<HTMLDivElement>(null)
   const scrollContainerRef  = useRef<HTMLDivElement>(null)
   const inputRef            = useRef<HTMLTextAreaElement>(null)
-  const onStatusChangeRef   = useRef(onStatusChange)
-  const onWorkerCreatedRef  = useRef(onWorkerCreated)
-  const initialMessageSent  = useRef(false)
+  const onStatusChangeRef      = useRef(onStatusChange)
+  const onWorkerCreatedRef     = useRef(onWorkerCreated)
+  const onRefreshBranchesRef   = useRef(onRefreshBranches)
+  const initialMessageSent     = useRef(false)
 
-  onStatusChangeRef.current  = onStatusChange
-  onWorkerCreatedRef.current = onWorkerCreated
+  onStatusChangeRef.current     = onStatusChange
+  onWorkerCreatedRef.current    = onWorkerCreated
+  onRefreshBranchesRef.current  = onRefreshBranches
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -330,10 +334,12 @@ function ChatPane({
         setIsStreaming(false)
         setIsPending(true)
         setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
+        onRefreshBranchesRef.current()
         break
       case 'result':
         appendBlock({ kind: 'result', cost_usd: frame.cost_usd, turns: frame.turns })
         completeResponse()
+        onRefreshBranchesRef.current()
         break
       case 'error':
         ensureAssistantMsg()
@@ -820,22 +826,22 @@ export default function App() {
   }, [apiKeyInput])
 
   // Branch polling — Tauri uses invoke, browser uses HTTP
-  useEffect(() => {
-    const repo = repoPath
-    const fetchBranches = () => {
-      if (isTauri() && repo) {
-        tauriInvoke<Branch[]>('get_branches', { repo }).then(setBranches).catch(() => {})
-      } else if (!isTauri()) {
-        fetch(BRANCHES_URL)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => d && setBranches(d))
-          .catch(() => {})
-      }
+  const fetchBranches = useCallback(() => {
+    if (isTauri() && repoPath) {
+      tauriInvoke<Branch[]>('get_branches', { repo: repoPath }).then(setBranches).catch(() => {})
+    } else if (!isTauri()) {
+      fetch(BRANCHES_URL)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setBranches(d))
+        .catch(() => {})
     }
+  }, [repoPath])
+
+  useEffect(() => {
     fetchBranches()
     const t = setInterval(fetchBranches, 10_000)
     return () => clearInterval(t)
-  }, [repoPath])
+  }, [fetchBranches])
 
   // Auto-close tabs whose worktree has been removed
   useEffect(() => {
@@ -1054,6 +1060,7 @@ export default function App() {
                   initialMessage={tab.initialMessage}
                   onStatusChange={handleStatusChange(tab.id)}
                   onWorkerCreated={handleWorkerCreated}
+                  onRefreshBranches={fetchBranches}
                 />
               </div>
             ))}
