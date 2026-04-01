@@ -19,7 +19,7 @@ import {
   View,
 } from 'react-native'
 import { KeyboardProvider, KeyboardStickyView, useKeyboardAnimation } from 'react-native-keyboard-controller'
-import Reanimated, { useAnimatedStyle, useDerivedValue } from 'react-native-reanimated'
+import Reanimated, { useAnimatedStyle, useDerivedValue, useSharedValue } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
 import NoiseConnection from './src/NativeNoiseConnection'
@@ -381,11 +381,11 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
   const [input,           setInput]           = useState('')
   const [completions,     setCompletions]     = useState<string[]>([])
   const [compQuery,       setCompQuery]       = useState<{ atPos: number; dirPart: string; filePart: string } | null>(null)
-  const [inputBarHeight,  setInputBarHeight]  = useState(0)
+  const inputBarHeight = useSharedValue(0)
   const { height: keyboardHeight } = useKeyboardAnimation()
   const listContainerStyle = useAnimatedStyle(() => ({
     flex: 1,
-    marginBottom: inputBarHeight + keyboardHeight.value,
+    marginBottom: inputBarHeight.value + keyboardHeight.value,
   }))
   // True once AsyncStorage has been checked so the WebSocket doesn't connect before
   // we know whether to include session_id in the URL.
@@ -940,7 +940,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         </View>
       )}
 
-      <KeyboardStickyView onLayout={e => setInputBarHeight(e.nativeEvent.layout.height)} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, paddingBottom: insets.bottom, backgroundColor: C.surface }}>
+      <KeyboardStickyView onLayout={e => { inputBarHeight.value = e.nativeEvent.layout.height }} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, paddingBottom: insets.bottom, backgroundColor: C.surface }}>
         {completions.length > 0 && (
           <ScrollView style={s.completionList} keyboardShouldPersistTaps="always">
             {completions.map((c, i) => (
