@@ -29,17 +29,6 @@ mkdir -p /etc/claudulhu
 NOISE_PUBKEY=$(claudulhu-server --print-pubkey)
 echo "[claudulhu] Noise public key: ${NOISE_PUBKEY}"
 
-# ── QR code ───────────────────────────────────────────────────────────────────
-# Format v2: "2:<host>:<port>:<pubkey_base32>"
-# All chars uppercase+digits+colon → QR alphanumeric mode → compact QR.
-QR_DATA="2:${PUBLIC_HOST}:${NOISE_PORT}:${NOISE_PUBKEY}"
-
-echo ""
-echo "[claudulhu] Scan this QR code with the app to connect:"
-echo ""
-printf '%s' "${QR_DATA}" | qrencode -l L -m 4 -t UTF8 -o -
-echo ""
-
 # ── Git authentication ────────────────────────────────────────────────────────
 # Allow token via env var or mounted secret file (/run/secrets/gh_token).
 if [ -z "$GH_TOKEN" ] && [ -f /run/secrets/gh_token ]; then
@@ -93,4 +82,40 @@ REPO_NAME=$(basename "$GIT_URL" .git)
 printf '{"repo":"%s","name":"%s"}\n' "$WORKSPACE" "$REPO_NAME" > "$CLAUDULHU_DATA_DIR/config.json"
 
 echo "[claudulhu] Starting server (repo: $WORKSPACE)"
-exec claudulhu-server
+
+# ── Start server, then print QR once it is listening ─────────────────────────
+# Run the server in the background, tee its output to stdout, and watch for
+# the sentinel line it emits after both listeners are bound.  Only then print
+# the QR so the user cannot scan before the Noise port is accepting connections.
+
+# Format v2: "2:<host>:<port>:<pubkey_base32>"
+# All chars uppercase+digits+colon → QR alphanumeric mode → compact QR.
+QR_DATA="2:${PUBLIC_HOST}:${NOISE_PORT}:${NOISE_PUBKEY}"
+
+SENTINEL="[claudulhu] HTTP/WebSocket on"
+
+# Named pipe lets us tee server stdout through a watcher without a temp file.
+PIPE=$(mktemp -t claudulhu-pipe-XXXXXX)
+rm -f "$PIPE"
+mkfifo "$PIPE"
+
+claudulhu-server 2>&1 | tee "$PIPE" &
+SERVER_PID=$!
+
+# Read lines from the pipe; forward each one and trigger QR on sentinel.
+QR_PRINTED=0
+while IFS= read -r line; do
+    # tee already printed the line; nothing to echo here.
+    if [ "$QR_PRINTED" -eq 0 ] && \
+       printf '%s' "$line" | grep -qF "$SENTINEL"; then
+        echo ""
+        echo "[claudulhu] Scan this QR code with the app to connect:"
+        echo ""
+        printf '%s' "${QR_DATA}" | qrencode -l L -m 4 -t UTF8 -o -
+        echo ""
+        QR_PRINTED=1
+    fi
+done < "$PIPE"
+
+rm -f "$PIPE"
+wait "$SERVER_PID"
