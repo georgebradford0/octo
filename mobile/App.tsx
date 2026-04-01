@@ -902,7 +902,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
       <FlatList
         ref={scrollRef}
         style={s.messageList}
-        contentContainerStyle={s.messageListContent}
+        contentContainerStyle={[s.messageListContent, { paddingBottom: inputBarHeight + 16 }]}
         data={messages}
         keyExtractor={m => m.id}
         renderItem={({ item }) => <MessageBubble message={item} />}
