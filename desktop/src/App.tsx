@@ -148,10 +148,18 @@ function ToolUseBlock({ block }: { block: Extract<Block, { kind: 'tool_use' }> }
 
 // ── BlockRenderer ─────────────────────────────────────────────────────────────
 
+/** Splits text on **bold** markers and returns an array of React nodes. */
+function renderBoldText(text: string): React.ReactNode[] {
+  const parts = text.split(/\*\*/)
+  return parts.map((part, i) =>
+    i % 2 === 1 ? <strong key={i}>{part}</strong> : part
+  )
+}
+
 function BlockRenderer({ block }: { block: Block }) {
   switch (block.kind) {
     case 'text':
-      return <p className="text-block">{block.text}</p>
+      return <p className="text-block">{renderBoldText(block.text)}</p>
     case 'tool_use':
       return <ToolUseBlock block={block} />
     case 'tool_result':
@@ -198,11 +206,6 @@ function BlockRenderer({ block }: { block: Block }) {
 function MessageBubble({ message }: { message: ChatMessage }) {
   return (
     <div className={`message message--${message.role}`}>
-      {message.role !== 'info' && (
-        <div className="message-label">
-          {message.role === 'user' ? 'you' : 'claude'}
-        </div>
-      )}
       <div className="message-body">
         {message.blocks.map((block, i) => (
           <BlockRenderer key={i} block={block} />
@@ -727,12 +730,11 @@ function ChatPane({
                 : 'send a message to begin'}
             </div>
           )}
-          {messages.map(msg => (
+          {messages.map((msg, i) => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
           {isPending && (
             <div className="message message--assistant">
-              <div className="message-label">claude</div>
               <div className="message-body">
                 <span className="thinking-dots">
                   <span /><span /><span />
