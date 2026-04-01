@@ -359,11 +359,38 @@
   font-size: 13px;
   line-height: 1.7;
   color: var(--text);
+  margin: 0;
 }
 
 .message--user .text-block { color: #2145B8; }
 
 .text-block strong { font-weight: 900; }
+
+.inline-code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--bg-alt, rgba(0,0,0,0.08));
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.code-block {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--bg-alt, rgba(0,0,0,0.08));
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin: 4px 0;
+  margin-left: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+.code-block code {
+  background: none;
+  padding: 0;
+}
 
 /* ── Cursor ───────────────────────────────────────────────────────────────── */
 

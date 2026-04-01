@@ -148,18 +148,40 @@ function ToolUseBlock({ block }: { block: Extract<Block, { kind: 'tool_use' }> }
 
 // ── BlockRenderer ─────────────────────────────────────────────────────────────
 
-/** Splits text on **bold** markers and returns an array of React nodes. */
-function renderBoldText(text: string): React.ReactNode[] {
-  const parts = text.split(/\*\*/)
-  return parts.map((part, i) =>
-    i % 2 === 1 ? <strong key={i}>{part}</strong> : part
-  )
+/** Renders text with **bold**, `inline code`, and triple-backtick code blocks. */
+function renderText(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = []
+  // Split on triple-backtick blocks first
+  const tripleParts = text.split(/(```[\s\S]*?```)/g)
+  tripleParts.forEach((part, ti) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const inner = part.slice(3, -3).replace(/^\n/, '')
+      nodes.push(<pre key={`pre-${ti}`} className="code-block"><code>{inner}</code></pre>)
+    } else {
+      // Within non-code sections, handle inline code and bold
+      const inlineParts = part.split(/(`[^`]+`)/g)
+      inlineParts.forEach((ip, ii) => {
+        if (ip.startsWith('`') && ip.endsWith('`')) {
+          nodes.push(<code key={`code-${ti}-${ii}`} className="inline-code">{ip.slice(1, -1)}</code>)
+        } else {
+          const boldParts = ip.split(/\*\*/)
+          boldParts.forEach((bp, bi) =>
+            nodes.push(bi % 2 === 1
+              ? <strong key={`bold-${ti}-${ii}-${bi}`}>{bp}</strong>
+              : bp
+            )
+          )
+        }
+      })
+    }
+  })
+  return nodes
 }
 
 function BlockRenderer({ block }: { block: Block }) {
   switch (block.kind) {
     case 'text':
-      return <p className="text-block">{renderBoldText(block.text)}</p>
+      return <p className="text-block">{renderText(block.text)}</p>
     case 'tool_use':
       return <ToolUseBlock block={block} />
     case 'tool_result':
@@ -730,7 +752,7 @@ function ChatPane({
                 : 'send a message to begin'}
             </div>
           )}
-          {messages.map((msg, i) => (
+          {messages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
           {isPending && (
