@@ -40,12 +40,17 @@ async fn run_agentic_loop_desktop(
     let (tx, mut rx) = mpsc::channel::<ChatEvent>(256);
     let app2 = app.clone();
     let sid2 = session_id.clone();
-    tokio::spawn(async move {
+    let bridge = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             emit(&app2, &sid2, event);
         }
     });
     run_agentic_loop(session, session_id, api_key, model, tx).await;
+    // Wait for the bridge task to drain and emit all remaining events (including
+    // the terminal Result/Error/Interrupted) before chat_send returns to the
+    // frontend.  Without this, the command response can race the final event and
+    // the UI may never receive the completion frame.
+    bridge.await.ok();
 }
 
 // ── Tauri Commands ────────────────────────────────────────────────────────────
@@ -125,13 +130,18 @@ async fn chat_send(
     let session = {
         state.sessions.lock().unwrap().get(&session_id).cloned()
     };
-    let session = session.ok_or_else(|| "session not found".to_string())?;
+    let Some(session) = session else {
+        log::error!("chat_send {session_id}: session not found");
+        emit(&app, &session_id, ChatEvent::Error { message: "session not found".to_string() });
+        return Ok(());
+    };
 
     let cfg     = read_config();
-    let api_key = resolve_api_key().ok_or_else(|| {
+    let Some(api_key) = resolve_api_key() else {
         log::error!("chat_send {session_id}: no API key configured");
-        "no API key configured".to_string()
-    })?;
+        emit(&app, &session_id, ChatEvent::Error { message: "no API key configured".to_string() });
+        return Ok(());
+    };
     let model   = cfg.model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
     {
