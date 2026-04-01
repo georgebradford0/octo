@@ -18,7 +18,8 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native'
-import { KeyboardProvider, KeyboardStickyView } from 'react-native-keyboard-controller'
+import { KeyboardProvider, KeyboardStickyView, useKeyboardAnimation } from 'react-native-keyboard-controller'
+import Reanimated, { useAnimatedStyle, useDerivedValue } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
 import NoiseConnection from './src/NativeNoiseConnection'
@@ -381,6 +382,11 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
   const [completions,     setCompletions]     = useState<string[]>([])
   const [compQuery,       setCompQuery]       = useState<{ atPos: number; dirPart: string; filePart: string } | null>(null)
   const [inputBarHeight,  setInputBarHeight]  = useState(0)
+  const { height: keyboardHeight } = useKeyboardAnimation()
+  const listContainerStyle = useAnimatedStyle(() => ({
+    flex: 1,
+    marginBottom: inputBarHeight + keyboardHeight.value,
+  }))
   // True once AsyncStorage has been checked so the WebSocket doesn't connect before
   // we know whether to include session_id in the URL.
   const [sessionLoaded,   setSessionLoaded]   = useState(false)
@@ -899,31 +905,31 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
     <View style={s.pane}>
       {/* Fills the home-indicator zone with the input bar colour so there's no colour mismatch below the sticky view */}
       <View style={[s.bottomFill, { height: insets.bottom }]} />
-      <FlatList
-        ref={scrollRef}
-        style={s.messageList}
-        contentContainerStyle={[s.messageListContent, { paddingBottom: inputBarHeight + 16 }]}
-        data={messages}
-        keyExtractor={m => m.id}
-        renderItem={({ item }) => <MessageBubble message={item} />}
-        ListEmptyComponent={
-          <Text style={s.emptyState}>
-            {status === 'connecting' || status === 'disconnected' ? 'connecting to server…' : 'send a message to begin'}
-          </Text>
-        }
-        ListFooterComponent={isPending ? <PendingEllipsis /> : null}
-        onContentSizeChange={() => scrollToBottom()}
-        onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
-          const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y
-          isAtBottomRef.current = distanceFromBottom < 80
-        }}
-        scrollEventThrottle={100}
-        keyboardShouldPersistTaps="handled"
-        automaticallyAdjustKeyboardInsets={false}
-        initialNumToRender={30}
-        contentInset={{ bottom: inputBarHeight }}
-        scrollIndicatorInsets={{ bottom: inputBarHeight }}
-      />
+      <Reanimated.View style={listContainerStyle}>
+        <FlatList
+          ref={scrollRef}
+          style={s.messageList}
+          contentContainerStyle={s.messageListContent}
+          data={messages}
+          keyExtractor={m => m.id}
+          renderItem={({ item }) => <MessageBubble message={item} />}
+          ListEmptyComponent={
+            <Text style={s.emptyState}>
+              {status === 'connecting' || status === 'disconnected' ? 'connecting to server…' : 'send a message to begin'}
+            </Text>
+          }
+          ListFooterComponent={isPending ? <PendingEllipsis /> : null}
+          onContentSizeChange={() => scrollToBottom()}
+          onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
+            const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y
+            isAtBottomRef.current = distanceFromBottom < 80
+          }}
+          scrollEventThrottle={100}
+          keyboardShouldPersistTaps="handled"
+          automaticallyAdjustKeyboardInsets={false}
+          initialNumToRender={30}
+        />
+      </Reanimated.View>
 
       {(status === 'connecting' || status === 'disconnected' || status === 'error') && (
         <View style={s.reconnectBanner}>
@@ -934,7 +940,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         </View>
       )}
 
-      <KeyboardStickyView offset={{ closed: -insets.bottom, opened: 0 }} onLayout={e => setInputBarHeight(e.nativeEvent.layout.height)} style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+      <KeyboardStickyView onLayout={e => setInputBarHeight(e.nativeEvent.layout.height)} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, paddingBottom: insets.bottom, backgroundColor: C.surface }}>
         {completions.length > 0 && (
           <ScrollView style={s.completionList} keyboardShouldPersistTaps="always">
             {completions.map((c, i) => (
