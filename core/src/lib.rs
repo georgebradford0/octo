@@ -1116,11 +1116,13 @@ pub fn build_system_prompt(repo_path: &str, branch: Option<&str>, worktree_path:
         (Some(branch), Some(wt)) => format!(
             "You are an AI coding assistant working on branch '{branch}' in the git worktree at {wt}.\
              This is your working directory — use it for all file operations and git commands.\
-             Do not cd to any other directory.{claude_md}{tool_guidance}"
+             Do not cd to any other directory.\
+             Any path preceded by '@' (e.g. @src/main.rs) is a reference to a file path in the git repository.{claude_md}{tool_guidance}"
         ),
         _ => format!(
             "You are an AI assistant helping manage the git repository at {repo_path}.\
-             You can inspect code, answer questions, and help coordinate work across branches.{claude_md}{tool_guidance}"
+             You can inspect code, answer questions, and help coordinate work across branches.\
+             Any path preceded by '@' (e.g. @src/main.rs) is a reference to a file path in the git repository.{claude_md}{tool_guidance}"
         ),
     }
 }
