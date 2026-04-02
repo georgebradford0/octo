@@ -896,7 +896,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
   const canSend = !!input.trim() && (pendingQuestion || (!isStreaming && (status === 'ready' || status === 'resumed')))
 
   const scrollToBottom = useCallback((force?: boolean) => {
-    if (force || isAtBottomRef.current) {
+    if (force || isAtBottomRef.current || inResponseRef.current) {
       scrollRef.current?.scrollToEnd({ animated: false })
     }
   }, [])
