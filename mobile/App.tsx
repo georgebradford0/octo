@@ -507,7 +507,14 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
   }, [])
 
   const completeResponse = useCallback(() => {
-    dbg('completeResponse: eventCount=', eventCountRef.current)
+    // Capture the seq synchronously NOW — before any reconnect's onopen can reset
+    // eventCountRef back to the previous storedSeqRef value.  Keeping storedSeqRef
+    // consistent with storedMessagesRef (both updated together in the setMessages
+    // updater below) is what prevents the server from replaying already-applied
+    // events on the next reconnect.
+    const seq = eventCountRef.current
+    dbg('completeResponse: seq=', seq)
+    storedSeqRef.current = seq   // eager: safe for buildConnectUrl to read immediately
     inResponseRef.current = false
     setIsPending(false)
     setIsStreaming(false)
@@ -517,10 +524,9 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
     // Also persist the completed state so it survives app closure.
     setMessages(prev => {
       const updated = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-      storedSeqRef.current      = eventCountRef.current
       storedMessagesRef.current = updated
       AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
-      AsyncStorage.setItem(`seq_${storageKey}`, String(eventCountRef.current)).catch(() => {})
+      AsyncStorage.setItem(`seq_${storageKey}`, String(seq)).catch(() => {})
       return updated
     })
   }, [storageKey])
@@ -538,25 +544,32 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         // Persist the session ID so we can resume after app restarts.
         sessionIdRef.current = frame.session_id
         AsyncStorage.setItem(`session_${storageKey}`, frame.session_id).catch(() => {})
+        // Always reset to the last clean save-point so that:
+        //   resumed=true  → replayed events are applied to a known-good base
+        //                   rather than the previous connection's potentially
+        //                   partial / stale UI state.
+        //   resumed=false → a new server session was created (e.g. server
+        //                   restart); clear any in-flight streaming artefacts so
+        //                   the UI shows a consistent, non-spinning baseline.
+        //                   The stored messages (history up to the last completed
+        //                   response) stay visible; only the partial in-flight
+        //                   content is discarded.
+        inResponseRef.current = false
+        setIsStreaming(false)
+        setIsPending(false)
+        setPendingQuestion(false)
+        setMessages(storedMessagesRef.current)
         if (!frame.resumed) {
-          // New server session — reset sequence counters but keep local chat
-          // history visible. History is only wiped by the user explicitly via
-          // "start new chat", not by a server-side session boundary.
+          // New server session — reset sequence counters and sync AsyncStorage so
+          // that a subsequent cold-start reconnects with seq=0 against the new
+          // session UUID (which was already saved above) rather than a stale seq
+          // from the previous session.
           storedSeqRef.current  = 0
           eventCountRef.current = 0
-          // storedMessagesRef keeps the existing messages as the replay baseline
-          // so reconnects continue to show history correctly.
-          dbg('ready: new session, keeping', storedMessagesRef.current.length, 'stored messages')
+          AsyncStorage.setItem(`seq_${storageKey}`, '0').catch(() => {})
+          dbg('ready: new session, reset seq to 0, kept', storedMessagesRef.current.length, 'stored messages')
         } else {
-          // Reset messages to the last clean save point so that replayed events
-          // are applied to a known-good base rather than the previous connection's
-          // potentially partial UI state.
-          dbg('ready: resuming, resetting to', storedMessagesRef.current.length, 'stored messages')
-          inResponseRef.current = false
-          setIsStreaming(false)
-          setIsPending(false)
-          setPendingQuestion(false)
-          setMessages(storedMessagesRef.current)
+          dbg('ready: resuming from seq', storedSeqRef.current, 'with', storedMessagesRef.current.length, 'stored messages')
         }
         updateStatus(frame.resumed ? 'resumed' : 'ready')
         break
@@ -674,6 +687,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
       }
 
       ws.onmessage = ({ data }) => {
+        if (cancelled) return
         let frame: ServerFrame
         try { frame = JSON.parse(data as string) } catch {
           dbg('ws onmessage: parse error', data)
@@ -696,7 +710,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
           setIsStreaming(false)
           setIsPending(false)
           setPendingQuestion(false)
-          setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
+          setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
           updateStatus('disconnected')
           dbg('ws onclose: scheduling reconnect in', immediate ? '0ms (foreground)' : '1s')
           pendingReconnectTimer.current = setTimeout(connect, immediate ? 0 : 1000)
