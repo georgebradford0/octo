@@ -49,7 +49,7 @@ The TTL is per cache entry, not per session. Entries stay warm as long as *any* 
 
 ## Message compaction interaction
 
-Before breakpoints are applied, `compact_history` stubs out the bodies of tool-result messages older than the last 6 tool results. This reduces raw token volume independently of caching. The two mechanisms are complementary:
+Before breakpoints are applied, `compact_history` stubs out the bodies of tool-result messages older than the last 3 tool results. This reduces raw token volume independently of caching. The two mechanisms are complementary:
 
 - Compaction reduces the number of tokens sent at all.
 - Caching reduces the cost of the tokens that are sent repeatedly.

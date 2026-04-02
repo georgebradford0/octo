@@ -21,13 +21,13 @@ each API request.
 
 ### The `keep_full` window
 
-`compact_history` is called with `keep_full = 6`. This means the **6 most recent
+`compact_history` is called with `keep_full = 3`. This means the **3 most recent
 tool-result user messages** and their paired assistant turns are kept at full fidelity.
 Everything older is stubbed.
 
 The window exists because the model frequently needs to refer back to recent tool
 results (e.g. a file it just read, the output of the last bash command). Stubbing
-those would hurt task quality. Turns beyond 6 steps ago are rarely consulted.
+those would hurt task quality. Turns beyond 3 steps ago are rarely consulted.
 
 ### What counts as a "tool-result message"
 
@@ -81,11 +81,11 @@ place.
 
 ## Token impact
 
-For a session with T total turns and `keep_full = 6`:
+For a session with T total turns and `keep_full = 3`:
 
-- **Tool-result messages:** turns 1 through T−6 go from their full output size (up
-  to 20 000 chars / ~5 000 tokens each) down to a single stub line (~10 tokens).
-- **Paired assistant messages:** turns 1 through T−6 go from full reasoning text
+- **Tool-result messages:** turns 1 through T−3 go from their full output size (up
+  to 10 000 chars / ~2 500 tokens each) down to a single stub line (~10 tokens).
+- **Paired assistant messages:** turns 1 through T−3 go from full reasoning text
   (typically 100–500 tokens each) down to one `[truncated]` text block plus
   minimal `ToolUse` stubs.
 
@@ -98,7 +98,7 @@ approach that only stubbed tool-results.
 ## Call site
 
 ```
-stream_turn()  →  compact_history(messages, 6)  →  messages_json (sent to API)
+stream_turn()  →  compact_history(messages, 3)  →  messages_json (sent to API)
 ```
 
 Compaction runs on the in-memory session snapshot before each API call and does not

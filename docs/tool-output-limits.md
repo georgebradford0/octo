@@ -9,11 +9,11 @@ Truncation is applied once at the call site in `run_agentic_loop` via
 
 | Tool | Limit (chars) | Rationale |
 |---|---|---|
-| `bash` | 20,000 | Shell commands can produce large but meaningful output: test runs, diffs, `git log`. |
-| `read_file` | 20,000 | Safety ceiling for callers that omit `offset`/`limit`. Correctly-used calls are always smaller. |
-| `web_fetch` | 20,000 | HTML-stripped page bodies contain lots of useful prose. `strip_html` already reduces them substantially before this limit applies. |
-| `task_output` | 8,000 | Subprocess/agent output can be substantial (test results, build logs). |
-| `grep` | 6,000 | More than ~6 k of match lines is noise the model won't meaningfully act on. |
+| `bash` | 10,000 | Shell commands can produce large but meaningful output: test runs, diffs, `git log`. |
+| `read_file` | 10,000 | Safety ceiling for callers that omit `offset`/`limit`. Correctly-used calls are always smaller. |
+| `web_fetch` | 10,000 | HTML-stripped page bodies contain lots of useful prose. `strip_html` already reduces them substantially before this limit applies. |
+| `task_output` | 6,000 | Subprocess/agent output can be substantial (test results, build logs). |
+| `grep` | 4,000 | More than ~4 k of match lines is noise the model won't meaningfully act on. |
 | `web_search` | 4,000 | 10 results × ~400 chars (title + URL + description) saturates well under this ceiling. |
 | `task_list` | 3,000 | Task lists are short one-line records; anything beyond implies an unusually large number of tasks. |
 | `glob` | 3,000 | File-path lists; beyond ~3 k the model is unlikely to process all entries usefully. |
