@@ -18,7 +18,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native'
-import { KeyboardProvider, KeyboardStickyView, useKeyboardAnimation } from 'react-native-keyboard-controller'
+import { KeyboardProvider, KeyboardStickyView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller'
 import Reanimated, { useAnimatedStyle, useDerivedValue, useSharedValue } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
@@ -382,7 +382,7 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
   const [completions,     setCompletions]     = useState<string[]>([])
   const [compQuery,       setCompQuery]       = useState<{ atPos: number; dirPart: string; filePart: string } | null>(null)
   const inputBarHeight = useSharedValue(0)
-  const { height: keyboardHeight } = useKeyboardAnimation()
+  const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
   const listContainerStyle = useAnimatedStyle(() => ({
     flex: 1,
     marginBottom: inputBarHeight.value + keyboardHeight.value,
