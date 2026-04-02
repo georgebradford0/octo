@@ -19,7 +19,7 @@ import {
   View,
 } from 'react-native'
 import { KeyboardProvider, KeyboardStickyView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller'
-import Reanimated, { useAnimatedStyle, useDerivedValue, useSharedValue } from 'react-native-reanimated'
+import Reanimated, { useAnimatedReaction, useAnimatedStyle, useDerivedValue, useSharedValue, runOnJS } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
 import NoiseConnection from './src/NativeNoiseConnection'
@@ -900,6 +900,16 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
       scrollRef.current?.scrollToEnd({ animated: false })
     }
   }, [])
+
+  useAnimatedReaction(
+    () => keyboardHeight.value,
+    (current, previous) => {
+      if (current < (previous ?? 0)) {
+        // keyboard is opening (height is negative in this animation library)
+        runOnJS(scrollToBottom)(true)
+      }
+    },
+  )
 
   return (
     <View style={s.pane}>
