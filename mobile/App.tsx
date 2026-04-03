@@ -1316,6 +1316,7 @@ function AppInner() {
             <TouchableOpacity style={s.backBtn} onPress={() => setConn(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={s.backBtnText}>‹</Text>
             </TouchableOpacity>
+            <View style={[s.connDot, { backgroundColor: statusColor(tabStatuses[activeTab] ?? 'connecting') }]} />
             <View>
               <Text style={s.headerTitle}>claudulhu</Text>
               {repoName && <Text style={s.headerRepo}>{repoName}</Text>}
@@ -1488,6 +1489,7 @@ const s = StyleSheet.create({
   tabBarInner:      { alignItems: 'center', paddingHorizontal: 8, gap: 2 },
   tab:              { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 9, borderRadius: 6, gap: 6, marginVertical: 4 },
   tabActive:        { backgroundColor: C.bg },
+  connDot:          { width: 8, height: 8, borderRadius: 4 },
   tabDot:           { width: 6, height: 6, borderRadius: 3 },
   tabLabel:         { color: C.textMuted, fontSize: 13, maxWidth: 110 },
   tabLabelActive:   { color: C.textPrimary },
