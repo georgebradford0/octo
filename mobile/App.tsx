@@ -70,12 +70,16 @@ const connKeyFor = (c: NoiseConnectionInfo) => `${c.host}:${c.port}:${c.pk.slice
 // ── Dev connection ─────────────────────────────────────────────────────────────
 // Fixed dev keypair baked into the server when CLAUDULHU_DEV=1.
 // Public key (base32): 34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ
+//
+// iOS Simulator cannot reach localhost — use the Mac's LAN IP instead.
+// Update DEV_HOST when your IP changes: `ipconfig getifaddr en0`
+const DEV_HOST = '192.168.0.42'
 const DEV_CONN: NoiseConnectionInfo = {
   v:     2,
-  host:  'localhost',
+  host:  DEV_HOST,
   port:  9000,
   pk:    '34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ',
-  label: 'dev (localhost)',
+  label: 'dev (local)',
 }
 
 // ── Colours ────────────────────────────────────────────────────────────────────
