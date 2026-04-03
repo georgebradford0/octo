@@ -71,9 +71,10 @@ const connKeyFor = (c: NoiseConnectionInfo) => `${c.host}:${c.port}:${c.pk.slice
 // Fixed dev keypair baked into the server when CLAUDULHU_DEV=1.
 // Public key (base32): 34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ
 //
-// iOS Simulator cannot reach localhost — use the Mac's LAN IP instead.
-// Update DEV_HOST when your IP changes: `ipconfig getifaddr en0`
-const DEV_HOST = '192.168.0.42'
+// iOS Simulator shares the Mac's network stack — 127.0.0.1 reaches Docker's
+// bound port directly. (Hostnames like "localhost" won't work because the
+// native Swift layer uses inet_pton which only accepts numeric IP addresses.)
+const DEV_HOST = '127.0.0.1'
 const DEV_CONN: NoiseConnectionInfo = {
   v:     2,
   host:  DEV_HOST,
@@ -274,9 +275,12 @@ const ChatPane = memo(function ChatPane({
 
     const connect = () => {
       if (cancelled) return
+      console.log(`[ws] connecting to ${wsUrl}`)
       updateStatus('connecting')
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
+
+      ws.onopen = () => console.log('[ws] opened')
 
       ws.onmessage = ({ data }: { data: string }) => {
         if (cancelled) return
@@ -335,13 +339,15 @@ const ChatPane = memo(function ChatPane({
         }
       }
 
-      ws.onerror = () => {
+      ws.onerror = (e: Event) => {
         if (cancelled) return
+        console.error('[ws] error', e)
         updateStatus('error')
       }
 
-      ws.onclose = () => {
+      ws.onclose = (e: CloseEvent) => {
         if (cancelled) return
+        console.log(`[ws] closed code=${e.code} reason=${e.reason}`)
         updateStatus('connecting')
         reconnectTimer = setTimeout(connect, 1500)
       }
@@ -519,9 +525,18 @@ function AppInner() {
     if (!conn) return
     let connected = false
     const timer = setTimeout(() => {
+      console.log(`[noise] connecting to ${conn.host}:${conn.port} pk=${conn.pk.slice(0, 8)}…`)
       NoiseConnection.connect(conn.host, conn.port, conn.pk)
-        .then(port => { connected = true; setTunnelPort(port) })
-        .catch(e   => setTunnelError(e?.message ?? String(e)))
+        .then(port => {
+          console.log(`[noise] tunnel established → local port ${port}`)
+          connected = true
+          setTunnelPort(port)
+        })
+        .catch(e => {
+          const msg = e?.message ?? String(e)
+          console.error(`[noise] connect failed: ${msg}`)
+          setTunnelError(msg)
+        })
     }, 50)
     return () => {
       clearTimeout(timer)
@@ -535,10 +550,14 @@ function AppInner() {
     if (!conn) return
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
+        console.log('[noise] app foregrounded — re-establishing tunnel')
         NoiseConnection.disconnect()
         NoiseConnection.connect(conn.host, conn.port, conn.pk)
-          .then(port => setTunnelPort(port))
-          .catch(() => {})
+          .then(port => {
+            console.log(`[noise] tunnel re-established → local port ${port}`)
+            setTunnelPort(port)
+          })
+          .catch(e => console.error(`[noise] reconnect failed: ${e?.message ?? e}`))
       }
     })
     return () => sub.remove()

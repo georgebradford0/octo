@@ -351,14 +351,18 @@ final class NoiseConnection: NSObject {
     }
 
     private func proxyConnection(localFd: Int32, host: String, port: Int, serverPub: Data) {
+        print("[noise-proxy] local client accepted; connecting to \(host):\(port)…")
         let remoteFd = connectSocket(host: host, port: port)
         guard remoteFd >= 0 else {
+            print("[noise-proxy] connectSocket to \(host):\(port) FAILED (errno=\(errno))")
             Darwin.close(localFd)
             return
         }
+        print("[noise-proxy] TCP connected to \(host):\(port); starting handshake…")
 
         do {
             let noise = try runHandshake(remoteFd: remoteFd, serverPub: serverPub)
+            print("[noise-proxy] handshake complete; proxying data")
             let g = DispatchGroup()
 
             // local → encrypt → remote
@@ -388,7 +392,9 @@ final class NoiseConnection: NSObject {
             }
 
             g.wait()
-        } catch { }
+        } catch {
+            print("[noise-proxy] handshake/proxy error: \(error)")
+        }
 
         Darwin.close(localFd)
         Darwin.close(remoteFd)
