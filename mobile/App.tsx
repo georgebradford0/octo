@@ -1,17 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { useCallback, useEffect, memo, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, memo, useRef, useState } from 'react'
 import {
-  Animated,
   ActivityIndicator,
+  Animated,
   AppState,
   FlatList,
-  Image,
-  Modal,
   PermissionsAndroid,
   Platform,
-  Pressable,
-  ScrollView,
-  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -19,7 +14,7 @@ import {
   View,
 } from 'react-native'
 import { KeyboardProvider, KeyboardStickyView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller'
-import Reanimated, { useAnimatedReaction, useAnimatedStyle, useDerivedValue, useSharedValue, runOnJS } from 'react-native-reanimated'
+import Reanimated, { useAnimatedStyle } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
 import NoiseConnection from './src/NativeNoiseConnection'
@@ -30,77 +25,36 @@ interface NoiseConnectionInfo {
   v:      number
   host:   string
   port:   number
-  pk:     string    // base32-encoded 32-byte Curve25519 server static public key
-  label?: string    // repo name, populated after first successful connect
+  pk:     string
+  label?: string
 }
+
+type ConnStatus = 'connecting' | 'ready' | 'streaming' | 'error'
 
 type ServerFrame =
-  | { type: 'ready';                session_id: string; resumed: boolean }
-  | { type: 'text';                 text: string }
-  | { type: 'tool_use';             tool: string; input: Record<string, unknown> }
-  | { type: 'tool_result';          tool_use_id: string; content: unknown }
-  | { type: 'result';               cost_usd: number; turns: number; session_id: string; result: string | null }
-  | { type: 'error';                message: string }
-  | { type: 'interrupted' }
-  | { type: 'question';             question: string }
-  | { type: 'system';               text: string }
-  | { type: 'spawning';             task: string }
-  | { type: 'worker_created';       branch: string; worktree_path: string; task: string }
-  | { type: 'worker_error';         message: string }
-  | { type: 'worker_session_ready'; branch: string; worktree_path: string; worker_session_id: string; task: string }
+  | { type: 'history';  messages: HistMsg[] }
+  | { type: 'token';    text: string }
+  | { type: 'tool';     name: string }
+  | { type: 'question'; question: string }
+  | { type: 'done' }
+  | { type: 'error';    message: string }
 
-type Block =
-  | { kind: 'text';           text: string }
-  | { kind: 'tool_use';       tool: string; input: Record<string, unknown> }
-  | { kind: 'tool_result';    content: unknown }
-  | { kind: 'result';         cost_usd: number; turns: number }
-  | { kind: 'error';          message: string }
-  | { kind: 'interrupted' }
-  | { kind: 'question';       question: string }
-  | { kind: 'system';         text: string }
-  | { kind: 'worker_created'; branch: string; worktree_path: string }
-  | { kind: 'worker_error';   message: string }
+interface HistMsg { role: 'user' | 'assistant'; text: string }
 
-interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant' | 'info'
-  blocks: Block[]
-  streaming: boolean
+interface Message {
+  id:          string
+  role:        'user' | 'assistant'
+  text:        string
+  streaming?:  boolean
+  isQuestion?: boolean
 }
-
-interface Branch {
-  name: string
-  commit: string
-  worktree: string | null
-}
-
-interface Tab {
-  id: string
-  label: string
-  wsUrl: string
-  storageKey: string  // conn-scoped key used for AsyncStorage — never shared across connections
-  initialMessage?: string
-}
-
-type ConnStatus = 'connecting' | 'ready' | 'resumed' | 'error' | 'disconnected'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 let _id = 0
 const uid = () => `m${Date.now()}_${++_id}`
 
-/** Stable, filesystem-safe key that uniquely identifies a server connection.
- *  Built from the server's static public key (already globally unique) with
- *  host:port as a human-readable prefix.  Used to namespace AsyncStorage keys
- *  so that sessions from different containers never collide even when they run
- *  on the same host machine with differently-named volume mounts. */
-const connKeyFor = (conn: NoiseConnectionInfo): string =>
-  `${conn.host}_${conn.port}_${conn.pk.slice(0, 16)}`
-
 function parseQrData(raw: string): NoiseConnectionInfo | null {
-  // Format v2: "2:host:port:pk_base32"
-  // pk_base32 = base32(32-byte Curve25519 server static public key), 52 chars
-  // All chars uppercase+digits+colon → QR alphanumeric mode → compact QR.
   const parts = raw.split(':')
   if (parts[0] === '2' && parts.length === 4) {
     const [, host, portStr, pk] = parts
@@ -111,13 +65,14 @@ function parseQrData(raw: string): NoiseConnectionInfo | null {
   return null
 }
 
+const connKeyFor = (c: NoiseConnectionInfo) => `${c.host}:${c.port}:${c.pk.slice(0, 8)}`
+
 // ── Colours ────────────────────────────────────────────────────────────────────
 
 const C = {
   bg:            '#ffffff',
   surface:       '#f2f2f7',
   border:        '#d1d1d6',
-  borderLight:   '#e5e5ea',
   accent:        '#2563eb',
   green:         '#22863a',
   yellow:        '#b45309',
@@ -125,44 +80,18 @@ const C = {
   textPrimary:   '#1c1c1e',
   textSecondary: '#6b6b6b',
   textMuted:     '#aeaeb2',
-  userBubble:    '#dbeafe',
-  userBorder:    '#93c5fd',
-  asstBubble:    '#f2f2f7',
-  asstBorder:    '#d1d1d6',
-  infoBubble:    '#f9f9fb',
-  toolBg:        '#f2f2f7',
-  inputBg:       '#ffffff',
   inputBorder:   '#d1d1d6',
 }
 
-// ── ToolUseBlock ──────────────────────────────────────────────────────────────
-
-const PRIMARY_KEYS = ['command', 'path', 'query', 'input', 'content', 'url', 'pattern', 'prompt']
-
-function primaryArg(input: Record<string, unknown>): string {
-  for (const key of PRIMARY_KEYS) {
-    if (typeof input[key] === 'string') return input[key] as string
-  }
-  const first = Object.values(input)[0]
-  return first !== undefined ? String(first) : ''
+const statusColor = (st: ConnStatus): string => {
+  if (st === 'ready')     return C.green
+  if (st === 'streaming') return C.accent
+  if (st === 'error')     return C.red
+  return C.yellow
 }
 
-function ToolUseBlock({ tool, input }: { tool: string; input: Record<string, unknown> }) {
-  const arg = primaryArg(input)
-  return (
-    <Text style={s.toolLine}>{tool}("{arg}")</Text>
-  )
-}
+// ── Text rendering ─────────────────────────────────────────────────────────────
 
-// ── ToolResultBlock ────────────────────────────────────────────────────────────
-
-function ToolResultBlock({ content: _ }: { content: unknown }) {
-  return null
-}
-
-// ── BlockRenderer ─────────────────────────────────────────────────────────────
-
-/** Split text on **…** markers and render bold spans inline. */
 function renderBoldText(text: string, baseStyle: object) {
   const parts = text.split(/\*\*(.+?)\*\*/gs)
   if (parts.length === 1) return <Text style={baseStyle}>{text}</Text>
@@ -177,71 +106,24 @@ function renderBoldText(text: string, baseStyle: object) {
   )
 }
 
-const BlockRenderer = memo(function BlockRenderer({ block }: { block: Block }) {
-  switch (block.kind) {
-    case 'text':
-      return renderBoldText(block.text, s.textBlock)
-    case 'tool_use':
-      return <ToolUseBlock tool={block.tool} input={block.input} />
-    case 'tool_result':
-      return <ToolResultBlock content={block.content} />
-    case 'result':
-      return (
-        <View style={s.resultFooter}>
-          <Text style={s.resultMeta}>✓ {block.turns} turn{block.turns !== 1 ? 's' : ''}</Text>
-          <Text style={s.resultMeta}>${block.cost_usd.toFixed(4)}</Text>
-        </View>
-      )
-    case 'error':
-      return <Text style={s.errorText}>✗ {block.message}</Text>
-    case 'interrupted':
-      return <Text style={s.mutedText}>— interrupted</Text>
-    case 'question':
-      return (
-        <View style={s.questionRow}>
-          <Text style={s.questionMark}>?</Text>
-          <Text style={s.questionText}>{block.question}</Text>
-        </View>
-      )
-    case 'system':
-      return <Text style={s.systemText}>{block.text}</Text>
-    case 'worker_created':
-      return (
-        <View style={s.workerRow}>
-          <Text style={s.workerIcon}>⎇</Text>
-          <View style={s.workerInfo}>
-            <Text style={s.workerBranch}>{block.branch}</Text>
-            <Text style={s.workerPath} numberOfLines={1}>{block.worktree_path}</Text>
-          </View>
-        </View>
-      )
-    case 'worker_error':
-      return <Text style={s.errorText}>✗ {block.message}</Text>
-  }
-})
-
 // ── PendingEllipsis ───────────────────────────────────────────────────────────
 
 function PendingEllipsis() {
   const dots = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current]
-
   useEffect(() => {
     const anims = dots.map((dot, i) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(i * 150),
-          Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: true }),
-          Animated.timing(dot, { toValue: 0, duration: 300, useNativeDriver: true }),
-          Animated.delay((dots.length - i - 1) * 150),
-        ])
-      )
+      Animated.loop(Animated.sequence([
+        Animated.delay(i * 150),
+        Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: true }),
+        Animated.timing(dot, { toValue: 0, duration: 300, useNativeDriver: true }),
+        Animated.delay((dots.length - i - 1) * 150),
+      ]))
     )
     anims.forEach(a => a.start())
     return () => anims.forEach(a => a.stop())
   }, [])
-
   return (
-    <View style={[s.messageWrap]}>
+    <View style={s.messageWrap}>
       <Text style={s.messageLabel}>claude</Text>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
         {dots.map((dot, i) => (
@@ -254,17 +136,15 @@ function PendingEllipsis() {
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
-const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user'
-  const isInfo = message.role === 'info'
   return (
     <View style={[s.messageWrap, isUser && s.messageWrapRight]}>
-      {!isInfo && (
-        <Text style={[s.messageLabel, isUser && s.messageLabelRight]}>
-          {isUser ? 'you' : 'claude'}
-        </Text>
-      )}
-      {message.blocks.map((block, i) => <BlockRenderer key={i} block={block} />)}
+      <Text style={[s.messageLabel, isUser && s.messageLabelRight]}>
+        {isUser ? 'you' : 'claude'}
+      </Text>
+      {message.isQuestion && <Text style={s.questionMark}>?</Text>}
+      {renderBoldText(message.text, s.textBlock)}
       {message.streaming && <Text style={s.cursor}>▋</Text>}
     </View>
   )
@@ -274,11 +154,9 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
 
 function CreatureAnim() {
   const slideX = useRef(new Animated.Value(-300)).current
-
   useEffect(() => {
     Animated.timing(slideX, { toValue: 0, duration: 700, useNativeDriver: true }).start()
   }, [])
-
   return (
     <Animated.Image
       source={require('./assets/creature.png')}
@@ -290,43 +168,27 @@ function CreatureAnim() {
 // ── QrScanner ─────────────────────────────────────────────────────────────────
 
 function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void; onCancel: () => void }) {
-  const device = useCameraDevice('back')
-  const scannedRef = useRef(false)
-
+  const device      = useCameraDevice('back')
+  const scannedRef  = useRef(false)
   const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
     onCodeScanned: (codes) => {
-      console.log('[scanner] codes:', JSON.stringify(codes))
-      if (scannedRef.current) { return }
+      if (scannedRef.current) return
       const value = codes[0]?.value
-      console.log('[scanner] value:', value)
-      if (value) {
-        scannedRef.current = true
-        onScanned(value)
-      }
+      if (value) { scannedRef.current = true; onScanned(value) }
     },
   })
-
-  if (!device) {
-    return (
-      <View style={s.scannerFull}>
-        <Text style={s.scannerError}>Camera not available</Text>
-        <TouchableOpacity style={s.scannerCancel} onPress={onCancel}>
-          <Text style={s.scannerCancelText}>Cancel</Text>
-        </TouchableOpacity>
-      </View>
-    )
-  }
-
+  if (!device) return (
+    <View style={s.scannerFull}>
+      <Text style={s.scannerError}>Camera not available</Text>
+      <TouchableOpacity style={s.scannerCancel} onPress={onCancel}>
+        <Text style={s.scannerCancelText}>Cancel</Text>
+      </TouchableOpacity>
+    </View>
+  )
   return (
     <View style={s.scannerFull}>
-      <Camera
-        device={device}
-        isActive={true}
-        codeScanner={codeScanner}
-        style={StyleSheet.absoluteFill}
-      />
-      {/* Dark overlay with cut-out reticle */}
+      <Camera device={device} isActive codeScanner={codeScanner} style={StyleSheet.absoluteFill} />
       <View style={s.scannerOverlay}>
         <View style={s.scannerTopBar}>
           <Text style={s.scannerTitle}>Scan QR code</Text>
@@ -348,622 +210,195 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
-interface ChatPaneProps {
-  wsUrl:           string
-  storageKey:      string   // unique key for AsyncStorage (tab.id)
-  tunnelPort:      number
-  branches:        Branch[]
-  canSpawnWorker:  boolean
-  onStatusChange:  (s: ConnStatus) => void
-  onWorkerCreated: (branch: string, worktreePath: string, task: string) => void
-  initialMessage?: string
-}
-
-function parseAtCompletion(text: string): { atPos: number; dirPart: string; filePart: string } | null {
-  const atIdx = text.lastIndexOf('@')
-  if (atIdx === -1) return null
-  const fragment = text.slice(atIdx + 1)
-  if (fragment.includes(' ')) return null
-  const slash = fragment.lastIndexOf('/')
-  const dirPart  = slash >= 0 ? fragment.slice(0, slash + 1) : ''
-  const filePart = slash >= 0 ? fragment.slice(slash + 1)    : fragment
-  return { atPos: atIdx, dirPart, filePart }
-}
-
-const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branches, canSpawnWorker, onStatusChange, onWorkerCreated, initialMessage }: ChatPaneProps) {
+const ChatPane = memo(function ChatPane({
+  wsUrl, connKey, onStatusChange,
+}: {
+  wsUrl:          string
+  connKey:        string
+  onStatusChange: (s: ConnStatus) => void
+}) {
   const insets = useSafeAreaInsets()
 
-  const [messages,        setMessages]        = useState<ChatMessage[]>([])
-  const [status,          setStatus]          = useState<ConnStatus>('connecting')
-  const [isStreaming,     setIsStreaming]      = useState(false)
-  const [isPending,       setIsPending]       = useState(false)
+  const [messages,       setMessages]       = useState<Message[]>([])
+  const [status,         setStatus]         = useState<ConnStatus>('connecting')
+  const [input,          setInput]          = useState('')
   const [pendingQuestion, setPendingQuestion] = useState(false)
-  const [input,           setInput]           = useState('')
-  const [completions,     setCompletions]     = useState<string[]>([])
-  const [compQuery,       setCompQuery]       = useState<{ atPos: number; dirPart: string; filePart: string } | null>(null)
-  const inputBarHeight = useSharedValue(0)
-  const { height: keyboardHeight, progress: keyboardProgress } = useReanimatedKeyboardAnimation()
-  const listContainerStyle = useAnimatedStyle(() => ({
-    flex: 1,
-    marginBottom: inputBarHeight.value - keyboardHeight.value,
-  }))
+  const [inputBarH,      setInputBarH]      = useState(0)
+
+  const wsRef           = useRef<WebSocket | null>(null)
+  const sendMessageRef  = useRef<() => void>(() => {})
+  const listRef         = useRef<FlatList<Message>>(null)
+  const isAtBottomRef   = useRef(true)
+
+  const { height: kbHeight } = useReanimatedKeyboardAnimation()
   const inputBarStyle = useAnimatedStyle(() => ({
-    paddingBottom: insets.bottom * (1 - keyboardProgress.value),
+    paddingBottom: Math.max(0, -kbHeight.value - insets.bottom),
   }))
-  const bottomFillStyle = useAnimatedStyle(() => ({
-    height: insets.bottom * (1 - keyboardProgress.value),
-  }))
-  // True once AsyncStorage has been checked so the WebSocket doesn't connect before
-  // we know whether to include session_id in the URL.
-  const [sessionLoaded,   setSessionLoaded]   = useState(false)
-
-  const wsRef              = useRef<WebSocket | null>(null)
-  const inResponseRef      = useRef(false)
-  const scrollRef          = useRef<FlatList<ChatMessage>>(null)
-  const isAtBottomRef      = useRef(true)
-  const inputRef           = useRef<TextInput>(null)
-  const initialMessageSent = useRef(false)
-  const hasFocusedInput    = useRef(false)
-  const onStatusChangeRef  = useRef(onStatusChange)
-  const onWorkerCreatedRef = useRef(onWorkerCreated)
-
-  // Session-resumption refs — persisted across reconnects via AsyncStorage.
-  const sessionIdRef     = useRef<string | null>(null)   // server-assigned session UUID
-  const storedSeqRef     = useRef<number>(0)              // event count at last save
-  const eventCountRef    = useRef<number>(0)              // running event count this session
-  // Clean message state at the last save point. On every reconnect we reset messages
-  // to this before replaying events so that events from the previous connection are
-  // not duplicated on top of the current UI state.
-  const storedMessagesRef = useRef<ChatMessage[]>([])
-  // Set to true by the AppState handler before closing the socket so that
-  // onclose reconnects immediately instead of waiting the 3-second backoff.
-  const reconnectImmediatelyRef = useRef(false)
-  // Ref to the current connect function and any pending reconnect timer, so
-  // the AppState handler can trigger an immediate reconnect even when the
-  // socket is already closed (mid backoff timer).
-  const connectFnRef            = useRef<(() => void) | null>(null)
-  const pendingReconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const sendMessageRef          = useRef<() => void>(() => {})
-
-  onStatusChangeRef.current  = onStatusChange
-  onWorkerCreatedRef.current = onWorkerCreated
-
-  // Auto-focus the input the first time the connection becomes ready.
-  useEffect(() => {
-    if (!hasFocusedInput.current && (status === 'ready' || status === 'resumed')) {
-      hasFocusedInput.current = true
-      inputRef.current?.focus()
-    }
-  }, [status])
-
-
-  // Stable debug logger — useMemo so it doesn't recreate on every render.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const dbg = useMemo(() => (...args: unknown[]) => console.log(`[chat:${storageKey}]`, ...args), [])
-
-  // Load persisted session state (session_id, messages, seq) before connecting.
-  useEffect(() => {
-    dbg('load effect: reading AsyncStorage')
-    let cancelled = false
-    AsyncStorage.multiGet([
-      `session_${storageKey}`,
-      `messages_${storageKey}`,
-      `seq_${storageKey}`,
-    ]).then(pairs => {
-      if (cancelled) { dbg('load effect: cancelled before applying'); return }
-      const [[, sessionId], [, messagesJson], [, seqStr]] = pairs
-      dbg('load effect: sessionId=', sessionId, 'seq=', seqStr, 'hasMessages=', !!messagesJson)
-      if (sessionId) { sessionIdRef.current = sessionId }
-      if (seqStr !== null) {
-        const n = parseInt(seqStr, 10)
-        if (!isNaN(n)) {
-          storedSeqRef.current  = n
-          eventCountRef.current = n
-        }
-      }
-      if (messagesJson) {
-        try {
-          const msgs = JSON.parse(messagesJson) as ChatMessage[]
-          storedMessagesRef.current = msgs
-          setMessages(msgs)
-          dbg('load effect: restored', msgs.length, 'messages')
-        } catch (e) { dbg('load effect: failed to parse messages', e) }
-      }
-    }).catch(e => dbg('load effect: AsyncStorage error', e)).finally(() => {
-      if (!cancelled) { dbg('load effect: setSessionLoaded(true)'); setSessionLoaded(true) }
-    })
-    return () => { dbg('load effect: cleanup'); cancelled = true }
-  }, [storageKey])
 
   const updateStatus = useCallback((s: ConnStatus) => {
-    dbg('updateStatus', s)
     setStatus(s)
-    onStatusChangeRef.current(s)
-  }, [])
+    onStatusChange(s)
+  }, [onStatusChange])
 
-  const ensureAssistantMsg = useCallback(() => {
-    if (!inResponseRef.current) {
-      inResponseRef.current = true
-      setIsPending(false)
-      setIsStreaming(true)
-      setMessages(prev => [...prev, { id: uid(), role: 'assistant', blocks: [], streaming: true }])
-    }
-  }, [])
-
-  const appendBlock = useCallback((block: Block) => {
-    setMessages(prev => {
-      const last = prev[prev.length - 1]
-      if (!last?.streaming) { return prev }
-      if (block.kind === 'text') {
-        const tail = last.blocks[last.blocks.length - 1]
-        if (tail?.kind === 'text') {
-          return prev.map((m, i) => i < prev.length - 1 ? m : {
-            ...m, blocks: [...m.blocks.slice(0, -1), { kind: 'text' as const, text: tail.text + block.text }],
-          })
-        }
-      }
-      return prev.map((m, i) => i < prev.length - 1 ? m : { ...m, blocks: [...m.blocks, block] })
-    })
-  }, [])
-
-  const completeResponse = useCallback(() => {
-    // Capture the seq synchronously NOW — before any reconnect's onopen can reset
-    // eventCountRef back to the previous storedSeqRef value.  Keeping storedSeqRef
-    // consistent with storedMessagesRef (both updated together in the setMessages
-    // updater below) is what prevents the server from replaying already-applied
-    // events on the next reconnect.
-    const seq = eventCountRef.current
-    dbg('completeResponse: seq=', seq)
-    storedSeqRef.current = seq   // eager: safe for buildConnectUrl to read immediately
-    inResponseRef.current = false
-    setIsPending(false)
-    setIsStreaming(false)
-    setPendingQuestion(false)
-    // Clear streaming on ALL messages, not just the last — belt-and-suspenders in
-    // case an earlier bubble was left streaming by a skipped completeResponse.
-    // Also persist the completed state so it survives app closure.
-    setMessages(prev => {
-      const updated = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-      storedMessagesRef.current = updated
-      AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
-      AsyncStorage.setItem(`seq_${storageKey}`, String(seq)).catch(() => {})
-      return updated
-    })
-  }, [storageKey])
-
-  const handleFrame = useCallback((frame: ServerFrame) => {
-    // Count every event except 'ready' (which is connection-level, not session-level).
-    if (frame.type !== 'ready') {
-      eventCountRef.current++
-    }
-    switch (frame.type) {
-      case 'ready':
-        dbg('ready frame: session_id=', frame.session_id, 'resumed=', frame.resumed,
-            'storedSeq=', storedSeqRef.current, 'storedMessages=', storedMessagesRef.current.length,
-            'inResponse=', inResponseRef.current, 'isStreaming=', /* read at call time */ '(see next log)')
-        // Persist the session ID so we can resume after app restarts.
-        sessionIdRef.current = frame.session_id
-        AsyncStorage.setItem(`session_${storageKey}`, frame.session_id).catch(() => {})
-        // Always reset to the last clean save-point so that:
-        //   resumed=true  → replayed events are applied to a known-good base
-        //                   rather than the previous connection's potentially
-        //                   partial / stale UI state.
-        //   resumed=false → a new server session was created (e.g. server
-        //                   restart); clear any in-flight streaming artefacts so
-        //                   the UI shows a consistent, non-spinning baseline.
-        //                   The stored messages (history up to the last completed
-        //                   response) stay visible; only the partial in-flight
-        //                   content is discarded.
-        inResponseRef.current = false
-        setIsStreaming(false)
-        setIsPending(false)
-        setPendingQuestion(false)
-        setMessages(storedMessagesRef.current)
-        if (!frame.resumed) {
-          // New server session — reset sequence counters and sync AsyncStorage so
-          // that a subsequent cold-start reconnects with seq=0 against the new
-          // session UUID (which was already saved above) rather than a stale seq
-          // from the previous session.
-          storedSeqRef.current  = 0
-          eventCountRef.current = 0
-          AsyncStorage.setItem(`seq_${storageKey}`, '0').catch(() => {})
-          dbg('ready: new session, reset seq to 0, kept', storedMessagesRef.current.length, 'stored messages')
-        } else {
-          dbg('ready: resuming from seq', storedSeqRef.current, 'with', storedMessagesRef.current.length, 'stored messages')
-        }
-        updateStatus(frame.resumed ? 'resumed' : 'ready')
-        break
-      case 'text':
-        ensureAssistantMsg(); appendBlock({ kind: 'text', text: frame.text })
-        break
-      case 'tool_use':
-        ensureAssistantMsg(); appendBlock({ kind: 'tool_use', tool: frame.tool, input: frame.input })
-        break
-      case 'tool_result':
-        if (!inResponseRef.current) {
-          // Spurious tool_result (e.g. duplicate, resumed session mid-tool-call).
-          // appendBlock would silently drop it anyway, and setting isPending=true
-          // here with nothing to clear it is what causes the hanging dots.
-          break
-        }
-        appendBlock({ kind: 'tool_result', content: frame.content })
-        inResponseRef.current = false
-        setIsStreaming(false)
-        setIsPending(true)
-        setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
-        break
-      case 'result':
-        // ensureAssistantMsg in case result arrives while pending (tool_result → result
-        // with no intervening text/tool_use frame), so appendBlock has a streaming msg.
-        ensureAssistantMsg(); appendBlock({ kind: 'result', cost_usd: frame.cost_usd, turns: frame.turns })
-        completeResponse()
-        break
-      case 'error':
-        ensureAssistantMsg(); appendBlock({ kind: 'error', message: frame.message }); completeResponse()
-        break
-      case 'interrupted':
-        ensureAssistantMsg(); appendBlock({ kind: 'interrupted' }); completeResponse()
-        break
-      case 'question':
-        ensureAssistantMsg()
-        appendBlock({ kind: 'question', question: frame.question })
-        inResponseRef.current = false
-        setIsStreaming(false)
-        setIsPending(false)
-        setMessages(prev => prev.map((m, i) => i < prev.length - 1 ? m : { ...m, streaming: false }))
-        setPendingQuestion(true)
-        break
-      case 'system':
-        setMessages(prev => [...prev, {
-          id: uid(), role: 'info', streaming: false,
-          blocks: [{ kind: 'system', text: frame.text }],
-        }])
-        break
-      case 'spawning':
-        break
-      case 'worker_created':
-        setMessages(prev => [...prev, {
-          id: uid(), role: 'info', streaming: false,
-          blocks: [{ kind: 'worker_created', branch: frame.branch, worktree_path: frame.worktree_path }],
-        }])
-        break
-      case 'worker_session_ready':
-        onWorkerCreatedRef.current(frame.branch, frame.worktree_path, frame.task)
-        completeResponse()
-        break
-      case 'worker_error':
-        setMessages(prev => [...prev, {
-          id: uid(), role: 'info', streaming: false,
-          blocks: [{ kind: 'worker_error', message: frame.message }],
-        }])
-        completeResponse()
-        break
-    }
-  }, [appendBlock, completeResponse, ensureAssistantMsg, updateStatus])
-
-  // WebSocket connection — only starts after AsyncStorage has been read.
+  // Scroll to bottom when messages change
   useEffect(() => {
-    dbg('ws effect: running, sessionLoaded=', sessionLoaded, 'wsUrl=', wsUrl)
-    if (!sessionLoaded) { dbg('ws effect: waiting for session load'); return }
-    let cancelled = false
-
-    // Build the WebSocket URL, appending session resumption params.
-    const buildConnectUrl = (): string => {
-      const isWorker = wsUrl.includes('/workers/')
-      const seq      = storedSeqRef.current
-      if (isWorker) {
-        return `${wsUrl}?seq=${seq}`
-      }
-      const sid = sessionIdRef.current
-      return sid
-        ? `${wsUrl}?session_id=${encodeURIComponent(sid)}&seq=${seq}`
-        : wsUrl
+    if (isAtBottomRef.current && messages.length > 0) {
+      listRef.current?.scrollToEnd({ animated: false })
     }
+  }, [messages])
+
+  // WebSocket connection lifecycle
+  useEffect(() => {
+    let cancelled = false
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    // Show cached messages while connecting
+    AsyncStorage.getItem(`msgs_${connKey}`)
+      .then(json => { if (json && !cancelled) try { setMessages(JSON.parse(json)) } catch {} })
+      .catch(() => {})
 
     const connect = () => {
-      pendingReconnectTimer.current = null
-      if (cancelled) { dbg('connect: skipped (cancelled)'); return }
-      const connectUrl = buildConnectUrl()
-      dbg('connect: url=', connectUrl, 'sessionId=', sessionIdRef.current, 'seq=', storedSeqRef.current)
+      if (cancelled) return
       updateStatus('connecting')
-      const ws = new WebSocket(connectUrl)
+      const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
-      // Timeout: if the socket stays in CONNECTING for too long (e.g. the Noise
-      // tunnel is dead), force-close it so onclose fires and we retry.
-      const connectTimer = setTimeout(() => {
-        if (ws.readyState === WebSocket.CONNECTING) {
-          dbg('connect: timeout (10s), force-closing')
-          ws.close()
-        }
-      }, 10000)
-
-      ws.onopen = () => {
-        clearTimeout(connectTimer)
-        dbg('ws onopen: readyState=', ws.readyState, 'eventCount=', eventCountRef.current, 'storedSeq=', storedSeqRef.current)
-        // Reset the running event counter to the last saved position so we can
-        // track how many new events arrive in this connection.
-        eventCountRef.current = storedSeqRef.current
-      }
-
-      ws.onmessage = ({ data }) => {
+      ws.onmessage = ({ data }: { data: string }) => {
         if (cancelled) return
         let frame: ServerFrame
-        try { frame = JSON.parse(data as string) } catch {
-          dbg('ws onmessage: parse error', data)
-          return
+        try { frame = JSON.parse(data as string) } catch { return }
+
+        switch (frame.type) {
+          case 'history': {
+            const msgs: Message[] = frame.messages.map((m, i) => ({
+              id: `h${i}`, role: m.role, text: m.text,
+            }))
+            setMessages(msgs)
+            setPendingQuestion(false)
+            isAtBottomRef.current = true
+            updateStatus('ready')
+            AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(msgs)).catch(() => {})
+            break
+          }
+          case 'token': {
+            updateStatus('streaming')
+            setMessages(prev => {
+              const last = prev[prev.length - 1]
+              if (last?.streaming && last.role === 'assistant') {
+                return [...prev.slice(0, -1), { ...last, text: last.text + frame.text }]
+              }
+              return [...prev, { id: uid(), role: 'assistant' as const, text: frame.text, streaming: true }]
+            })
+            break
+          }
+          case 'done': {
+            setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
+            updateStatus('ready')
+            setPendingQuestion(false)
+            break
+          }
+          case 'question': {
+            setMessages(prev => {
+              const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
+              return [...finalized, { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true }]
+            })
+            setPendingQuestion(true)
+            updateStatus('ready')
+            break
+          }
+          case 'error': {
+            setMessages(prev => {
+              const last = prev[prev.length - 1]
+              if (last?.streaming) {
+                return [...prev.slice(0, -1), { ...last, streaming: false }]
+              }
+              return [...prev, { id: uid(), role: 'assistant' as const, text: `✗ ${frame.message}` }]
+            })
+            updateStatus('ready')
+            break
+          }
         }
-        dbg('ws frame:', frame.type)
-        handleFrame(frame)
       }
 
-      ws.onclose = (e) => {
-        clearTimeout(connectTimer)
-        dbg('ws onclose: code=', e.code, 'reason=', e.reason, 'cancelled=', cancelled,
-            'readyState=', ws.readyState, 'inResponse=', inResponseRef.current)
-        if (!cancelled) {
-          const immediate = reconnectImmediatelyRef.current
-          reconnectImmediatelyRef.current = false
-          // Clear ALL in-flight state regardless of inResponseRef — isPending can be
-          // true even when inResponseRef=false (between tool_result and the next frame).
-          inResponseRef.current = false
-          setIsStreaming(false)
-          setIsPending(false)
-          setPendingQuestion(false)
-          setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
-          updateStatus('disconnected')
-          dbg('ws onclose: scheduling reconnect in', immediate ? '0ms (foreground)' : '1s')
-          pendingReconnectTimer.current = setTimeout(connect, immediate ? 0 : 1000)
-        } else {
-          dbg('ws onclose: cancelled, not reconnecting')
-        }
+      ws.onerror = () => {
+        if (cancelled) return
+        updateStatus('error')
       }
 
-      ws.onerror = (e) => {
-        clearTimeout(connectTimer)
-        dbg('ws onerror: cancelled=', cancelled, 'readyState=', ws.readyState, 'error=', e)
-        if (!cancelled) {
-          inResponseRef.current = false
-          setIsStreaming(false)
-          setIsPending(false)
-          setPendingQuestion(false)
-          setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
-          updateStatus('error')
-          // onclose will also fire after onerror and schedule the retry.
-        }
+      ws.onclose = () => {
+        if (cancelled) return
+        updateStatus('connecting')
+        reconnectTimer = setTimeout(connect, 1500)
       }
     }
 
-    connectFnRef.current = connect
     connect()
+
     return () => {
-      dbg('ws effect: cleanup, setting cancelled=true')
       cancelled = true
-      connectFnRef.current = null
-      if (pendingReconnectTimer.current !== null) {
-        clearTimeout(pendingReconnectTimer.current)
-        pendingReconnectTimer.current = null
-      }
+      if (reconnectTimer) clearTimeout(reconnectTimer)
       wsRef.current?.close()
     }
-  }, [wsUrl, handleFrame, updateStatus, sessionLoaded])
+  }, [wsUrl, connKey])
 
-  // Force-reconnect when returning to foreground — iOS silently kills the socket
-  // while backgrounded, leaving readyState=OPEN but the connection dead.
+  // When app foregrounds: force-close WS so onclose fires and we reconnect.
+  // (Noise tunnel re-establishment is handled by AppInner.)
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
-      const ws = wsRef.current
-      dbg('AppState change:', nextState, 'ws.readyState=', ws?.readyState,
-          '(0=CONNECTING 1=OPEN 2=CLOSING 3=CLOSED null=none)')
       if (nextState === 'active') {
-        // Always clear in-flight state when returning to foreground — the server
-        // will have dropped any streaming response and we don't want the send
-        // button or TextInput to stay disabled due to a stale isStreaming/isPending.
-        inResponseRef.current = false
-        setIsStreaming(false)
-        setIsPending(false)
-        setPendingQuestion(false)
+        const ws = wsRef.current
         if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-          // Close OPEN (silently dead) or CONNECTING (stuck) sockets so onclose
-          // fires and reconnects immediately.
-          dbg('AppState active: closing socket (readyState=', ws.readyState, ') to force reconnect')
-          reconnectImmediatelyRef.current = true
           ws.close()
-        } else {
-          // Socket is already closed — cancel the slow backoff timer and reconnect now.
-          dbg('AppState active: socket closed/null, triggering immediate reconnect')
-          if (pendingReconnectTimer.current !== null) {
-            clearTimeout(pendingReconnectTimer.current)
-            pendingReconnectTimer.current = null
-          }
-          connectFnRef.current?.()
         }
-      } else {
-        // App going to background — reset so input re-focuses on next active.
-        hasFocusedInput.current = false
       }
     })
     return () => sub.remove()
   }, [])
 
-  // Send initial message once ready
-  useEffect(() => {
-    if (!initialMessage || initialMessageSent.current) { return }
-    if (status !== 'ready' && status !== 'resumed') { return }
-    initialMessageSent.current = true
-    setMessages(prev => [...prev, {
-      id: uid(), role: 'user', streaming: false,
-      blocks: [{ kind: 'text', text: initialMessage }],
-    }])
-    wsRef.current?.send(JSON.stringify({ type: 'message', text: initialMessage }))
-  }, [status, initialMessage])
-
   const sendMessage = useCallback(() => {
-    const raw = input.trim()
-    if (!raw) { return }
-    if (isStreaming && !pendingQuestion) { return }
+    const text = input.trim()
+    if (!text || status === 'streaming') return
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) { return }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
 
-    // & prefix → spawn a new worktree tab (mirrors desktop behaviour)
-    if (canSpawnWorker && !pendingQuestion && raw.startsWith('&')) {
-      const task = raw.slice(1).trim()
-      if (task) {
-        ws.send(JSON.stringify({ type: 'spawn_worker', task }))
-        setMessages(prev => [...prev, { id: uid(), role: 'user' as const, streaming: false, blocks: [{ kind: 'text' as const, text: raw }] }])
-        isAtBottomRef.current = true
-        setInput(''); setCompletions([]); setCompQuery(null)
-        setIsPending(true)
-        inResponseRef.current = true
-        setIsStreaming(true)
-        return
-      }
-    }
+    setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
+    isAtBottomRef.current = true
 
-    const text = raw
     if (pendingQuestion) {
-      setMessages(prev => {
-        const updated = [...prev, { id: uid(), role: 'user' as const, streaming: false, blocks: [{ kind: 'text' as const, text }] }]
-        storedMessagesRef.current = updated
-        AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
-        return updated
-      })
       ws.send(JSON.stringify({ type: 'answer', answer: text }))
       setPendingQuestion(false)
-      setIsPending(true)
     } else {
-      setMessages(prev => {
-        const updated = [...prev, { id: uid(), role: 'user' as const, streaming: false, blocks: [{ kind: 'text' as const, text }] }]
-        storedMessagesRef.current = updated
-        AsyncStorage.setItem(`messages_${storageKey}`, JSON.stringify(updated)).catch(() => {})
-        return updated
-      })
       ws.send(JSON.stringify({ type: 'message', text }))
-      setIsPending(true)
     }
-    isAtBottomRef.current = true
-    setInput(''); setCompletions([]); setCompQuery(null)
-  }, [input, isStreaming, pendingQuestion, canSpawnWorker])
+
+    setInput('')
+  }, [input, pendingQuestion, status])
+
   sendMessageRef.current = sendMessage
 
-  const spawnWorker = useCallback(() => {
-    const text = input.trim()
-    if (!text || isStreaming) { return }
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) { return }
-    ws.send(JSON.stringify({ type: 'spawn_worker', task: text }))
-    setMessages(prev => [...prev, { id: uid(), role: 'user', streaming: false, blocks: [{ kind: 'text', text }] }])
-    isAtBottomRef.current = true
-    setInput(''); setCompletions([]); setCompQuery(null)
-    setIsPending(true)
-    inResponseRef.current = true
-    setIsStreaming(true)
-  }, [input, isStreaming])
-
-  const startNewChat = useCallback(() => {
-    dbg('startNewChat')
-    sessionIdRef.current  = null
-    storedSeqRef.current  = 0
-    eventCountRef.current = 0
-    setMessages([])
-    setIsStreaming(false)
-    setIsPending(false)
-    setPendingQuestion(false)
-    inResponseRef.current = false
-    AsyncStorage.multiRemove([
-      `session_${storageKey}`,
-      `messages_${storageKey}`,
-      `seq_${storageKey}`,
-    ]).catch(() => {})
-    // Close the WebSocket — onclose will reconnect without session_id.
-    wsRef.current?.close()
-  }, [storageKey])
-
-  const updateCompletions = useCallback((query: { atPos: number; dirPart: string; filePart: string }) => {
-    setCompQuery(query)
-    const worktreeItems = query.dirPart === ''
-      ? branches
-          .filter(b => b.worktree && b.name.toLowerCase().startsWith(query.filePart.toLowerCase()))
-          .map(b => `⎇ ${b.name}`)
-      : []
-    const params = new URLSearchParams({ dir_part: query.dirPart, file_part: query.filePart })
-    fetch(`http://127.0.0.1:${tunnelPort}/completions?${params}`)
-      .then(r => r.ok ? (r.json() as Promise<string[]>) : Promise.resolve([]))
-      .then(items => setCompletions([...worktreeItems, ...items]))
-      .catch(() => setCompletions(worktreeItems))
-  }, [branches, tunnelPort])
-
-  const handleInputChange = useCallback((text: string) => {
-    setInput(text)
-    const query = parseAtCompletion(text)
-    if (!query) { setCompletions([]); setCompQuery(null); return }
-    updateCompletions(query)
-  }, [updateCompletions])
-
-  const acceptCompletion = useCallback((completion: string) => {
-    if (!compQuery) return
-    const inserted = completion.startsWith('⎇ ') ? completion.slice(2) : completion
-    const suffix = inserted.endsWith('/') ? '' : ' '
-    const next = input.slice(0, compQuery.atPos + 1) + inserted + suffix
-    setInput(next)
-    const newQuery = inserted.endsWith('/') ? parseAtCompletion(next) : null
-    if (newQuery) {
-      updateCompletions(newQuery)
-    } else {
-      setCompletions([])
-      setCompQuery(null)
-    }
-  }, [compQuery, input, updateCompletions])
-
-  const canSend = !!input.trim() && (pendingQuestion || (!isStreaming && (status === 'ready' || status === 'resumed')))
-
-  const scrollToBottom = useCallback((force?: boolean) => {
-    if (force || isAtBottomRef.current || inResponseRef.current) {
-      scrollRef.current?.scrollToEnd({ animated: false })
-    }
-  }, [])
-
-  useAnimatedReaction(
-    () => keyboardHeight.value,
-    (current, previous) => {
-      if (current < (previous ?? 0)) {
-        // keyboard is opening (height is negative in this animation library)
-        runOnJS(scrollToBottom)(true)
-      }
-    },
-  )
+  const isPending = status === 'streaming' && messages.length > 0 && !messages[messages.length - 1]?.streaming
 
   return (
     <View style={s.pane}>
-      {/* Fills the home-indicator zone with the input bar colour so there's no colour mismatch below the sticky view */}
-      <Reanimated.View style={[s.bottomFill, bottomFillStyle]} />
-      <Reanimated.View style={listContainerStyle}>
-        <FlatList
-          ref={scrollRef}
-          style={s.messageList}
-          contentContainerStyle={s.messageListContent}
-          data={messages}
-          keyExtractor={m => m.id}
-          renderItem={({ item }) => <MessageBubble message={item} />}
-          ListEmptyComponent={
-            <Text style={s.emptyState}>
-              {status === 'connecting' || status === 'disconnected' ? 'connecting to server…' : 'send a message to begin'}
-            </Text>
-          }
-          ListFooterComponent={isPending ? <PendingEllipsis /> : null}
-          onContentSizeChange={() => scrollToBottom()}
-          onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
-            const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y
-            isAtBottomRef.current = distanceFromBottom < 80
-          }}
-          scrollEventThrottle={100}
-          keyboardShouldPersistTaps="handled"
-          automaticallyAdjustKeyboardInsets={false}
-          initialNumToRender={30}
-        />
-      </Reanimated.View>
+      <FlatList
+        ref={listRef}
+        data={messages}
+        keyExtractor={m => m.id}
+        renderItem={({ item }) => <MessageBubble message={item} />}
+        contentContainerStyle={[s.messageListContent, { paddingBottom: inputBarH + 8 }]}
+        style={s.messageList}
+        ListEmptyComponent={<Text style={s.emptyState}>say something</Text>}
+        onScroll={({ nativeEvent: { layoutMeasurement, contentOffset, contentSize } }) => {
+          isAtBottomRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40
+        }}
+        scrollEventThrottle={100}
+        keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets={false}
+      />
 
-      {(status === 'connecting' || status === 'disconnected' || status === 'error') && (
+      {isPending && <PendingEllipsis />}
+
+      {(status === 'connecting' || status === 'error') && (
         <View style={s.reconnectBanner}>
           {status !== 'error' && <ActivityIndicator size="small" color={C.yellow} style={{ marginRight: 6 }} />}
           <Text style={s.reconnectText}>
@@ -972,171 +407,127 @@ const ChatPane = memo(function ChatPane({ wsUrl, storageKey, tunnelPort, branche
         </View>
       )}
 
-      <KeyboardStickyView onLayout={e => { inputBarHeight.value = e.nativeEvent.layout.height }} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.surface }}>
+      <KeyboardStickyView
+        onLayout={e => setInputBarH(e.nativeEvent.layout.height)}
+        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.surface }}
+      >
         <Reanimated.View style={inputBarStyle}>
-        {completions.length > 0 && (
-          <ScrollView style={s.completionList} keyboardShouldPersistTaps="always">
-            {completions.map((c, i) => (
-              <TouchableOpacity key={`${c}${i}`} style={s.completionItem} onPress={() => acceptCompletion(c)}>
-                <Text style={s.completionText} numberOfLines={1}>{c}</Text>
+          {status === 'streaming' && (
+            <View style={s.stopAboveRow}>
+              <TouchableOpacity
+                style={s.btnStop}
+                onPress={() => wsRef.current?.send(JSON.stringify({ type: 'interrupt' }))}
+              >
+                <Text style={s.btnStopText}>■</Text>
               </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
-        {/* Stop button — appears above input row on the right, only while streaming */}
-        {isStreaming && (
-          <View style={s.stopAboveRow}>
-            <TouchableOpacity style={s.btnStop} onPress={() => wsRef.current?.send(JSON.stringify({ type: 'interrupt' }))}>
-              <Text style={s.btnStopText}>■</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-        <View style={s.inputRow}>
-          <TextInput
-            ref={inputRef}
-            style={s.input}
-            value={input}
-            onChangeText={text => {
-              if (text.includes('\n')) { sendMessageRef.current(); return }
-              handleInputChange(text)
-            }}
-            placeholder={canSpawnWorker ? (pendingQuestion ? 'answer…' : '& for new worktree, or message…') : (pendingQuestion ? 'answer…' : 'message…')}
-            placeholderTextColor={C.textMuted}
-            multiline
-            returnKeyType="send"
-            blurOnSubmit={false}
-            onSubmitEditing={() => sendMessageRef.current()}
-            editable={!isStreaming || pendingQuestion}
-          />
-          {canSpawnWorker && messages.length > 0 && !isStreaming && !isPending && (
-            <TouchableOpacity style={s.btnNewChat} onPress={startNewChat} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={s.btnNewChatText}>↺</Text>
-            </TouchableOpacity>
+            </View>
           )}
-        </View>
+          <View style={s.inputRow}>
+            <TextInput
+              style={s.input}
+              value={input}
+              onChangeText={text => {
+                if (text.includes('\n')) { sendMessageRef.current(); return }
+                setInput(text)
+              }}
+              onSubmitEditing={() => sendMessageRef.current()}
+              placeholder={pendingQuestion ? 'answer…' : 'message…'}
+              placeholderTextColor={C.textMuted}
+              multiline
+              returnKeyType="send"
+              blurOnSubmit={false}
+              editable={status !== 'streaming'}
+            />
+          </View>
         </Reanimated.View>
       </KeyboardStickyView>
     </View>
   )
 })
 
-// ── ConnRow ───────────────────────────────────────────────────────────────────
+// ── ConnRow ────────────────────────────────────────────────────────────────────
 
-function ConnRow({ conn, isConnecting, error, onSelect, onDelete }: {
-  conn:         NoiseConnectionInfo
-  isConnecting: boolean
-  error:        string | null
-  onSelect:     () => void
-  onDelete:     () => void
+function ConnRow({ conn, onSelect, onDelete }: {
+  conn:     NoiseConnectionInfo
+  onSelect: () => void
+  onDelete: () => void
 }) {
   return (
     <TouchableOpacity style={s.connRow} onPress={onSelect} activeOpacity={0.7}>
       <View style={s.connInfo}>
-        <Text style={s.connLabel}>{conn.label ?? `${conn.host}:${conn.port}`}</Text>
+        <Text style={s.connLabel}>{conn.label ?? conn.host}</Text>
         <Text style={s.connHost}>{conn.host}:{conn.port}</Text>
-        {error && <Text style={s.connError} numberOfLines={2}>{error}</Text>}
       </View>
-      {isConnecting
-        ? <ActivityIndicator size="small" color={C.accent} />
-        : (
-          <TouchableOpacity onPress={onDelete} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Text style={s.connDelete}>✕</Text>
-          </TouchableOpacity>
-        )
-      }
+      <TouchableOpacity onPress={onDelete} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <Text style={s.connDelete}>×</Text>
+      </TouchableOpacity>
     </TouchableOpacity>
   )
 }
 
-// ── Root App ──────────────────────────────────────────────────────────────────
+// ── AppInner ──────────────────────────────────────────────────────────────────
 
 function AppInner() {
-  const [conn,         setConn]         = useState<NoiseConnectionInfo | null>(null)
-  const [tunnelPort,   setTunnelPort]   = useState<number | null>(null)
-  const [tunnelError,  setTunnelError]  = useState<string | null>(null)
-  const [scanning,     setScanning]     = useState(false)
-  const [tabs,         setTabs]         = useState<Tab[]>([])
-  const [activeTab,    setActiveTab]    = useState('main')
-  const [tabStatuses,  setTabStatuses]  = useState<Record<string, ConnStatus>>({ main: 'connecting' })
-  const [branches,     setBranches]     = useState<Branch[]>([])
-  const [showBranches, setShowBranches] = useState(false)
-  const [repoName,     setRepoName]     = useState<string | null>(null)
-  const [savedConns,   setSavedConns]   = useState<NoiseConnectionInfo[]>([])
+  const [conn,        setConn]        = useState<NoiseConnectionInfo | null>(null)
+  const [tunnelPort,  setTunnelPort]  = useState<number | null>(null)
+  const [tunnelError, setTunnelError] = useState<string | null>(null)
+  const [scanning,    setScanning]    = useState(false)
+  const [savedConns,  setSavedConns]  = useState<NoiseConnectionInfo[]>([])
+  const [repoName,    setRepoName]    = useState<string | null>(null)
+  const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
 
-  // ── Load stored connections on mount ──────────────────────────────────────
+  // Load saved connections on mount; auto-connect if exactly one saved.
   useEffect(() => {
-    // cancelled flag prevents the StrictMode double-invocation from calling
-    // setConn twice (different object references → two tunnel effect runs →
-    // potential double Noise handshake → ~6s startup freeze).
     let cancelled = false
     AsyncStorage.getItem('noiseConnections').then(json => {
-      if (cancelled) { return }
+      if (cancelled) return
       let conns: NoiseConnectionInfo[] = []
       if (json) { try { conns = JSON.parse(json) } catch {} }
       setSavedConns(conns)
-      if (conns.length === 1) { setConn(conns[0]) }
+      if (conns.length === 1) setConn(conns[0])
     })
     return () => { cancelled = true }
   }, [])
 
-  // ── Establish Noise tunnel whenever conn changes ──────────────────────────
+  // Establish Noise tunnel when conn changes.
   useEffect(() => {
     setTunnelPort(null)
     setTunnelError(null)
     setRepoName(null)
-    setBranches([])
-    setTabs([])
-    if (!conn) { return }
-
-    // Debounce the connect call so React StrictMode's immediate
-    // cleanup+remount cycle doesn't trigger two full Noise handshakes.
-    // In StrictMode the cleanup fires in <1ms, cancelling the timer before
-    // it fires. In normal operation the 50ms delay is imperceptible.
+    if (!conn) return
     let connected = false
     const timer = setTimeout(() => {
       NoiseConnection.connect(conn.host, conn.port, conn.pk)
         .then(port => { connected = true; setTunnelPort(port) })
-        .catch(e  => { setTunnelError(e?.message ?? String(e)) })
+        .catch(e   => setTunnelError(e?.message ?? String(e)))
     }, 50)
-
     return () => {
       clearTimeout(timer)
-      if (connected) { NoiseConnection.disconnect() }
+      if (connected) NoiseConnection.disconnect()
     }
   }, [conn])
 
-  // ── Re-establish Noise tunnel when app returns to foreground ───────────────
-  // iOS suspends the native TCP proxy during backgrounding.  Without this,
-  // ChatPane's WS reconnect fires but the tunnel underneath is dead and every
-  // connect attempt fails silently.
+  // Re-establish Noise tunnel when app returns to foreground (iOS kills the
+  // native TCP proxy during suspension; without this the WS reconnect silently fails).
   useEffect(() => {
-    if (!conn) { return }
+    if (!conn) return
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
         NoiseConnection.disconnect()
         NoiseConnection.connect(conn.host, conn.port, conn.pk)
           .then(port => setTunnelPort(port))
-          .catch(() => {}) // ChatPane's WS retry will surface the failure
+          .catch(() => {})
       }
     })
     return () => sub.remove()
   }, [conn])
 
-  // ── Init tabs when tunnel is ready ─────────────────────────────────────────
+  // Fetch repo name once tunnel is up.
   useEffect(() => {
-    if (!tunnelPort) { return }
-    const ck = conn ? connKeyFor(conn) : 'unknown'
-    setTabs([{ id: 'main', label: 'main', wsUrl: `ws://127.0.0.1:${tunnelPort}/chat?client=mobile`, storageKey: `${ck}::main` }])
-    setActiveTab('main')
-    setTabStatuses({ main: 'connecting' })
-  }, [tunnelPort, conn])
-
-  // ── Fetch repo name ────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!tunnelPort || !conn) { return }
+    if (!tunnelPort || !conn) return
     fetch(`http://127.0.0.1:${tunnelPort}/config`)
       .then(r => r.ok ? r.json() : null)
-      .then((d: { repo?: string | null; name?: string | null } | null) => {
+      .then((d: { name?: string | null } | null) => {
         const name = d?.name ?? null
         setRepoName(name)
         if (name) {
@@ -1152,48 +543,10 @@ function AppInner() {
       .catch(() => {})
   }, [tunnelPort, conn])
 
-  // ── Poll branches ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!tunnelPort) { return }
-    const poll = () => {
-      fetch(`http://127.0.0.1:${tunnelPort}/branches`)
-        .then(r => r.ok ? r.json() : null)
-        .then((d: Branch[] | null) => d && setBranches(prev =>
-          JSON.stringify(prev) === JSON.stringify(d) ? prev : d
-        ))
-        .catch(() => {})
-    }
-    poll()
-    const t = setInterval(poll, 10_000)
-    return () => clearInterval(t)
-  }, [tunnelPort])
-
-  // ── Auto-close tabs whose worktree was removed ─────────────────────────────
-  useEffect(() => {
-    setTabs(prev => {
-      const toClose = prev.filter(t => {
-        if (t.id === 'main') { return false }
-        const b = branches.find(b => b.name === t.id)
-        return !b || !b.worktree
-      })
-      if (toClose.length === 0) { return prev }
-      const closeIds = new Set(toClose.map(t => t.id))
-      setTabStatuses(s => { const n = { ...s }; closeIds.forEach(id => delete n[id]); return n })
-      setActiveTab(cur => closeIds.has(cur) ? 'main' : cur)
-      return prev.filter(t => !closeIds.has(t.id))
-    })
-  }, [branches])
-
-  // ── QR scan handler ────────────────────────────────────────────────────────
   const handleQrScanned = useCallback((raw: string) => {
     setScanning(false)
-    console.log('[QR] raw:', JSON.stringify(raw))
     const parsed = parseQrData(raw)
-    console.log('[QR] parsed:', parsed)
-    if (!parsed) {
-      setTunnelError('Invalid QR code — not a claudulhu connection QR')
-      return
-    }
+    if (!parsed) { setTunnelError('Invalid QR code'); return }
     setSavedConns(prev => {
       const updated = [
         ...prev.filter(c => !(c.host === parsed.host && c.port === parsed.port)),
@@ -1208,13 +561,9 @@ function AppInner() {
   const requestCameraAndScan = useCallback(async () => {
     if (Platform.OS === 'android') {
       const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA)
-      if (granted !== PermissionsAndroid.RESULTS.GRANTED) { return }
+      if (granted !== PermissionsAndroid.RESULTS.GRANTED) return
     }
     setScanning(true)
-  }, [])
-
-  const selectConn = useCallback((c: NoiseConnectionInfo) => {
-    setConn(c)
   }, [])
 
   const deleteConn = useCallback((c: NoiseConnectionInfo) => {
@@ -1223,71 +572,42 @@ function AppInner() {
       AsyncStorage.setItem('noiseConnections', JSON.stringify(updated))
       return updated
     })
-    if (conn?.host === c.host && conn?.port === c.port) {
-      setConn(null)
-    }
+    if (conn?.host === c.host && conn?.port === c.port) setConn(null)
   }, [conn])
 
-  const openTab = useCallback((branch: string, _worktreePath: string, initialMessage?: string) => {
-    if (!tunnelPort) { return }
-    setTabs(prev => {
-      if (prev.find(t => t.id === branch)) { return prev }
-      return [...prev, { id: branch, label: branch, wsUrl: `ws://127.0.0.1:${tunnelPort}/workers/${encodeURIComponent(branch)}`, storageKey: `${conn ? connKeyFor(conn) : 'unknown'}::${branch}`, initialMessage }]
-    })
-    setTabStatuses(prev => ({ ...prev, [branch]: prev[branch] ?? 'connecting' }))
-    setActiveTab(branch)
-  }, [tunnelPort])
-
-  const closeTab = useCallback((id: string) => {
-    if (id === 'main') { return }
-    setTabs(prev => prev.filter(t => t.id !== id))
-    setTabStatuses(prev => { const n = { ...prev }; delete n[id]; return n })
-    setActiveTab(prev => prev === id ? 'main' : prev)
-  }, [])
-
-  // Stable per-tab callbacks stored in a ref so ChatPane never sees a new
-  // onStatusChange reference, keeping React.memo(ChatPane) effective.
-  const statusCallbacksRef = useRef<Record<string, (s: ConnStatus) => void>>({})
-  const handleStatusChange = useCallback((id: string) => {
-    if (!statusCallbacksRef.current[id]) {
-      statusCallbacksRef.current[id] = (s: ConnStatus) =>
-        setTabStatuses(prev => ({ ...prev, [id]: s }))
-    }
-    return statusCallbacksRef.current[id]
-  }, [])
-
-  const handleWorkerCreated = useCallback((branch: string, worktreePath: string, task: string) => {
-    openTab(branch, worktreePath, task)
-  }, [openTab])
-
-  const statusColor = (st: ConnStatus) => {
-    if (st === 'ready' || st === 'resumed') { return C.green }
-    if (st === 'error') { return C.red }
-    return C.yellow
+  // ── QR scanner overlay ──────────────────────────────────────────────────────
+  if (scanning) {
+    return <QrScanner onScanned={handleQrScanned} onCancel={() => setScanning(false)} />
   }
 
-  const activeWorktrees = branches.filter(b => b.worktree).length
-  const openTabIds = new Set(tabs.map(t => t.id))
-
-  // ── QR scanner overlay ─────────────────────────────────────────────────────
-  if (scanning) {
+  // ── Connecting screen (conn selected, tunnel not yet up) ────────────────────
+  if (conn && !tunnelPort) {
     return (
-      <QrScanner
-        onScanned={handleQrScanned}
-        onCancel={() => setScanning(false)}
-      />
+      <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
+        <View style={s.setupCenter}>
+          <CreatureAnim />
+          <Text style={s.setupTitle}>claudulhu</Text>
+          {tunnelError
+            ? <Text style={s.setupError}>{tunnelError}</Text>
+            : <ActivityIndicator color="#fff" size="small" style={{ marginTop: 8 }} />
+          }
+          <TouchableOpacity style={s.setupBtn} onPress={() => setConn(null)}>
+            <Text style={s.setupBtnText}>back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     )
   }
 
-  // ── Setup / connecting screen ──────────────────────────────────────────────
-  if (!tunnelPort) {
+  // ── Connection picker (no conn selected) ────────────────────────────────────
+  if (!conn) {
     return (
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
         {savedConns.length === 0 ? (
           <View style={s.setupCenter}>
             <CreatureAnim />
             <Text style={s.setupTitle}>claudulhu</Text>
-            <Text style={s.setupDesc}>Scan the QR code printed by the Docker container</Text>
+            <Text style={s.setupDesc}>Connect to your Claude Code server</Text>
             <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
               <Text style={s.setupBtnText}>Scan QR code</Text>
             </TouchableOpacity>
@@ -1298,23 +618,14 @@ function AppInner() {
               <CreatureAnim />
               <Text style={s.setupTitle}>claudulhu</Text>
             </View>
-            <FlatList
-              data={savedConns}
-              keyExtractor={c => `${c.host}:${c.port}`}
-              style={s.connList}
-              renderItem={({ item }) => (
-                <ConnRow
-                  conn={item}
-                  isConnecting={conn?.host === item.host && conn?.port === item.port && !tunnelError}
-                  error={conn?.host === item.host && conn?.port === item.port ? tunnelError : null}
-                  onSelect={() => selectConn(item)}
-                  onDelete={() => deleteConn(item)}
-                />
-              )}
-            />
+            <View style={{ flex: 1 }}>
+              {savedConns.map(c => (
+                <ConnRow key={connKeyFor(c)} conn={c} onSelect={() => setConn(c)} onDelete={() => deleteConn(c)} />
+              ))}
+            </View>
             <View style={s.pickerFooter}>
-              <TouchableOpacity style={[s.setupBtn, s.pickerScanBtn]} onPress={requestCameraAndScan}>
-                <Text style={s.setupBtnText}>Scan new QR code</Text>
+              <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
+                <Text style={s.setupBtnText}>Scan QR code</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1323,113 +634,44 @@ function AppInner() {
     )
   }
 
-  // ── Main UI ────────────────────────────────────────────────────────────────
+  // ── Chat UI ─────────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <View style={s.paneArea}>
         {/* Header */}
         <View style={s.header}>
           <View style={s.headerLeft}>
-            <TouchableOpacity style={s.backBtn} onPress={() => setConn(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <TouchableOpacity
+              style={s.backBtn}
+              onPress={() => setConn(null)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
               <Text style={s.backBtnText}>‹</Text>
             </TouchableOpacity>
-            <View style={[s.connDot, { backgroundColor: statusColor(tabStatuses[activeTab] ?? 'connecting') }]} />
+            <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
             <View>
               <Text style={s.headerTitle}>claudulhu</Text>
               {repoName && <Text style={s.headerRepo}>{repoName}</Text>}
             </View>
           </View>
-          <View style={s.headerRight}>
-            <TouchableOpacity style={s.iconBtn} onPress={() => setShowBranches(true)}>
-              <Text style={s.iconBtnText}>⎇ {activeWorktrees}</Text>
-            </TouchableOpacity>
-          </View>
         </View>
 
-        {/* Tab bar */}
-        <ScrollView horizontal style={s.tabBar} contentContainerStyle={s.tabBarInner} showsHorizontalScrollIndicator={false}>
-          {tabs.map(tab => (
-            <TouchableOpacity
-              key={tab.id}
-              style={[s.tab, activeTab === tab.id && s.tabActive]}
-              onPress={() => setActiveTab(tab.id)}
-              activeOpacity={0.7}
-            >
-              <View style={[s.tabDot, { backgroundColor: statusColor(tabStatuses[tab.id] ?? 'connecting') }]} />
-              <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]} numberOfLines={1}>{tab.label}</Text>
-              {tab.id !== 'main' && (
-                <TouchableOpacity onPress={() => closeTab(tab.id)} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}>
-                  <Text style={s.tabClose}>×</Text>
-                </TouchableOpacity>
-              )}
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-
-        {/* Chat panes — all mounted, only active one visible */}
-        {tabs.map(tab => (
-          <View key={tab.id} style={tab.id === activeTab ? s.paneVisible : s.paneHidden}>
-            <ChatPane
-              wsUrl={tab.wsUrl}
-              storageKey={tab.storageKey}
-              tunnelPort={tunnelPort}
-              branches={branches}
-              canSpawnWorker={tab.id === 'main'}
-              onStatusChange={handleStatusChange(tab.id)}
-              onWorkerCreated={handleWorkerCreated}
-              initialMessage={tab.initialMessage}
-            />
-          </View>
-        ))}
+        <ChatPane
+          wsUrl={`ws://127.0.0.1:${tunnelPort}/chat`}
+          connKey={connKeyFor(conn)}
+          onStatusChange={setChatStatus}
+        />
       </View>
-
-      {/* Branches bottom sheet */}
-      <Modal visible={showBranches} animationType="slide" transparent onRequestClose={() => setShowBranches(false)}>
-        <Pressable style={s.overlay} onPress={() => setShowBranches(false)}>
-          <Pressable style={s.sheet} onPress={e => e.stopPropagation()}>
-            <View style={s.sheetHandle} />
-            <View style={s.sheetHeader}>
-              <Text style={s.sheetTitle}>worktrees</Text>
-              <Text style={s.sheetCount}>{activeWorktrees}/{branches.length}</Text>
-            </View>
-            <FlatList
-              data={branches}
-              keyExtractor={b => b.name}
-              ListEmptyComponent={<Text style={s.branchEmpty}>no branches found</Text>}
-              renderItem={({ item: b }) => (
-                <TouchableOpacity
-                  style={s.branchRow}
-                  onPress={() => {
-                    if (!b.worktree) { return }
-                    openTab(b.name, b.worktree)
-                    setShowBranches(false)
-                  }}
-                  activeOpacity={b.worktree ? 0.7 : 1}
-                >
-                  <View style={[s.branchDot, { backgroundColor: b.worktree ? C.green : C.textMuted }]} />
-                  <View style={s.branchInfo}>
-                    <Text style={s.branchName}>{b.name}</Text>
-                    <Text style={s.branchCommit}>{b.commit}</Text>
-                    {b.worktree && <Text style={s.branchPath} numberOfLines={1}>{b.worktree}</Text>}
-                  </View>
-                  {b.worktree && (
-                    <Text style={s.branchHint}>{openTabIds.has(b.name) ? 'open' : 'chat'}</Text>
-                  )}
-                </TouchableOpacity>
-              )}
-            />
-          </Pressable>
-        </Pressable>
-      </Modal>
     </SafeAreaView>
   )
 }
+
+// ── App ────────────────────────────────────────────────────────────────────────
 
 export default function App() {
   return (
     <KeyboardProvider>
       <SafeAreaProvider>
-        <StatusBar barStyle="light-content" backgroundColor={C.bg} />
         <AppInner />
       </SafeAreaProvider>
     </KeyboardProvider>
@@ -1438,153 +680,77 @@ export default function App() {
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
-const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace'
-
 const s = StyleSheet.create({
-  // Setup / connecting screen
-  setupSafe:        { flex: 1, backgroundColor: '#EB4F0B' },
-  setupCenter:      { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40, gap: 16 },
-  setupMark:        { fontSize: 48, color: '#fff' },
-  setupTitle:       { fontSize: 26, fontWeight: '700', color: '#fff', letterSpacing: 2 },
-  setupDesc:        { fontSize: 15, color: 'rgba(255,255,255,0.85)', textAlign: 'center', lineHeight: 22 },
-  setupStatus:      { fontSize: 15, color: 'rgba(255,255,255,0.7)', textAlign: 'center' },
-  setupError:       { fontSize: 14, color: '#ffe0d6', textAlign: 'center', lineHeight: 20 },
-  setupBtn:         { backgroundColor: '#fff', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 32, alignItems: 'center', marginTop: 8 },
-  setupBtnText:     { color: '#EB4F0B', fontWeight: '700', fontSize: 16 },
-
-  // Connection picker
-  pickerWrap:       { flex: 1, backgroundColor: '#EB4F0B' },
-  pickerHeader:     { alignItems: 'center', paddingTop: 48, paddingBottom: 24, gap: 8 },
-  pickerFooter:     { paddingHorizontal: 24, paddingBottom: 24, paddingTop: 16 },
-  pickerScanBtn:    { width: '100%' },
-  connList:         { flex: 1 },
-  connRow:          { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.25)' },
-  connInfo:         { flex: 1 },
-  connLabel:        { color: '#fff', fontSize: 16, fontWeight: '600' },
-  connHost:         { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
-  connError:        { color: '#ffe0d6', fontSize: 12, marginTop: 4 },
-  connDelete:       { color: 'rgba(255,255,255,0.6)', fontSize: 18, paddingLeft: 16 },
+  // Setup / connecting / picker
+  setupSafe:    { flex: 1, backgroundColor: '#EB4F0B' },
+  setupCenter:  { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40, gap: 16 },
+  setupTitle:   { fontSize: 26, fontWeight: '700', color: '#fff', letterSpacing: 2 },
+  setupDesc:    { fontSize: 15, color: 'rgba(255,255,255,0.85)', textAlign: 'center', lineHeight: 22 },
+  setupStatus:  { fontSize: 15, color: 'rgba(255,255,255,0.7)', textAlign: 'center' },
+  setupError:   { fontSize: 14, color: '#ffe0d6', textAlign: 'center', lineHeight: 20 },
+  setupBtn:     { backgroundColor: '#fff', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 32, alignItems: 'center', marginTop: 8 },
+  setupBtnText: { color: '#EB4F0B', fontWeight: '700', fontSize: 16 },
+  pickerWrap:   { flex: 1, backgroundColor: '#EB4F0B' },
+  pickerHeader: { alignItems: 'center', paddingTop: 48, paddingBottom: 24, gap: 8 },
+  pickerFooter: { paddingHorizontal: 24, paddingBottom: 32, paddingTop: 16 },
+  connRow:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.25)' },
+  connInfo:     { flex: 1 },
+  connLabel:    { color: '#fff', fontSize: 16, fontWeight: '600' },
+  connHost:     { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
+  connDelete:   { color: 'rgba(255,255,255,0.6)', fontSize: 22, paddingLeft: 16 },
 
   // QR scanner
   creatureImg:       { width: 120, height: 120, borderRadius: 26, marginBottom: 12 },
+  scannerFull:       { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
+  scannerOverlay:    { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60 },
+  scannerTopBar:     { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
+  scannerTitle:      { color: '#fff', fontSize: 20, fontWeight: '700' },
+  scannerSubtitle:   { color: 'rgba(255,255,255,0.6)', fontSize: 14, textAlign: 'center', lineHeight: 20 },
+  scannerReticle:    { width: 240, height: 240 },
+  scannerCorner:     { position: 'absolute', width: 28, height: 28, borderColor: C.accent, borderWidth: 3 },
+  cornerTL:          { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 4 },
+  cornerTR:          { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 4 },
+  cornerBL:          { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 4 },
+  cornerBR:          { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 4 },
+  scannerCancel:     { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 24, paddingVertical: 12, paddingHorizontal: 32 },
+  scannerCancelText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  scannerError:      { color: C.red, fontSize: 16, textAlign: 'center', marginBottom: 24 },
 
-  scannerFull:      { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
-  scannerOverlay:   { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60 },
-  scannerTopBar:    { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
-  scannerTitle:     { color: '#fff', fontSize: 20, fontWeight: '700' },
-  scannerSubtitle:  { color: 'rgba(255,255,255,0.6)', fontSize: 14, textAlign: 'center', lineHeight: 20 },
-  scannerReticle:   { width: 240, height: 240 },
-  scannerCorner:    { position: 'absolute', width: 28, height: 28, borderColor: C.accent, borderWidth: 3 },
-  cornerTL:         { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 4 },
-  cornerTR:         { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 4 },
-  cornerBL:         { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 4 },
-  cornerBR:         { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 4 },
-  scannerCancel:    { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 24, paddingVertical: 12, paddingHorizontal: 32 },
-  scannerCancelText:{ color: '#fff', fontSize: 16, fontWeight: '600' },
-  scannerError:     { color: C.red, fontSize: 16, textAlign: 'center', marginBottom: 24 },
-
-  // Layout
-  safe:             { flex: 1, backgroundColor: C.bg },
-  paneArea:         { flex: 1 },
-  paneVisible:      { flex: 1 },
-  paneHidden:       { flex: 1, display: 'none' },
+  // Chat layout
+  safe:         { flex: 1, backgroundColor: C.bg },
+  paneArea:     { flex: 1 },
 
   // Header
-  header:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  headerLeft:       { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  headerRight:      { flexDirection: 'row', gap: 8 },
-  headerMark:       { fontSize: 20, color: C.accent },
-  backBtn:          { paddingRight: 4, paddingVertical: 2 },
-  backBtnText:      { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300' },
-  headerTitle:      { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1 },
-  headerRepo:       { fontSize: 11, color: C.textSecondary, marginTop: 1 },
-  iconBtn:          { backgroundColor: C.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 7, paddingHorizontal: 10, paddingVertical: 6 },
-  iconBtnText:      { color: C.textSecondary, fontSize: 13 },
-
-  // Tab bar
-  tabBar:           { flexGrow: 0, maxHeight: 42, backgroundColor: C.surface, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  tabBarInner:      { alignItems: 'center', paddingHorizontal: 8, gap: 2 },
-  tab:              { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 9, borderRadius: 6, gap: 6, marginVertical: 4 },
-  tabActive:        { backgroundColor: C.bg },
-  connDot:          { width: 8, height: 8, borderRadius: 4 },
-  tabDot:           { width: 6, height: 6, borderRadius: 3 },
-  tabLabel:         { color: C.textMuted, fontSize: 13, maxWidth: 110 },
-  tabLabelActive:   { color: C.textPrimary },
-  tabClose:         { color: C.textMuted, fontSize: 16, lineHeight: 17, marginLeft: 2 },
+  header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  headerLeft:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  backBtn:      { paddingRight: 4, paddingVertical: 2 },
+  backBtnText:  { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300' },
+  headerTitle:  { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1 },
+  headerRepo:   { fontSize: 11, color: C.textSecondary, marginTop: 1 },
+  connDot:      { width: 8, height: 8, borderRadius: 4 },
 
   // Chat pane
-  pane:             { flex: 1, backgroundColor: C.bg },
-  messageList:      { flex: 1 },
-  messageListContent: { paddingVertical: 16, paddingBottom: 8 },
-  emptyState:       { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80 },
-  reconnectBanner:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 7, backgroundColor: '#fffbeb', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#fef3c7' },
-  reconnectText:    { color: C.yellow, fontSize: 12, fontWeight: '500' },
-  bottomFill:       { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.surface },
+  pane:              { flex: 1, backgroundColor: C.bg },
+  messageList:       { flex: 1 },
+  messageListContent: { paddingVertical: 16 },
+  emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80 },
+  reconnectBanner:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 7, backgroundColor: '#fffbeb', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#fef3c7' },
+  reconnectText:     { color: C.yellow, fontSize: 12, fontWeight: '500' },
 
   // Messages
-  messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
-  messageWrapRight: { alignItems: 'flex-end' },
-  messageLabel:     { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
-  messageLabelRight:{ marginLeft: 0, marginRight: 2 },
+  messageWrap:       { paddingHorizontal: 14, marginBottom: 14 },
+  messageWrapRight:  { alignItems: 'flex-end' },
+  messageLabel:      { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
+  messageLabelRight: { marginLeft: 0, marginRight: 2 },
+  textBlock:         { color: C.textPrimary, fontSize: 17, lineHeight: 26 },
+  cursor:            { color: C.accent, fontSize: 14 },
+  questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2 },
 
-  cursor:           { color: C.accent, fontSize: 14 },
-
-  // Text blocks
-  textBlock:        { color: C.textPrimary, fontSize: 17, lineHeight: 26 },
-  errorText:        { color: C.red, fontSize: 16 },
-  mutedText:        { color: C.textMuted, fontSize: 15, fontStyle: 'italic' },
-  systemText:       { color: C.textSecondary, fontSize: 15 },
-
-  // Result footer
-  resultFooter:     { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 6, marginTop: 4, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
-  resultMeta:       { color: C.textMuted, fontSize: 12 },
-
-  // Question
-  questionRow:      { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
-  questionMark:     { color: C.yellow, fontWeight: '700', fontSize: 15 },
-  questionText:     { color: C.textPrimary, fontSize: 15, flex: 1, lineHeight: 22 },
-
-  // Worker created
-  workerRow:        { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
-  workerIcon:       { color: C.accent, fontSize: 15 },
-  workerInfo:       { flex: 1 },
-  workerBranch:     { color: C.accent, fontSize: 14, fontWeight: '600' },
-  workerPath:       { color: C.textMuted, fontSize: 11, fontFamily: MONO, marginTop: 2 },
-
-  // Tool blocks
-  toolLine:         { color: C.textMuted, fontSize: 12, fontFamily: MONO, marginTop: 4 },
-  monoText:         { color: C.textSecondary, fontSize: 12, fontFamily: MONO, lineHeight: 18 },
-
-  // Completions
-  completionList:     { backgroundColor: C.surface, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, maxHeight: 160 },
-  completionItem:     { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  completionText:     { color: C.textSecondary, fontSize: 13, fontFamily: MONO },
-
-  // Input
-  inputRow:         { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
-  stopAboveRow:     { flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: 12, paddingBottom: 6, backgroundColor: C.surface },
-  btnNewChat:       { padding: 8, justifyContent: 'center', alignItems: 'center' },
-  btnNewChatText:   { fontSize: 18, color: C.textMuted },
-  input:            { flex: 1, backgroundColor: C.inputBg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 17, lineHeight: 24, maxHeight: 140 },
-  btnSend:          { width: 40, height: 40, backgroundColor: C.accent, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  btnSendText:      { color: '#fff', fontSize: 15 },
-  btnStop:          { width: 40, height: 40, backgroundColor: C.red, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  btnStopText:      { color: '#fff', fontSize: 13 },
-  btnDisabled:      { opacity: 0.3 },
-
-  // Branches modal
-  overlay:          { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
-  sheet:            { backgroundColor: C.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '65%', paddingBottom: 32 },
-  sheetHandle:      { width: 38, height: 4, backgroundColor: C.borderLight, borderRadius: 2, alignSelf: 'center', marginTop: 10, marginBottom: 2 },
-  sheetHeader:      { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  sheetTitle:       { color: C.textPrimary, fontSize: 16, fontWeight: '600' },
-  sheetCount:       { color: C.textMuted, fontSize: 14 },
-  branchEmpty:      { color: C.textMuted, textAlign: 'center', padding: 24, fontSize: 14 },
-  branchRow:        { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  branchDot:        { width: 8, height: 8, borderRadius: 4 },
-  branchInfo:       { flex: 1 },
-  branchName:       { color: C.textPrimary, fontSize: 15, fontWeight: '500' },
-  branchCommit:     { color: C.textMuted, fontSize: 12, fontFamily: MONO, marginTop: 1 },
-  branchPath:       { color: C.textMuted, fontSize: 11, fontFamily: MONO, marginTop: 2 },
-  branchHint:       { color: C.accent, fontSize: 12 },
+  // Input bar
+  inputRow:     { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
+  stopAboveRow: { flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: 12, paddingBottom: 6, backgroundColor: C.surface },
+  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 17, lineHeight: 24, maxHeight: 140 },
+  btnStop:      { width: 40, height: 40, backgroundColor: C.red, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  btnStopText:  { color: '#fff', fontSize: 13 },
 })
+
