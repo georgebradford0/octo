@@ -1105,6 +1105,23 @@ function AppInner() {
     }
   }, [conn])
 
+  // ── Re-establish Noise tunnel when app returns to foreground ───────────────
+  // iOS suspends the native TCP proxy during backgrounding.  Without this,
+  // ChatPane's WS reconnect fires but the tunnel underneath is dead and every
+  // connect attempt fails silently.
+  useEffect(() => {
+    if (!conn) { return }
+    const sub = AppState.addEventListener('change', nextState => {
+      if (nextState === 'active') {
+        NoiseConnection.disconnect()
+        NoiseConnection.connect(conn.host, conn.port, conn.pk)
+          .then(port => setTunnelPort(port))
+          .catch(() => {}) // ChatPane's WS retry will surface the failure
+      }
+    })
+    return () => sub.remove()
+  }, [conn])
+
   // ── Init tabs when tunnel is ready ─────────────────────────────────────────
   useEffect(() => {
     if (!tunnelPort) { return }
