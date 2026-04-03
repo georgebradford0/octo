@@ -248,7 +248,9 @@ const ChatPane = memo(function ChatPane({
 
   const { height: kbHeight } = useReanimatedKeyboardAnimation()
   const inputBarStyle = useAnimatedStyle(() => ({
-    paddingBottom: Math.max(0, -kbHeight.value - insets.bottom),
+    // kbHeight.value is negative while keyboard is up; interpolate bottom safe-area
+    // inset from full (keyboard hidden) to zero (keyboard fully shown).
+    paddingBottom: Math.max(0, insets.bottom + kbHeight.value),
   }))
 
   const updateStatus = useCallback((s: ConnStatus) => {
