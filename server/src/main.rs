@@ -33,6 +33,23 @@ use tower_http::cors::{Any, CorsLayer};
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const NOISE_KEY_FILE: &str = "/etc/claudulhu/noise_key.bin";
 
+/// Fixed dev keypair — always the same so the mobile app can hardcode the public key.
+/// Active when CLAUDULHU_DEV=1.  Generated once; DO NOT rotate.
+const DEV_STATIC_PRIVATE: [u8; 32] = [
+    0x6a, 0x58, 0xeb, 0x21, 0x90, 0x00, 0xf0, 0x5f,
+    0xd2, 0x6a, 0xf1, 0x58, 0x74, 0xc6, 0x69, 0xbd,
+    0x76, 0x01, 0xf8, 0x18, 0x27, 0x11, 0x66, 0xc7,
+    0xa2, 0xb1, 0x3e, 0x54, 0x8b, 0xa5, 0x48, 0xbc,
+];
+const DEV_STATIC_PUBLIC: [u8; 32] = [
+    0xdf, 0x3b, 0xff, 0xd5, 0xd2, 0xcc, 0x47, 0x19,
+    0xd0, 0x3f, 0xbe, 0x27, 0x3f, 0x16, 0x5e, 0xd6,
+    0x39, 0x0c, 0x62, 0xab, 0x82, 0x44, 0x77, 0xf2,
+    0xed, 0x1c, 0x01, 0xaf, 0xfb, 0x60, 0xa7, 0x71,
+];
+/// Base32(DEV_STATIC_PUBLIC) — matches the hardcoded pk in mobile/App.tsx
+const DEV_PUBKEY_BASE32: &str = "34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ";
+
 fn to_base32(data: &[u8]) -> String {
     const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut out = String::new();
@@ -504,15 +521,27 @@ async fn main() {
     init_shell_env();
 
     let args: Vec<String> = std::env::args().collect();
+    let is_dev = std::env::var("CLAUDULHU_DEV").as_deref() == Ok("1");
+
     let key_file = std::env::var("NOISE_KEY_FILE").unwrap_or_else(|_| NOISE_KEY_FILE.to_string());
 
     if args.get(1).map(|s| s.as_str()) == Some("--print-pubkey") {
-        let (_, public) = load_or_generate_keypair(&key_file);
-        println!("{}", to_base32(&public));
+        let pubkey = if is_dev {
+            DEV_PUBKEY_BASE32.to_string()
+        } else {
+            let (_, public) = load_or_generate_keypair(&key_file);
+            to_base32(&public)
+        };
+        println!("{pubkey}");
         return;
     }
 
-    let (static_private, static_public) = load_or_generate_keypair(&key_file);
+    let (static_private, static_public) = if is_dev {
+        println!("[claudulhu] !! DEV MODE: using fixed dev keypair (CLAUDULHU_DEV=1)");
+        (DEV_STATIC_PRIVATE.to_vec(), DEV_STATIC_PUBLIC.to_vec())
+    } else {
+        load_or_generate_keypair(&key_file)
+    };
 
     let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
     let http_port:  u16 = 8000;

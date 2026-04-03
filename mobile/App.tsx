@@ -67,6 +67,17 @@ function parseQrData(raw: string): NoiseConnectionInfo | null {
 
 const connKeyFor = (c: NoiseConnectionInfo) => `${c.host}:${c.port}:${c.pk.slice(0, 8)}`
 
+// ── Dev connection ─────────────────────────────────────────────────────────────
+// Fixed dev keypair baked into the server when CLAUDULHU_DEV=1.
+// Public key (base32): 34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ
+const DEV_CONN: NoiseConnectionInfo = {
+  v:     2,
+  host:  'localhost',
+  port:  9000,
+  pk:    '34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ',
+  label: 'dev (localhost)',
+}
+
 // ── Colours ────────────────────────────────────────────────────────────────────
 
 const C = {
@@ -483,6 +494,13 @@ function AppInner() {
       if (cancelled) return
       let conns: NoiseConnectionInfo[] = []
       if (json) { try { conns = JSON.parse(json) } catch {} }
+      // In dev builds, always ensure the local dev connection is listed first.
+      if (__DEV__) {
+        const devKey = connKeyFor(DEV_CONN)
+        if (!conns.some(c => connKeyFor(c) === devKey)) {
+          conns = [DEV_CONN, ...conns]
+        }
+      }
       setSavedConns(conns)
       if (conns.length === 1) setConn(conns[0])
     })
