@@ -45,5 +45,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV HOME=/root
 ENV CLAUDULHU_SKIP_SHELL_ENV=1
 ENV CLAUDULHU_DATA_DIR=/data
+ENV NOISE_KEY_FILE=/data/noise_key.bin
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
