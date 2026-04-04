@@ -35,7 +35,7 @@ type ConnStatus = 'connecting' | 'ready' | 'streaming' | 'error'
 type ServerFrame =
   | { type: 'history';  messages: HistMsg[] }
   | { type: 'token';    text: string }
-  | { type: 'tool';     name: string; input: Record<string, unknown> }
+  | { type: 'tool';     name: string; input?: Record<string, unknown> }
   | { type: 'question'; question: string }
   | { type: 'done'; cost_usd: number }
   | { type: 'error';    message: string }
@@ -171,9 +171,9 @@ function parseAtQuery(text: string): { atIndex: number; dirPart: string; filePar
 
 // ── Tool call formatting ───────────────────────────────────────────────────────
 
-function formatToolCall(name: string, input: Record<string, unknown>): string {
+function formatToolCall(name: string, input?: Record<string, unknown>): string {
   const capName = name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
-  const entries = Object.entries(input)
+  const entries = Object.entries(input ?? {})
   let args: string
   if (entries.length === 0) {
     args = ''
@@ -367,6 +367,7 @@ const ChatPane = memo(function ChatPane({
         if (cancelled) return
         let frame: ServerFrame
         try { frame = JSON.parse(data as string) } catch { return }
+        if (frame.type !== 'token') console.log(`[ws] frame: ${JSON.stringify(frame).slice(0, 200)}`)
 
         switch (frame.type) {
           case 'history': {
@@ -497,26 +498,40 @@ const ChatPane = memo(function ChatPane({
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
-    if (!text || status === 'streaming') return
+    console.log(`[send] attempt text=${JSON.stringify(text)} status=${status}`)
+    if (!text || status === 'streaming') {
+      console.log(`[send] blocked — text empty: ${!text}, streaming: ${status === 'streaming'}`)
+      return
+    }
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const readyState = ws?.readyState ?? -1
+    console.log(`[send] ws readyState=${readyState}`)
+    if (!ws || readyState !== WebSocket.OPEN) {
+      console.log(`[send] blocked — ws not open (readyState=${readyState})`)
+      return
+    }
 
     setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
     isAtBottomRef.current = true
 
     if (pendingQuestion) {
-      ws.send(JSON.stringify({ type: 'answer', answer: text }))
+      const payload = JSON.stringify({ type: 'answer', answer: text })
+      console.log(`[send] sending answer: ${payload}`)
+      ws.send(payload)
       setPendingQuestion(false)
     } else {
       // Persist before sending so a dropped connection doesn't silently lose
       // the message.  Cleared on ack from server or confirmed in next history.
       pendingMsgRef.current = text
       AsyncStorage.setItem(`pending_${connKey}`, text).catch(() => {})
-      ws.send(JSON.stringify({ type: 'message', text }))
+      const payload = JSON.stringify({ type: 'message', text })
+      console.log(`[send] sending message: ${payload}`)
+      ws.send(payload)
     }
     updateStatus('streaming')
 
     setInput('')
+    console.log(`[send] done`)
   }, [input, pendingQuestion, status])
 
   sendMessageRef.current = sendMessage

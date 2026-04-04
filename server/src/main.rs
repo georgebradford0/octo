@@ -196,7 +196,7 @@ enum WsFrame {
     History  { messages: Vec<HistMsg> },
     /// Streaming text token from the current assistant response.
     Token    { text: String },
-    /// Tool being invoked (display only).
+    /// Tool being invoked (display only).  `input` was added in 0.0.19.
     Tool     { name: String, input: serde_json::Value },
     /// Claude is asking the user a question and needs an answer.
     Question { question: String },
