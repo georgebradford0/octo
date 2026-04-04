@@ -38,6 +38,7 @@ type ServerFrame =
   | { type: 'question'; question: string }
   | { type: 'done'; cost_usd: number }
   | { type: 'error';    message: string }
+  | { type: 'ack' }
 
 interface HistMsg { role: 'user' | 'assistant'; text: string }
 
@@ -257,6 +258,17 @@ const ChatPane = memo(function ChatPane({
   const sendMessageRef  = useRef<() => void>(() => {})
   const listRef         = useRef<FlatList<Message>>(null)
   const isAtBottomRef   = useRef(true)
+  // Text of the last sent message that hasn't been ack'd by the server yet.
+  // Persisted to AsyncStorage so it survives a killed connection; cleared on
+  // ack or when confirmed present in the next history frame.
+  const pendingMsgRef   = useRef<string | null>(null)
+
+  // Load any pending (unacknowledged) message from the previous session.
+  useEffect(() => {
+    AsyncStorage.getItem(`pending_${connKey}`)
+      .then(v => { if (v) pendingMsgRef.current = v })
+      .catch(() => {})
+  }, [connKey])
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -297,6 +309,24 @@ const ChatPane = memo(function ChatPane({
             isAtBottomRef.current = true
             updateStatus('ready')
             AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(msgs)).catch(() => {})
+
+            // If there's an unacknowledged pending message, check whether it
+            // made it into the server's history.  If not, resend it now.
+            const pending = pendingMsgRef.current
+            if (pending) {
+              const lastUserMsg = [...frame.messages].reverse().find(m => m.role === 'user')
+              if (lastUserMsg?.text === pending) {
+                // Server has it — clear the pending entry.
+                pendingMsgRef.current = null
+                AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
+              } else {
+                // Server never received it — resend.
+                pendingMsgRef.current = null
+                AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
+                ws.send(JSON.stringify({ type: 'message', text: pending }))
+                updateStatus('streaming')
+              }
+            }
             break
           }
           case 'token': {
@@ -330,6 +360,11 @@ const ChatPane = memo(function ChatPane({
             })
             setPendingQuestion(true)
             updateStatus('ready')
+            break
+          }
+          case 'ack': {
+            pendingMsgRef.current = null
+            AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
             break
           }
           case 'error': {
@@ -396,6 +431,10 @@ const ChatPane = memo(function ChatPane({
       ws.send(JSON.stringify({ type: 'answer', answer: text }))
       setPendingQuestion(false)
     } else {
+      // Persist before sending so a dropped connection doesn't silently lose
+      // the message.  Cleared on ack from server or confirmed in next history.
+      pendingMsgRef.current = text
+      AsyncStorage.setItem(`pending_${connKey}`, text).catch(() => {})
       ws.send(JSON.stringify({ type: 'message', text }))
     }
     updateStatus('streaming')

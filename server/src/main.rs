@@ -204,6 +204,8 @@ enum WsFrame {
     Done { cost_usd: f64 },
     /// Current response ended with an error.
     Error    { message: String },
+    /// Acknowledgement that the user message was saved server-side.
+    Ack,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -410,6 +412,13 @@ async fn chat_ws_handler(
                         });
                         save_messages(&s.messages);
                     }
+
+                    // Acknowledge that the message was persisted before we start
+                    // generating.  The client uses this to know it can clear its
+                    // "pending resend" entry — without it a dropped connection
+                    // would leave the message unacknowledged and trigger a resend
+                    // on the next reconnect.
+                    ws_tx.send(serde_json::to_string(&WsFrame::Ack).unwrap_or_default()).await.ok();
 
                     // Only start the loop if it isn't already running.
                     if !state.loop_running.swap(true, Ordering::SeqCst) {
