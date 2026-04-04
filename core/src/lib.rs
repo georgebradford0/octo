@@ -802,7 +802,16 @@ pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMess
                             } else {
                                 "ok"
                             };
-                            format!("[{outcome} — {} chars, truncated]", text.len())
+                            const PREVIEW: usize = 300;
+                            if text.len() <= PREVIEW {
+                                text.to_string()
+                            } else {
+                                let boundary = (0..=PREVIEW).rev()
+                                    .find(|&i| text.is_char_boundary(i))
+                                    .unwrap_or(0);
+                                format!("[{outcome} — {} chars total]\n{}\n…[truncated]",
+                                    text.len(), &text[..boundary])
+                            }
                         };
                         ContentBlock::ToolResult {
                             tool_use_id: tool_use_id.clone(),
@@ -817,8 +826,19 @@ pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMess
             ApiMessage {
                 role: m.role.clone(),
                 content: m.content.iter().map(|b| match b {
-                    ContentBlock::Text { .. } =>
-                        ContentBlock::Text { text: "[truncated]".to_string() },
+                    ContentBlock::Text { text } => {
+                        const PREVIEW: usize = 200;
+                        ContentBlock::Text {
+                            text: if text.len() <= PREVIEW {
+                                text.clone()
+                            } else {
+                                let boundary = (0..=PREVIEW).rev()
+                                    .find(|&i| text.is_char_boundary(i))
+                                    .unwrap_or(0);
+                                format!("{}…[truncated]", &text[..boundary])
+                            }
+                        }
+                    }
                     ContentBlock::ToolUse { id, name, .. } =>
                         ContentBlock::ToolUse {
                             id: id.clone(),
