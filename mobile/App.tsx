@@ -432,9 +432,8 @@ const ChatPane = memo(function ChatPane({
           scrollEventThrottle={100}
           keyboardShouldPersistTaps="handled"
           automaticallyAdjustKeyboardInsets={false}
+          ListFooterComponent={isPending ? <PendingEllipsis /> : null}
         />
-
-        {isPending && <PendingEllipsis />}
 
         {(status === 'connecting' || status === 'error') && (
           <View style={s.reconnectBanner}>
