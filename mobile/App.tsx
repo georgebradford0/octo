@@ -391,6 +391,7 @@ const ChatPane = memo(function ChatPane({
     } else {
       ws.send(JSON.stringify({ type: 'message', text }))
     }
+    updateStatus('streaming')
 
     setInput('')
   }, [input, pendingQuestion, status])
