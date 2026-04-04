@@ -34,7 +34,7 @@ type ConnStatus = 'connecting' | 'ready' | 'streaming' | 'error'
 type ServerFrame =
   | { type: 'history';  messages: HistMsg[] }
   | { type: 'token';    text: string }
-  | { type: 'tool';     name: string }
+  | { type: 'tool';     name: string; input: Record<string, unknown> }
   | { type: 'question'; question: string }
   | { type: 'done'; cost_usd: number }
   | { type: 'error';    message: string }
@@ -44,7 +44,7 @@ interface HistMsg { role: 'user' | 'assistant'; text: string }
 
 interface Message {
   id:          string
-  role:        'user' | 'assistant'
+  role:        'user' | 'assistant' | 'tool'
   text:        string
   streaming?:  boolean
   isQuestion?: boolean
@@ -155,9 +155,36 @@ function PendingEllipsis() {
   )
 }
 
+// ── Tool call formatting ───────────────────────────────────────────────────────
+
+function formatToolCall(name: string, input: Record<string, unknown>): string {
+  const capName = name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
+  const entries = Object.entries(input)
+  let args: string
+  if (entries.length === 0) {
+    args = ''
+  } else if (entries.length === 1) {
+    const val = String(entries[0][1])
+    args = val.length > 120 ? val.slice(0, 120) + '…' : val
+  } else {
+    args = entries.map(([k, v]) => {
+      const val = String(v)
+      return `${k}=${val.length > 60 ? val.slice(0, 60) + '…' : val}`
+    }).join(', ')
+  }
+  return `${capName}(${args})`
+}
+
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
 const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
+  if (message.role === 'tool') {
+    return (
+      <View style={s.messageWrap}>
+        <Text style={s.toolLine}>{message.text}</Text>
+      </View>
+    )
+  }
   const isUser = message.role === 'user'
   return (
     <View style={[s.messageWrap, isUser && s.messageWrapRight]}>
@@ -360,6 +387,14 @@ const ChatPane = memo(function ChatPane({
             })
             setPendingQuestion(true)
             updateStatus('ready')
+            break
+          }
+          case 'tool': {
+            setMessages(prev => {
+              // Finalize any in-progress streaming message first.
+              const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
+              return [...finalized, { id: uid(), role: 'tool' as const, text: formatToolCall(frame.name, frame.input) }]
+            })
             break
           }
           case 'ack': {
@@ -870,6 +905,7 @@ const s = StyleSheet.create({
   cursor:            { color: C.accent, fontSize: 14 },
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2 },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2 },
+  toolLine:          { fontSize: 13, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginBottom: 4, marginLeft: 2 },
 
   // Input bar
   inputRow:     { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },

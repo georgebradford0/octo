@@ -197,7 +197,7 @@ enum WsFrame {
     /// Streaming text token from the current assistant response.
     Token    { text: String },
     /// Tool being invoked (display only).
-    Tool     { name: String },
+    Tool     { name: String, input: serde_json::Value },
     /// Claude is asking the user a question and needs an answer.
     Question { question: String },
     /// Current response is complete.
@@ -295,7 +295,7 @@ fn chat_event_to_frame(event: &ChatEvent) -> Option<WsFrame> {
     let v: serde_json::Value = serde_json::to_value(event).ok()?;
     match v["type"].as_str()? {
         "text"          => Some(WsFrame::Token    { text:     v["text"].as_str()?.to_string() }),
-        "tool_use"      => Some(WsFrame::Tool     { name:     v["tool"].as_str()?.to_string() }),
+        "tool_use"      => Some(WsFrame::Tool     { name: v["tool"].as_str()?.to_string(), input: v["input"].clone() }),
         "result"      => Some(WsFrame::Done { cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0) }),
         "interrupted" => Some(WsFrame::Done { cost_usd: 0.0 }),
         "error"         => Some(WsFrame::Error    { message:  v["message"].as_str()?.to_string() }),
