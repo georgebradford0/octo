@@ -105,3 +105,70 @@ Compaction runs on the in-memory session snapshot before each API call and does 
 mutate the stored session. The full history is preserved in `Session::messages` so
 that future turns are compacted from the authoritative source, not from a
 previously-compacted view.
+
+---
+
+## Known issues and recommendations
+
+### Problem: sessions loop without making progress
+
+In practice, long agentic sessions frequently stall: the model re-runs the same
+discovery tools (grep, read_file, bash) in a cycle without advancing toward the goal.
+Four causes have been identified:
+
+#### 1. Content-free stubs erase working memory (primary cause)
+
+`[ok — 123 chars, truncated]` tells the model nothing about what was found. If the
+truncated content was the output of a `grep` that located the relevant function, or a
+`read_file` that showed the logic to change, that information is gone. On the next turn
+the model has no record of having found it and re-runs the same command.
+
+**Recommendation:** replace the content-free stub with a head preview — keep the first
+~300 chars of the actual tool output followed by `…[truncated]`. This preserves the
+key finding (the matched line, the error message, the function signature) while still
+dramatically reducing token count on old turns.
+
+```
+[ok — 1 234 chars total]
+src/lib.rs:42: pub fn compact_history(messages: &[ApiMessage], keep_full: usize) …
+…[truncated]
+```
+
+Note: the *previous* approach (before the current stub format was introduced) did keep
+a 400-char prefix. It was replaced because it gave "an incomplete fragment with no
+signal about success/failure." The right fix is to keep both: outcome tag **and** a
+content preview.
+
+#### 2. Assistant text stubs wipe the model's own conclusions
+
+`[truncated]` replaces the model's reasoning, plan, and any intermediate conclusions
+it wrote down. When these are gone the model re-derives the same things from scratch.
+
+**Recommendation:** keep the first ~200 chars of each assistant `Text` block (the
+opening sentence usually captures the conclusion) followed by `…[truncated]`.
+
+#### 3. `keep_full = 3` is too small for complex tasks
+
+A non-trivial task (explore → locate → read → edit → verify → commit) spans 8–15 tool
+calls. With `keep_full = 3`, turns 1–10 of a 13-turn session are fully erased by step 13.
+
+**Recommendation:** raise to 6. The token increase is modest (3 extra full turns) and
+significantly extends the model's effective working memory.
+
+#### 4. No stagnation detection or max-turns guard
+
+The agentic loop has no upper bound on turns and no detection of repeated identical
+tool calls. A stuck model runs indefinitely at cost.
+
+**Recommendations:**
+- Add `MAX_TURNS = 50`; emit `ChatEvent::Error` and return when exceeded.
+- Track recent `(tool_name, input_hash)` pairs; if the same call appears twice in the
+  last 6 turns, prepend a warning to the tool result instructing the model not to
+  repeat it and to either proceed or use `ask_user`.
+
+### Priority order
+
+1. **Head preview in tool-result stubs** — directly fixes the re-exploration loop.
+2. **Head preview in assistant text stubs** — preserves plan/conclusion context.
+3. **Raise `keep_full` to 6** — widens the full-fidelity window cheaply.
+4. **Max-turns + stagnation detection** — safety net; prevents runaway cost.
