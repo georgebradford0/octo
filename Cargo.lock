@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "claudulhu-server"
-version = "0.0.19"
+version = "0.0.22"
 dependencies = [
  "anyhow",
  "axum",
