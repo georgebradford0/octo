@@ -418,6 +418,8 @@ const ChatPane = memo(function ChatPane({
 
             setPendingQuestion(false)
             isAtBottomRef.current = true
+            setShowScrollBtn(false)
+            setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
             if (!didResend) {
               updateStatus('ready')
             }
