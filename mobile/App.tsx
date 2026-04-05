@@ -479,7 +479,14 @@ const ChatPane = memo(function ChatPane({
         if (cancelled) return
         let frame: ServerFrame
         try { frame = JSON.parse(data as string) } catch { return }
-        if (frame.type !== 'token') console.log(`[ws] frame: ${JSON.stringify(frame).slice(0, 200)}`)
+
+        // ── debug ──────────────────────────────────────────────────────────────
+        if (frame.type === 'token') {
+          console.log(`[ws] token live_gen=${frame.live_gen} liveGenRef=${liveGenRef.current} len=${frame.text.length}`)
+        } else {
+          console.log(`[ws] frame type=${frame.type} live_gen=${'live_gen' in frame ? frame.live_gen : 'n/a'} liveGenRef=${liveGenRef.current} | ${JSON.stringify(frame).slice(0, 120)}`)
+        }
+        // ──────────────────────────────────────────────────────────────────────
 
         switch (frame.type) {
           case 'history': {
@@ -540,7 +547,7 @@ const ChatPane = memo(function ChatPane({
           }
           case 'token': {
             // Discard tokens from a stale generation (old connection replay).
-            if (frame.live_gen !== liveGenRef.current) break
+            if (frame.live_gen !== liveGenRef.current) { console.log(`[ws] token DISCARDED stale gen=${frame.live_gen} want=${liveGenRef.current}`); break }
             updateStatus('streaming')
             sessionSummaryRef.current += frame.text
             setMessages(prev => {
@@ -562,7 +569,8 @@ const ChatPane = memo(function ChatPane({
           }
           case 'done': {
             // Discard done from a stale generation.
-            if (frame.live_gen !== liveGenRef.current) break
+            if (frame.live_gen !== liveGenRef.current) { console.log(`[ws] done DISCARDED stale gen=${frame.live_gen} want=${liveGenRef.current}`); break }
+            console.log(`[ws] done ACCEPTED cost=${frame.cost_usd} sessionId=${currentSessionIdRef.current} summary_len=${sessionSummaryRef.current.length}`)
             const cost = frame.cost_usd
             const summary = sessionSummaryRef.current.trim() || 'Task complete.'
             sessionSummaryRef.current = ''
@@ -603,7 +611,7 @@ const ChatPane = memo(function ChatPane({
           }
           case 'tool': {
             // Discard tool frames from a stale generation.
-            if (frame.live_gen !== liveGenRef.current) break
+            if (frame.live_gen !== liveGenRef.current) { console.log(`[ws] tool DISCARDED stale gen=${frame.live_gen} want=${liveGenRef.current}`); break }
             // Reset summary accumulator — the next run of tokens after this tool
             // call will be the fresh "final text" candidate.
             sessionSummaryRef.current = ''
@@ -631,7 +639,7 @@ const ChatPane = memo(function ChatPane({
           }
           case 'error': {
             // Discard errors from a stale generation.
-            if (frame.live_gen !== liveGenRef.current) break
+            if (frame.live_gen !== liveGenRef.current) { console.log(`[ws] error DISCARDED stale gen=${frame.live_gen} want=${liveGenRef.current}`); break }
             sessionSummaryRef.current = ''
             currentSessionIdRef.current = null
             setMessages(prev => {
@@ -704,6 +712,7 @@ const ChatPane = memo(function ChatPane({
     const sessionId = uid()
     currentSessionIdRef.current = sessionId
     sessionSummaryRef.current = ''
+    console.log(`[send] created session bubble id=${sessionId} liveGenRef=${liveGenRef.current}`)
     setMessages(prev => [
       ...prev,
       { id: uid(), role: 'user' as const, text },
