@@ -405,9 +405,19 @@ const ChatPane = memo(function ChatPane({
     height: Math.max(insets.bottom, -keyboardHeight.value),
   }))
 
-  const [messages,       setMessages]       = useState<Message[]>([])
+  const [messages,       setMessagesState]  = useState<Message[]>([])
   const messagesRef = useRef<Message[]>([])
-  useEffect(() => { messagesRef.current = messages }, [messages])
+  // Keep messagesRef in sync immediately (not via useEffect) so that
+  // ws.onmessage handlers always read the current list, even when React
+  // hasn't re-rendered yet (e.g. the 'history' frame arrives before the
+  // useEffect that would sync the ref from the AsyncStorage load).
+  const setMessages = useCallback((arg: Message[] | ((prev: Message[]) => Message[])) => {
+    setMessagesState(prev => {
+      const next = typeof arg === 'function' ? arg(prev) : arg
+      messagesRef.current = next
+      return next
+    })
+  }, [])
   const [status,         setStatus]         = useState<ConnStatus>('connecting')
   const [input,          setInput]          = useState('')
   const [pendingQuestion, setPendingQuestion] = useState(false)
@@ -626,7 +636,7 @@ const ChatPane = memo(function ChatPane({
             // Discard done from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
             const cost = frame.cost_usd
-            const summary = sessionSummaryRef.current.trim() || 'Task complete.'
+            const summary = sessionSummaryRef.current || 'Task complete.'
             sessionSummaryRef.current = ''
             const finishedSessionId = currentSessionIdRef.current
             currentSessionIdRef.current = null
@@ -638,9 +648,10 @@ const ChatPane = memo(function ChatPane({
                   : m
               )
               // Append a plain assistant message with the final text as a summary.
+              // Always attach cost (even $0.00 for interrupted runs).
               const summaryMsg: Message = {
                 id: uid(), role: 'assistant' as const, text: summary,
-                ...(cost > 0 ? { cost } : {}),
+                cost,
               }
               const updated = [...finalized, summaryMsg]
               AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(updated)).catch(() => {})
