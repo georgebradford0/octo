@@ -605,11 +605,6 @@ const ChatPane = memo(function ChatPane({
           contentContainerStyle={[s.messageListContent, { paddingBottom: 8 }]}
           style={s.messageList}
           ListEmptyComponent={<Text style={s.emptyState}>say something</Text>}
-          onLayout={() => {
-            if (isAtBottomRef.current) {
-              listRef.current?.scrollToEnd({ animated: false })
-            }
-          }}
           onContentSizeChange={() => {
             if (isAtBottomRef.current) {
               listRef.current?.scrollToEnd({ animated: true })
