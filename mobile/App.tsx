@@ -40,7 +40,7 @@ type ServerFrame =
   | { type: 'question'; question: string;    live_gen: number }
   | { type: 'done';     cost_usd: number;    live_gen: number }
   | { type: 'error';    message: string;     live_gen: number }
-  | { type: 'ack' }
+  | { type: 'ack';  live_gen: number }
 
 interface HistMsg { role: 'user' | 'assistant'; text: string }
 
@@ -633,6 +633,11 @@ const ChatPane = memo(function ChatPane({
             break
           }
           case 'ack': {
+            // Update liveGenRef to the gen the server is about to stream.
+            // Without this, all live frames would be discarded as "stale"
+            // because they carry a gen one higher than the history frame.
+            liveGenRef.current = frame.live_gen
+            console.log(`[ws] ack: updated liveGenRef → ${frame.live_gen}`)
             pendingMsgRef.current = null
             AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
             break

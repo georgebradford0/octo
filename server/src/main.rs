@@ -207,7 +207,9 @@ enum WsFrame {
     /// Current response ended with an error.
     Error    { message: String, live_gen: usize },
     /// Acknowledgement that the user message was saved server-side.
-    Ack,
+    /// `live_gen` is the generation the client should expect for the upcoming
+    /// live frames so it doesn't discard them as stale.
+    Ack { live_gen: usize },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -460,14 +462,10 @@ async fn chat_ws_handler(
                         save_messages(&s.messages);
                     }
 
-                    // Acknowledge that the message was persisted before we start
-                    // generating.  The client uses this to know it can clear its
-                    // "pending resend" entry — without it a dropped connection
-                    // would leave the message unacknowledged and trigger a resend
-                    // on the next reconnect.
-                    ws_tx.send(serde_json::to_string(&WsFrame::Ack).unwrap_or_default()).await.ok();
-
-                    // Only start the loop if it isn't already running.
+                    // Only start the loop if it isn't already running.  Bump
+                    // buf.gen BEFORE sending Ack so the client knows which
+                    // live_gen to expect for the upcoming frames.
+                    let ack_gen;
                     if !state.loop_running.swap(true, Ordering::SeqCst) {
                         // Reset live buffer for the new response.
                         let new_gen = {
@@ -476,7 +474,11 @@ async fn chat_ws_handler(
                             buf.events.clear();
                             buf.gen
                         };
+                        ack_gen = new_gen;
                         eprintln!("[chat] starting agentic loop new_gen={new_gen}");
+
+                        // Acknowledge after gen bump so the Ack carries the correct live_gen.
+                        ws_tx.send(serde_json::to_string(&WsFrame::Ack { live_gen: ack_gen }).unwrap_or_default()).await.ok();
                         state.live.notify.notify_waiters();
 
                         let (loop_tx, mut loop_rx) = mpsc::channel::<ChatEvent>(256);
@@ -514,7 +516,9 @@ async fn chat_ws_handler(
                             eprintln!("[forward] event forwarder done after {count} events");
                         });
                     } else {
-                        eprintln!("[chat] warning: message received while loop already running");
+                        ack_gen = state.live.buf.lock().unwrap().gen;
+                        eprintln!("[chat] warning: message received while loop already running (gen={ack_gen})");
+                        ws_tx.send(serde_json::to_string(&WsFrame::Ack { live_gen: ack_gen }).unwrap_or_default()).await.ok();
                     }
                 }
 
