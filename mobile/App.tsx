@@ -194,53 +194,75 @@ function formatToolCall(name: string, input?: Record<string, unknown>): string {
 
 const AgentSessionBubble = memo(function AgentSessionBubble({ message }: { message: Message }) {
   const [expanded, setExpanded] = useState(false)
-  const scrollRef = useRef<ScrollView>(null)
-  const pulseAnim = useRef(new Animated.Value(0.5)).current
+  const scrollRef    = useRef<ScrollView>(null)
+  const pulseAnim    = useRef(new Animated.Value(0.5)).current
+  const scanAnim     = useRef(new Animated.Value(0)).current
 
+  // Pulsing dot + scanning bar while streaming
   useEffect(() => {
     if (!message.streaming) {
       pulseAnim.setValue(1)
+      scanAnim.setValue(0)
       return
     }
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(pulseAnim, { toValue: 1,   duration: 500, useNativeDriver: true }),
-      Animated.timing(pulseAnim, { toValue: 0.35, duration: 500, useNativeDriver: true }),
+    const pulse = Animated.loop(Animated.sequence([
+      Animated.timing(pulseAnim, { toValue: 1,    duration: 600, useNativeDriver: true }),
+      Animated.timing(pulseAnim, { toValue: 0.25, duration: 600, useNativeDriver: true }),
     ]))
-    loop.start()
-    return () => loop.stop()
+    const scan = Animated.loop(Animated.sequence([
+      Animated.timing(scanAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
+      Animated.timing(scanAnim, { toValue: 0, duration: 0,    useNativeDriver: true }),
+    ]))
+    pulse.start()
+    scan.start()
+    return () => { pulse.stop(); scan.stop() }
   }, [message.streaming])
 
-  // Show last portion of log so preview tracks the live tail
-  const previewText = message.text.length > 600
-    ? '\u2026' + message.text.slice(-600)
+  // Show last portion of log so the preview tail tracks live output
+  const preview = message.text.length > 400
+    ? '\u2026' + message.text.slice(-400)
     : message.text
 
   return (
-    <View style={s.messageWrap}>
-      <Text style={s.messageLabel}>{message.streaming ? 'working' : 'session'}</Text>
-      <TouchableOpacity onPress={() => setExpanded(true)} activeOpacity={0.8}>
+    <View style={s.sessionWrap}>
+      <TouchableOpacity onPress={() => setExpanded(true)} activeOpacity={0.85}>
         <View style={s.sessionBox}>
+          {/* Header bar */}
           <View style={s.sessionBoxHeader}>
-            <Animated.View style={[s.sessionIndicator, {
+            <Animated.View style={[s.sessionDot, {
               opacity: pulseAnim,
               backgroundColor: message.streaming ? C.accent : C.green,
             }]} />
             <Text style={s.sessionBoxLabel}>
-              {message.streaming ? 'running\u2026' : 'done'}
+              {message.streaming ? 'working\u2026' : 'session log'}
             </Text>
             <Text style={s.sessionExpandHint}>&#x2197;</Text>
           </View>
-          <Text style={s.sessionPreviewText} numberOfLines={5}>{previewText}</Text>
+
+          {/* Animated scan line under header when streaming */}
+          {message.streaming && (
+            <Animated.View style={[s.sessionScanLine, {
+              transform: [{ translateX: scanAnim.interpolate({
+                inputRange: [0, 1], outputRange: [-300, 300],
+              }) }],
+            }]} />
+          )}
+
+          {/* Preview text — last ~3 lines of session output */}
+          <Text style={s.sessionPreviewText} numberOfLines={3}>{preview}</Text>
         </View>
       </TouchableOpacity>
-      {message.cost != null && (
-        <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
-      )}
 
+      {/* Expanded full-screen log */}
       <Modal visible={expanded} animationType="slide" onRequestClose={() => setExpanded(false)}>
         <SafeAreaView style={s.sessionModal} edges={['top', 'bottom']}>
           <View style={s.sessionModalHeader}>
-            <Text style={s.sessionModalTitle}>Session Log</Text>
+            <View style={s.sessionBoxHeader}>
+              <View style={[s.sessionDot, { backgroundColor: message.streaming ? C.accent : C.green }]} />
+              <Text style={s.sessionModalTitle}>
+                {message.streaming ? 'working\u2026' : 'session log'}
+              </Text>
+            </View>
             <TouchableOpacity onPress={() => setExpanded(false)} hitSlop={{ top: 8, bottom: 8, left: 16, right: 8 }}>
               <Text style={s.sessionModalClose}>Done</Text>
             </TouchableOpacity>
@@ -389,7 +411,11 @@ const ChatPane = memo(function ChatPane({
   // Accumulates token text since the last tool call.  Reset on each tool frame
   // so that when 'done' arrives we have just the final assistant text to use as
   // the chat summary.
-  const sessionSummaryRef = useRef<string>('')
+  const sessionSummaryRef  = useRef<string>('')
+
+  // ID of the session bubble currently being streamed into.  Set when the user
+  // sends a message (so the box appears immediately) and cleared on done/error.
+  const currentSessionIdRef = useRef<string | null>(null)
 
   // Fetch @ completions whenever the input changes.
   useEffect(() => {
@@ -483,7 +509,11 @@ const ChatPane = memo(function ChatPane({
                 pendingMsgRef.current = null
                 AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
                 const optimisticBubble: Message = { id: uid(), role: 'user', text: pending }
-                setMessages([...serverMsgs, optimisticBubble])
+                const resendSessionId = uid()
+                currentSessionIdRef.current = resendSessionId
+                sessionSummaryRef.current = ''
+                const resendSessionBubble: Message = { id: resendSessionId, role: 'session', text: '', streaming: true }
+                setMessages([...serverMsgs, optimisticBubble, resendSessionBubble])
                 ws.send(JSON.stringify({ type: 'message', text: pending }))
                 updateStatus('streaming')
                 didResend = true
@@ -514,11 +544,19 @@ const ChatPane = memo(function ChatPane({
             updateStatus('streaming')
             sessionSummaryRef.current += frame.text
             setMessages(prev => {
+              const sid = currentSessionIdRef.current
+              if (sid) {
+                // Update the known session bubble by ID.
+                return prev.map(m => m.id === sid ? { ...m, text: m.text + frame.text, streaming: true } : m)
+              }
+              // Reconnect fallback: find last streaming session or create one.
               const last = prev[prev.length - 1]
               if (last?.streaming && last.role === 'session') {
                 return [...prev.slice(0, -1), { ...last, text: last.text + frame.text }]
               }
-              return [...prev, { id: uid(), role: 'session' as const, text: frame.text, streaming: true }]
+              const newId = uid()
+              currentSessionIdRef.current = newId
+              return [...prev, { id: newId, role: 'session' as const, text: frame.text, streaming: true }]
             })
             break
           }
@@ -528,10 +566,12 @@ const ChatPane = memo(function ChatPane({
             const cost = frame.cost_usd
             const summary = sessionSummaryRef.current.trim() || 'Task complete.'
             sessionSummaryRef.current = ''
+            const finishedSessionId = currentSessionIdRef.current
+            currentSessionIdRef.current = null
             setMessages(prev => {
-              // Finalize the session bubble (clear streaming flag, attach cost).
+              // Finalize the session bubble by ID (or any streaming session as fallback).
               const finalized = prev.map(m =>
-                m.streaming && m.role === 'session'
+                (finishedSessionId ? m.id === finishedSessionId : m.streaming && m.role === 'session')
                   ? { ...m, streaming: false }
                   : m
               )
@@ -552,6 +592,7 @@ const ChatPane = memo(function ChatPane({
             // Discard questions from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
             sessionSummaryRef.current = ''
+            currentSessionIdRef.current = null
             setMessages(prev => {
               const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
               return [...finalized, { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true }]
@@ -568,12 +609,18 @@ const ChatPane = memo(function ChatPane({
             sessionSummaryRef.current = ''
             const toolLine = '\n\u25b8 ' + formatToolCall(frame.name, frame.input) + '\n'
             setMessages(prev => {
-              // Append the tool line into the active session bubble, or create one.
+              const sid = currentSessionIdRef.current
+              if (sid) {
+                return prev.map(m => m.id === sid ? { ...m, text: m.text + toolLine, streaming: true } : m)
+              }
+              // Reconnect fallback.
               const last = prev[prev.length - 1]
               if (last?.streaming && last.role === 'session') {
                 return [...prev.slice(0, -1), { ...last, text: last.text + toolLine }]
               }
-              return [...prev, { id: uid(), role: 'session' as const, text: toolLine, streaming: true }]
+              const newId = uid()
+              currentSessionIdRef.current = newId
+              return [...prev, { id: newId, role: 'session' as const, text: toolLine, streaming: true }]
             })
             break
           }
@@ -586,6 +633,7 @@ const ChatPane = memo(function ChatPane({
             // Discard errors from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
             sessionSummaryRef.current = ''
+            currentSessionIdRef.current = null
             setMessages(prev => {
               // Finalize session bubble and append the error as a summary message.
               const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
@@ -651,7 +699,16 @@ const ChatPane = memo(function ChatPane({
       return
     }
 
-    setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
+    // Create the session bubble immediately so it appears in the chat right
+    // away rather than waiting for the first token/tool frame to arrive.
+    const sessionId = uid()
+    currentSessionIdRef.current = sessionId
+    sessionSummaryRef.current = ''
+    setMessages(prev => [
+      ...prev,
+      { id: uid(), role: 'user' as const, text },
+      { id: sessionId, role: 'session' as const, text: '', streaming: true },
+    ])
     isAtBottomRef.current = true
 
     if (pendingQuestion) {
@@ -681,6 +738,8 @@ const ChatPane = memo(function ChatPane({
     // streaming frames that arrive before the server's history response are
     // discarded, not appended to the now-empty conversation.
     liveGenRef.current = -1
+    currentSessionIdRef.current = null
+    sessionSummaryRef.current = ''
     wsRef.current?.send(JSON.stringify({ type: 'clear' }))
     setMessages([])
     setPendingQuestion(false)
@@ -1150,20 +1209,22 @@ const s = StyleSheet.create({
   input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 17, lineHeight: 24, minHeight: 48, maxHeight: 140 },
   stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600' },
 
-  // Agent session bubble (collapsed)
-  sessionBox:        { borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 10, padding: 10, backgroundColor: C.surface, overflow: 'hidden' },
-  sessionBoxHeader:  { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  sessionIndicator:  { width: 8, height: 8, borderRadius: 4 },
-  sessionBoxLabel:   { flex: 1, fontSize: 11, fontWeight: '600', color: C.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
-  sessionExpandHint: { fontSize: 14, color: C.textMuted },
-  sessionPreviewText: { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
+  // Agent session bubble (collapsed inline)
+  sessionWrap:        { paddingHorizontal: 14, marginBottom: 14 },
+  sessionBox:         { borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 10, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 10, backgroundColor: C.surface, overflow: 'hidden' },
+  sessionBoxHeader:   { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  sessionDot:         { width: 7, height: 7, borderRadius: 3.5 },
+  sessionBoxLabel:    { flex: 1, fontSize: 11, fontWeight: '600', color: C.textSecondary, textTransform: 'uppercase', letterSpacing: 0.4 },
+  sessionExpandHint:  { fontSize: 13, color: C.textMuted },
+  sessionScanLine:    { height: 1, backgroundColor: C.accent, opacity: 0.35, marginBottom: 6, width: 60 },
+  sessionPreviewText: { fontSize: 11, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 16 },
 
-  // Agent session modal (expanded)
+  // Agent session modal (expanded full-screen)
   sessionModal:       { flex: 1, backgroundColor: C.bg },
   sessionModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  sessionModalTitle:  { fontSize: 17, fontWeight: '600', color: C.textPrimary },
+  sessionModalTitle:  { fontSize: 15, fontWeight: '600', color: C.textPrimary },
   sessionModalClose:  { fontSize: 16, color: C.accent, fontWeight: '500' },
   sessionModalScroll: { flex: 1 },
-  sessionModalText:   { fontSize: 13, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 20, padding: 16 },
+  sessionModalText:   { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 22, padding: 16 },
 })
 
