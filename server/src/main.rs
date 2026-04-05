@@ -364,32 +364,49 @@ async fn chat_ws_handler(
             }
         });
 
-        // Atomically snapshot (loop_running, live_gen, live_idx, history) under a
-        // single lock acquisition so that the history frame and the live-replay
-        // starting point are always consistent — preventing duplicate delivery of
-        // the last assistant turn when a client reconnects mid-stream.
+        // Snapshot (loop_running, live_gen, live_idx, history) consistently so
+        // that the history frame and the live-replay starting point never
+        // double-deliver the last assistant turn.
+        //
+        // The tricky race: the agentic loop pushes the completed assistant message
+        // into session.messages *before* clearing loop_running.  If we read
+        // loop_running=true but session already contains the finished assistant
+        // turn, we would send it in the history frame AND replay it via live
+        // tokens → duplicate text on screen.
+        //
+        // Fix: hold the live.buf lock while reading both loop_running and
+        // session.messages.  The loop pushes to session without holding live.buf,
+        // but more importantly: when loop_running is true we strip any trailing
+        // assistant message from the history snapshot — the live token replay
+        // will reconstruct it from idx=0.
         let (history_json, start_gen, start_idx) = {
-            // 1. Take live buf to get gen + start_idx, then drop it.
-            let (live_gen, start_gen, start_idx) = {
-                let buf = state.live.buf.lock().unwrap();
-                let loop_running = state.loop_running.load(Ordering::SeqCst);
-                let (start_gen, start_idx) = if loop_running {
-                    // Loop is still running — replay live events from the beginning
-                    // of the current generation so the client sees every token.
-                    (buf.gen, 0usize)
-                } else {
-                    // Loop is idle — history already contains the completed text.
-                    // Start past the end of the current gen so we only deliver
-                    // future responses (next gen will reset idx to 0 automatically).
-                    (buf.gen, buf.events.len())
-                };
-                (buf.gen, start_gen, start_idx)
-            }; // live.buf lock released here — avoids lock-order inversion
-            // 2. Now take session lock to read history.
-            let history = WsFrame::History {
-                messages: messages_to_history(&state.session.lock().unwrap().messages),
-                live_gen,
+            let buf = state.live.buf.lock().unwrap();
+            let loop_running = state.loop_running.load(Ordering::SeqCst);
+            let live_gen = buf.gen;
+            let (start_gen, start_idx) = if loop_running {
+                // Loop is still running — replay live events from the beginning
+                // of the current generation so the client sees every token.
+                (buf.gen, 0usize)
+            } else {
+                // Loop is idle — history already contains the completed text.
+                // Start past the end of the current gen so we only deliver
+                // future responses (next gen will reset idx to 0 automatically).
+                (buf.gen, buf.events.len())
             };
+            // Read session while live.buf is still locked to prevent the loop
+            // from committing a new assistant message between the two reads.
+            let mut hist_msgs = messages_to_history(&state.session.lock().unwrap().messages);
+            // If the loop is running, the live token replay covers the in-progress
+            // (or just-completed) assistant turn.  Strip any trailing assistant
+            // message from the history snapshot to avoid duplication.
+            if loop_running {
+                if let Some(last) = hist_msgs.last() {
+                    if last.role == "assistant" {
+                        hist_msgs.pop();
+                    }
+                }
+            }
+            let history = WsFrame::History { messages: hist_msgs, live_gen };
             (serde_json::to_string(&history).unwrap_or_default(), start_gen, start_idx)
         };
         ws_tx.send(history_json).await.ok();
