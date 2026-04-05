@@ -91,6 +91,10 @@ const DEV_CONN: NoiseConnectionInfo = {
   label: 'dev (local)',
 }
 
+// ── Fonts ──────────────────────────────────────────────────────────────────────
+
+const ARIMO = 'Arimo'
+
 // ── Colours ────────────────────────────────────────────────────────────────────
 
 const C = {
@@ -1206,28 +1210,28 @@ const s = StyleSheet.create({
   // Setup / connecting / picker
   setupSafe:    { flex: 1, backgroundColor: '#EB4F0B' },
   setupCenter:  { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40, gap: 16 },
-  setupTitle:   { fontSize: 26, fontWeight: '700', color: '#fff', letterSpacing: 2 },
-  setupDesc:    { fontSize: 15, color: 'rgba(255,255,255,0.85)', textAlign: 'center', lineHeight: 22 },
-  setupStatus:  { fontSize: 15, color: 'rgba(255,255,255,0.7)', textAlign: 'center' },
-  setupError:   { fontSize: 14, color: '#ffe0d6', textAlign: 'center', lineHeight: 20 },
+  setupTitle:   { fontSize: 26, fontWeight: '700', color: '#fff', letterSpacing: 2, fontFamily: ARIMO },
+  setupDesc:    { fontSize: 15, color: 'rgba(255,255,255,0.85)', textAlign: 'center', lineHeight: 22, fontFamily: ARIMO },
+  setupStatus:  { fontSize: 15, color: 'rgba(255,255,255,0.7)', textAlign: 'center', fontFamily: ARIMO },
+  setupError:   { fontSize: 14, color: '#ffe0d6', textAlign: 'center', lineHeight: 20, fontFamily: ARIMO },
   setupBtn:     { backgroundColor: '#fff', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 32, alignItems: 'center', marginTop: 8 },
-  setupBtnText: { color: '#EB4F0B', fontWeight: '700', fontSize: 16 },
+  setupBtnText: { color: '#EB4F0B', fontWeight: '700', fontSize: 16, fontFamily: ARIMO },
   pickerWrap:   { flex: 1, backgroundColor: '#EB4F0B' },
   pickerHeader: { alignItems: 'center', paddingTop: 48, paddingBottom: 24, gap: 8 },
   pickerFooter: { paddingHorizontal: 24, paddingBottom: 32, paddingTop: 16 },
   connRow:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.25)' },
   connInfo:     { flex: 1 },
-  connLabel:    { color: '#fff', fontSize: 16, fontWeight: '600' },
-  connHost:     { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
-  connDelete:   { color: 'rgba(255,255,255,0.6)', fontSize: 22, paddingLeft: 16 },
+  connLabel:    { color: '#fff', fontSize: 16, fontWeight: '600', fontFamily: ARIMO },
+  connHost:     { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2, fontFamily: ARIMO },
+  connDelete:   { color: 'rgba(255,255,255,0.6)', fontSize: 22, paddingLeft: 16, fontFamily: ARIMO },
 
   // QR scanner
   creatureImg:       { width: 120, height: 120, borderRadius: 26, marginBottom: 12 },
   scannerFull:       { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
   scannerOverlay:    { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60 },
   scannerTopBar:     { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
-  scannerTitle:      { color: '#fff', fontSize: 20, fontWeight: '700' },
-  scannerSubtitle:   { color: 'rgba(255,255,255,0.6)', fontSize: 14, textAlign: 'center', lineHeight: 20 },
+  scannerTitle:      { color: '#fff', fontSize: 20, fontWeight: '700', fontFamily: ARIMO },
+  scannerSubtitle:   { color: 'rgba(255,255,255,0.6)', fontSize: 14, textAlign: 'center', lineHeight: 20, fontFamily: ARIMO },
   scannerReticle:    { width: 240, height: 240 },
   scannerCorner:     { position: 'absolute', width: 28, height: 28, borderColor: C.accent, borderWidth: 3 },
   cornerTL:          { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 4 },
@@ -1235,8 +1239,8 @@ const s = StyleSheet.create({
   cornerBL:          { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 4 },
   cornerBR:          { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 4 },
   scannerCancel:     { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 24, paddingVertical: 12, paddingHorizontal: 32 },
-  scannerCancelText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  scannerError:      { color: C.red, fontSize: 16, textAlign: 'center', marginBottom: 24 },
+  scannerCancelText: { color: '#fff', fontSize: 16, fontWeight: '600', fontFamily: ARIMO },
+  scannerError:      { color: C.red, fontSize: 16, textAlign: 'center', marginBottom: 24, fontFamily: ARIMO },
 
   // Chat layout
   safe:         { flex: 1, backgroundColor: C.bg },
@@ -1246,34 +1250,34 @@ const s = StyleSheet.create({
   header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   headerLeft:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
   backBtn:      { paddingRight: 4, paddingVertical: 2 },
-  backBtnText:  { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300' },
+  backBtnText:  { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300', fontFamily: ARIMO },
   clearBtn:     { paddingVertical: 4, paddingHorizontal: 2 },
-  clearBtnText: { fontSize: 14, color: C.textSecondary, fontWeight: '500' },
-  headerTitle:  { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1 },
+  clearBtnText: { fontSize: 14, color: C.textSecondary, fontWeight: '500', fontFamily: ARIMO },
+  headerTitle:  { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1, fontFamily: ARIMO },
   connDot:      { width: 8, height: 8, borderRadius: 4 },
 
   // Chat pane
   pane:              { flex: 1, backgroundColor: C.bg },
   messageList:       { flex: 1 },
   messageListContent: { paddingVertical: 16 },
-  emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80 },
+  emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80, fontFamily: ARIMO },
   reconnectBanner:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 7, backgroundColor: '#fffbeb', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#fef3c7' },
-  reconnectText:     { color: C.yellow, fontSize: 12, fontWeight: '500' },
+  reconnectText:     { color: C.yellow, fontSize: 12, fontWeight: '500', fontFamily: ARIMO },
 
   // Scroll-to-bottom button
   scrollBtnWrap:     { position: 'absolute', bottom: 0, left: 0, right: 0, alignItems: 'center', pointerEvents: 'box-none' },
   scrollBtn:         { backgroundColor: C.bg, borderRadius: 20, width: 36, height: 36, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, marginBottom: 8 },
-  scrollBtnIcon:     { fontSize: 18, color: C.textSecondary, lineHeight: 22 },
+  scrollBtnIcon:     { fontSize: 18, color: C.textSecondary, lineHeight: 22, fontFamily: ARIMO },
 
   // Messages
   messageWrap:       { paddingHorizontal: 14, marginBottom: 14 },
   messageWrapRight:  { alignItems: 'flex-end' },
-  messageLabel:      { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
+  messageLabel:      { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase', fontFamily: ARIMO },
   messageLabelRight: { marginLeft: 0, marginRight: 2 },
-  textBlock:         { color: C.textPrimary, fontSize: 15, lineHeight: 23 },
-  cursor:            { color: C.accent, fontSize: 14 },
-  questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2 },
-  costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2 },
+  textBlock:         { color: C.textPrimary, fontSize: 15, lineHeight: 23, fontFamily: ARIMO },
+  cursor:            { color: C.accent, fontSize: 14, fontFamily: ARIMO },
+  questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
+  costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
   toolLine:          { fontSize: 13, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginBottom: 4, marginLeft: 2 },
 
   // Input bar
@@ -1281,16 +1285,16 @@ const s = StyleSheet.create({
   completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   inputRow:     { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
-  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 15, lineHeight: 22, minHeight: 48, maxHeight: 140 },
-  stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600' },
+  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 15, lineHeight: 22, minHeight: 48, maxHeight: 140, fontFamily: ARIMO },
+  stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600', fontFamily: ARIMO },
 
   // Agent session bubble (collapsed inline)
   sessionWrap:        { paddingHorizontal: 14, marginBottom: 14 },
   sessionBox:         { borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 10, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 10, backgroundColor: C.surface, overflow: 'hidden' },
   sessionBoxHeader:   { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
   sessionDot:         { width: 7, height: 7, borderRadius: 3.5 },
-  sessionBoxLabel:    { flex: 1, fontSize: 11, fontWeight: '600', color: C.textSecondary, textTransform: 'uppercase', letterSpacing: 0.4 },
-  sessionExpandHint:  { fontSize: 13, color: C.textMuted },
+  sessionBoxLabel:    { flex: 1, fontSize: 11, fontWeight: '600', color: C.textSecondary, textTransform: 'uppercase', letterSpacing: 0.4, fontFamily: ARIMO },
+  sessionExpandHint:  { fontSize: 13, color: C.textMuted, fontFamily: ARIMO },
   sessionScanLine:    { height: 1, backgroundColor: C.accent, opacity: 0.35, marginBottom: 6, width: 60 },
   sessionPreviewText: { fontSize: 11, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 16 },
 
@@ -1299,8 +1303,8 @@ const s = StyleSheet.create({
   sessionSheet:         { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.bg, borderTopLeftRadius: 16, borderTopRightRadius: 16, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: -6 }, elevation: 20 },
   sessionSheetHandle:   { width: 36, height: 4, borderRadius: 2, backgroundColor: C.border, alignSelf: 'center', marginTop: 10, marginBottom: 2 },
   sessionModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  sessionModalTitle:  { fontSize: 15, fontWeight: '600', color: C.textPrimary },
-  sessionModalClose:  { fontSize: 16, color: C.accent, fontWeight: '500' },
+  sessionModalTitle:  { fontSize: 15, fontWeight: '600', color: C.textPrimary, fontFamily: ARIMO },
+  sessionModalClose:  { fontSize: 16, color: C.accent, fontWeight: '500', fontFamily: ARIMO },
   sessionModalScroll: { flex: 1 },
   sessionModalText:   { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 22, padding: 16 },
 })

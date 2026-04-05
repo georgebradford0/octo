@@ -10,6 +10,8 @@
 		0C80B921A6F3F58F76C31292 /* libPods-claudulhu.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-claudulhu.a */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		68C787C78F268F9A20A78F56 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
+		ARIMO001A00000000000000001 /* Arimo-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = ARIMO001B00000000000000001 /* Arimo-Regular.ttf */; };
+		ARIMO002A00000000000000001 /* Arimo-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = ARIMO002B00000000000000001 /* Arimo-Italic.ttf */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 		AA11BB221A68108700A75C1A /* NoiseConnectionModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB211A68108700A75C1A /* NoiseConnectionModule.swift */; };
@@ -28,6 +30,8 @@
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = claudulhu/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		AA11BB211A68108700A75C1A /* NoiseConnectionModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NoiseConnectionModule.swift; path = claudulhu/NoiseConnectionModule.swift; sourceTree = "<group>"; };
 		AA11BB241A68108700A75C1A /* NoiseConnectionModule.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = NoiseConnectionModule.m; path = claudulhu/NoiseConnectionModule.m; sourceTree = "<group>"; };
+		ARIMO001B00000000000000001 /* Arimo-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "Arimo-Regular.ttf"; path = "claudulhu/Arimo-Regular.ttf"; sourceTree = "<group>"; };
+		ARIMO002B00000000000000001 /* Arimo-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "Arimo-Italic.ttf"; path = "claudulhu/Arimo-Italic.ttf"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -53,6 +57,8 @@
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
+				ARIMO001B00000000000000001 /* Arimo-Regular.ttf */,
+				ARIMO002B00000000000000001 /* Arimo-Italic.ttf */,
 			);
 			name = claudulhu;
 			sourceTree = "<group>";
@@ -167,6 +173,8 @@
 				81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				68C787C78F268F9A20A78F56 /* PrivacyInfo.xcprivacy in Resources */,
+				ARIMO001A00000000000000001 /* Arimo-Regular.ttf in Resources */,
+				ARIMO002A00000000000000001 /* Arimo-Italic.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

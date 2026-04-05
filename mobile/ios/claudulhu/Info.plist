@@ -60,5 +60,10 @@
 	<false/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Arimo-Regular.ttf</string>
+		<string>Arimo-Italic.ttf</string>
+	</array>
 </dict>
 </plist>
