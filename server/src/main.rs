@@ -110,14 +110,11 @@ async fn noise_handshake(
     let mut hs = builder.local_private_key(static_private).build_responder()?;
     let mut payload = vec![0u8; 65535];
     let msg1 = read_noise_frame(stream).await?;
-    eprintln!("[noise-dbg] msg1 ({} bytes): {}", msg1.len(), hex::encode(&msg1));
     hs.read_message(&msg1, &mut payload)?;
     let mut msg2 = vec![0u8; 65535];
     let n = hs.write_message(&[], &mut msg2)?;
-    eprintln!("[noise-dbg] msg2 ({} bytes): {}", n, hex::encode(&msg2[..n]));
     write_noise_frame(stream, &msg2[..n]).await?;
     let msg3 = read_noise_frame(stream).await?;
-    eprintln!("[noise-dbg] msg3 ({} bytes): {}", msg3.len(), hex::encode(&msg3));
     hs.read_message(&msg3, &mut payload)?;
     Ok(hs.into_transport_mode()?)
 }
@@ -297,16 +294,14 @@ struct AppState {
 fn chat_event_to_frame(event: &ChatEvent, live_gen: usize) -> Option<WsFrame> {
     // Go through JSON so we're not coupled to internal enum layout.
     let v: serde_json::Value = serde_json::to_value(event).ok()?;
-    let event_type = v["type"].as_str()?;
-    eprintln!("[loop→frame] event type={event_type} live_gen={live_gen}");
-    match event_type {
+    match v["type"].as_str()? {
         "text"        => Some(WsFrame::Token    { text:     v["text"].as_str()?.to_string(), live_gen }),
         "tool_use"    => Some(WsFrame::Tool     { name: v["tool"].as_str()?.to_string(), input: v["input"].clone(), live_gen }),
         "result"      => Some(WsFrame::Done { cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
         "interrupted" => Some(WsFrame::Done { cost_usd: 0.0, live_gen }),
         "error"       => Some(WsFrame::Error    { message:  v["message"].as_str()?.to_string(), live_gen }),
         "question"    => Some(WsFrame::Question { question: v["question"].as_str()?.to_string(), live_gen }),
-        other         => { eprintln!("[loop→frame] UNKNOWN event type={other}"); None },
+        _             => None,
     }
 }
 
@@ -320,14 +315,12 @@ fn chat_event_to_frame(event: &ChatEvent, live_gen: usize) -> Option<WsFrame> {
 async fn deliver_live(live: Arc<LiveState>, tx: mpsc::Sender<String>, start_gen: usize, start_idx: usize) {
     let mut gen = start_gen;
     let mut idx = start_idx;
-    eprintln!("[deliver] started start_gen={start_gen} start_idx={start_idx}");
 
     loop {
         loop {
             let frame = {
                 let buf = live.buf.lock().unwrap();
                 if buf.gen != gen {
-                    eprintln!("[deliver] gen changed {gen} → {} resetting idx", buf.gen);
                     gen = buf.gen;
                     idx = 0;
                 }
@@ -335,10 +328,7 @@ async fn deliver_live(live: Arc<LiveState>, tx: mpsc::Sender<String>, start_gen:
             };
             match frame {
                 Some(f) => {
-                    let json = serde_json::to_string(&f).unwrap_or_default();
-                    eprintln!("[deliver] sending idx={idx} gen={gen} frame={}", &json[..json.len().min(80)]);
-                    if tx.send(json).await.is_err() {
-                        eprintln!("[deliver] tx closed, exiting");
+                    if tx.send(serde_json::to_string(&f).unwrap_or_default()).await.is_err() {
                         return;
                     }
                     idx += 1;
@@ -418,7 +408,6 @@ async fn chat_ws_handler(
             let history = WsFrame::History { messages: hist_msgs, live_gen };
             (serde_json::to_string(&history).unwrap_or_default(), start_gen, start_idx)
         };
-        eprintln!("[chat] sending history live_gen={start_gen} start_idx={start_idx} frame={}", &history_json[..history_json.len().min(120)]);
         ws_tx.send(history_json).await.ok();
 
         // Deliver live events for the current (or future) response.
@@ -475,7 +464,6 @@ async fn chat_ws_handler(
                             buf.gen
                         };
                         ack_gen = new_gen;
-                        eprintln!("[chat] starting agentic loop new_gen={new_gen}");
 
                         // Acknowledge after gen bump so the Ack carries the correct live_gen.
                         ws_tx.send(serde_json::to_string(&WsFrame::Ack { live_gen: ack_gen }).unwrap_or_default()).await.ok();
@@ -491,33 +479,25 @@ async fn chat_ws_handler(
                         // that connects after the loop ends sees idle state and does not
                         // replay live events (which would duplicate the saved history).
                         tokio::spawn(async move {
-                            eprintln!("[loop] run_agentic_loop starting");
                             run_agentic_loop(
                                 session_c.clone(), "main".to_string(), api_key, model, loop_tx,
                             ).await;
-                            eprintln!("[loop] run_agentic_loop finished");
                             loop_running.store(false, Ordering::SeqCst);
                             save_messages(&session_c.lock().unwrap().messages);
                         });
 
                         // Forward ChatEvents from the loop to the live buffer.
                         tokio::spawn(async move {
-                            eprintln!("[forward] event forwarder started for gen={new_gen}");
-                            let mut count = 0usize;
                             while let Some(event) = loop_rx.recv().await {
-                                count += 1;
                                 if let Some(frame) = chat_event_to_frame(&event, new_gen) {
-                                    let json = serde_json::to_string(&frame).unwrap_or_default();
-                                    eprintln!("[forward] #{count} pushed frame={}", &json[..json.len().min(80)]);
                                     live_c.buf.lock().unwrap().events.push(frame);
                                     live_c.notify.notify_waiters();
                                 }
                             }
-                            eprintln!("[forward] event forwarder done after {count} events");
                         });
                     } else {
                         ack_gen = state.live.buf.lock().unwrap().gen;
-                        eprintln!("[chat] warning: message received while loop already running (gen={ack_gen})");
+                        eprintln!("[chat] warning: message received while loop already running");
                         ws_tx.send(serde_json::to_string(&WsFrame::Ack { live_gen: ack_gen }).unwrap_or_default()).await.ok();
                     }
                 }
