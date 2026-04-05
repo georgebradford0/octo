@@ -1270,7 +1270,7 @@ const s = StyleSheet.create({
   messageWrapRight:  { alignItems: 'flex-end' },
   messageLabel:      { fontSize: 11, color: C.textMuted, marginBottom: 4, marginLeft: 2, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
   messageLabelRight: { marginLeft: 0, marginRight: 2 },
-  textBlock:         { color: C.textPrimary, fontSize: 17, lineHeight: 26 },
+  textBlock:         { color: C.textPrimary, fontSize: 15, lineHeight: 23 },
   cursor:            { color: C.accent, fontSize: 14 },
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2 },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2 },
