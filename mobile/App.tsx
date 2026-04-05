@@ -536,7 +536,9 @@ const ChatPane = memo(function ChatPane({
                 if (li < local.length && local[li].role === bm.role && local[li].text === bm.text) {
                   // Match — splice in the buffered session/tool bubbles first
                   result.push(...pending.map(m => ({ ...m, streaming: false })))
-                  result.push(bm)
+                  // Preserve client-only fields (e.g. cost) from the local copy
+                  const lm = local[li]
+                  result.push({ ...bm, ...(lm.cost != null ? { cost: lm.cost } : {}) })
                   li++
                 } else {
                   // No match (local is stale/different) — just emit the server msg
