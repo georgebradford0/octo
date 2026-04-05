@@ -687,8 +687,6 @@ const ChatPane = memo(function ChatPane({
       }
     }
 
-    connect()
-
     return () => {
       cancelled = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
