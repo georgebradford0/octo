@@ -5,6 +5,7 @@ import {
   Animated,
   AppState,
   FlatList,
+  Modal,
   PermissionsAndroid,
   Platform,
   ScrollView,
@@ -45,7 +46,7 @@ interface HistMsg { role: 'user' | 'assistant'; text: string }
 
 interface Message {
   id:          string
-  role:        'user' | 'assistant' | 'tool'
+  role:        'user' | 'assistant' | 'tool' | 'session'
   text:        string
   streaming?:  boolean
   isQuestion?: boolean
@@ -189,9 +190,80 @@ function formatToolCall(name: string, input?: Record<string, unknown>): string {
   return `${capName}(${args})`
 }
 
+// ── AgentSessionBubble ────────────────────────────────────────────────────────
+
+const AgentSessionBubble = memo(function AgentSessionBubble({ message }: { message: Message }) {
+  const [expanded, setExpanded] = useState(false)
+  const scrollRef = useRef<ScrollView>(null)
+  const pulseAnim = useRef(new Animated.Value(0.5)).current
+
+  useEffect(() => {
+    if (!message.streaming) {
+      pulseAnim.setValue(1)
+      return
+    }
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulseAnim, { toValue: 1,   duration: 500, useNativeDriver: true }),
+      Animated.timing(pulseAnim, { toValue: 0.35, duration: 500, useNativeDriver: true }),
+    ]))
+    loop.start()
+    return () => loop.stop()
+  }, [message.streaming])
+
+  // Show last portion of log so preview tracks the live tail
+  const previewText = message.text.length > 600
+    ? '\u2026' + message.text.slice(-600)
+    : message.text
+
+  return (
+    <View style={s.messageWrap}>
+      <Text style={s.messageLabel}>{message.streaming ? 'working' : 'session'}</Text>
+      <TouchableOpacity onPress={() => setExpanded(true)} activeOpacity={0.8}>
+        <View style={s.sessionBox}>
+          <View style={s.sessionBoxHeader}>
+            <Animated.View style={[s.sessionIndicator, {
+              opacity: pulseAnim,
+              backgroundColor: message.streaming ? C.accent : C.green,
+            }]} />
+            <Text style={s.sessionBoxLabel}>
+              {message.streaming ? 'running\u2026' : 'done'}
+            </Text>
+            <Text style={s.sessionExpandHint}>&#x2197;</Text>
+          </View>
+          <Text style={s.sessionPreviewText} numberOfLines={5}>{previewText}</Text>
+        </View>
+      </TouchableOpacity>
+      {message.cost != null && (
+        <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
+      )}
+
+      <Modal visible={expanded} animationType="slide" onRequestClose={() => setExpanded(false)}>
+        <SafeAreaView style={s.sessionModal} edges={['top', 'bottom']}>
+          <View style={s.sessionModalHeader}>
+            <Text style={s.sessionModalTitle}>Session Log</Text>
+            <TouchableOpacity onPress={() => setExpanded(false)} hitSlop={{ top: 8, bottom: 8, left: 16, right: 8 }}>
+              <Text style={s.sessionModalClose}>Done</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView
+            ref={scrollRef}
+            style={s.sessionModalScroll}
+            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+          >
+            <Text style={s.sessionModalText}>{message.text}</Text>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+    </View>
+  )
+})
+
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
 const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
+  if (message.role === 'session') {
+    return <AgentSessionBubble message={message} />
+  }
   if (message.role === 'tool') {
     return (
       <View style={s.messageWrap}>
@@ -314,6 +386,11 @@ const ChatPane = memo(function ChatPane({
   // the history frame of the current connection.
   const liveGenRef      = useRef<number>(-1)
 
+  // Accumulates token text since the last tool call.  Reset on each tool frame
+  // so that when 'done' arrives we have just the final assistant text to use as
+  // the chat summary.
+  const sessionSummaryRef = useRef<string>('')
+
   // Fetch @ completions whenever the input changes.
   useEffect(() => {
     const parsed = parseAtQuery(input)
@@ -435,12 +512,13 @@ const ChatPane = memo(function ChatPane({
             // Discard tokens from a stale generation (old connection replay).
             if (frame.live_gen !== liveGenRef.current) break
             updateStatus('streaming')
+            sessionSummaryRef.current += frame.text
             setMessages(prev => {
               const last = prev[prev.length - 1]
-              if (last?.streaming && last.role === 'assistant') {
+              if (last?.streaming && last.role === 'session') {
                 return [...prev.slice(0, -1), { ...last, text: last.text + frame.text }]
               }
-              return [...prev, { id: uid(), role: 'assistant' as const, text: frame.text, streaming: true }]
+              return [...prev, { id: uid(), role: 'session' as const, text: frame.text, streaming: true }]
             })
             break
           }
@@ -448,15 +526,21 @@ const ChatPane = memo(function ChatPane({
             // Discard done from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
             const cost = frame.cost_usd
+            const summary = sessionSummaryRef.current.trim() || 'Task complete.'
+            sessionSummaryRef.current = ''
             setMessages(prev => {
-              const updated = prev.map((m, i) => {
-                const isLast = i === prev.length - 1
-                const updates: Partial<Message> = {}
-                if (m.streaming)                            updates.streaming = false
-                if (cost > 0 && isLast && m.role === 'assistant') updates.cost = cost
-                return Object.keys(updates).length ? { ...m, ...updates } : m
-              })
-              // Persist the finalized message list so the cache is fresh on next open.
+              // Finalize the session bubble (clear streaming flag, attach cost).
+              const finalized = prev.map(m =>
+                m.streaming && m.role === 'session'
+                  ? { ...m, streaming: false }
+                  : m
+              )
+              // Append a plain assistant message with the final text as a summary.
+              const summaryMsg: Message = {
+                id: uid(), role: 'assistant' as const, text: summary,
+                ...(cost > 0 ? { cost } : {}),
+              }
+              const updated = [...finalized, summaryMsg]
               AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(updated)).catch(() => {})
               return updated
             })
@@ -467,6 +551,7 @@ const ChatPane = memo(function ChatPane({
           case 'question': {
             // Discard questions from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
+            sessionSummaryRef.current = ''
             setMessages(prev => {
               const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
               return [...finalized, { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true }]
@@ -478,10 +563,17 @@ const ChatPane = memo(function ChatPane({
           case 'tool': {
             // Discard tool frames from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
+            // Reset summary accumulator — the next run of tokens after this tool
+            // call will be the fresh "final text" candidate.
+            sessionSummaryRef.current = ''
+            const toolLine = '\n\u25b8 ' + formatToolCall(frame.name, frame.input) + '\n'
             setMessages(prev => {
-              // Finalize any in-progress streaming message first.
-              const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-              return [...finalized, { id: uid(), role: 'tool' as const, text: formatToolCall(frame.name, frame.input) }]
+              // Append the tool line into the active session bubble, or create one.
+              const last = prev[prev.length - 1]
+              if (last?.streaming && last.role === 'session') {
+                return [...prev.slice(0, -1), { ...last, text: last.text + toolLine }]
+              }
+              return [...prev, { id: uid(), role: 'session' as const, text: toolLine, streaming: true }]
             })
             break
           }
@@ -493,10 +585,11 @@ const ChatPane = memo(function ChatPane({
           case 'error': {
             // Discard errors from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
+            sessionSummaryRef.current = ''
             setMessages(prev => {
-              // Finalize any in-progress streaming message and append the error.
+              // Finalize session bubble and append the error as a summary message.
               const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-              const updated = [...finalized, { id: uid(), role: 'assistant' as const, text: `✗ ${frame.message}` }]
+              const updated = [...finalized, { id: uid(), role: 'assistant' as const, text: `\u2717 ${frame.message}` }]
               AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(updated)).catch(() => {})
               return updated
             })
@@ -1058,5 +1151,21 @@ const s = StyleSheet.create({
   inputRow:     { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
   input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 17, lineHeight: 24, minHeight: 48, maxHeight: 140 },
   stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600' },
+
+  // Agent session bubble (collapsed)
+  sessionBox:        { borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 10, padding: 10, backgroundColor: C.surface, overflow: 'hidden' },
+  sessionBoxHeader:  { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  sessionIndicator:  { width: 8, height: 8, borderRadius: 4 },
+  sessionBoxLabel:   { flex: 1, fontSize: 11, fontWeight: '600', color: C.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  sessionExpandHint: { fontSize: 14, color: C.textMuted },
+  sessionPreviewText: { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
+
+  // Agent session modal (expanded)
+  sessionModal:       { flex: 1, backgroundColor: C.bg },
+  sessionModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  sessionModalTitle:  { fontSize: 17, fontWeight: '600', color: C.textPrimary },
+  sessionModalClose:  { fontSize: 16, color: C.accent, fontWeight: '500' },
+  sessionModalScroll: { flex: 1 },
+  sessionModalText:   { fontSize: 13, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 20, padding: 16 },
 })
 
