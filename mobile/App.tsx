@@ -5,6 +5,7 @@ import {
   Animated,
   AppState,
   FlatList,
+  Keyboard,
   Modal,
   PermissionsAndroid,
   Platform,
@@ -760,6 +761,14 @@ const ChatPane = memo(function ChatPane({
           ws.close()
         }
       }
+    })
+    return () => sub.remove()
+  }, [])
+
+  // Scroll to bottom when the keyboard appears so the latest messages stay visible.
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      listRef.current?.scrollToEnd({ animated: false })
     })
     return () => sub.remove()
   }, [])
