@@ -710,9 +710,12 @@ const ChatPane = memo(function ChatPane({
           case 'tool': {
             // Discard tool frames from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
-            // Reset summary accumulator — the next run of tokens after this tool
-            // call will be the fresh "final text" candidate.
-            sessionSummaryRef.current = ''
+            // Do NOT reset sessionSummaryRef here.  The server stores all text
+            // tokens for the turn in a single assistant message (across all
+            // tool-call boundaries), so we must accumulate the full token text
+            // to match that string on reconnect.  Resetting on each tool frame
+            // caused a text mismatch in mergeSessionBubbles, which silently
+            // dropped session bubbles and tool lines after returning from background.
             const toolLine = '\n\u25b8 ' + formatToolCall(frame.name, frame.input) + '\n'
             setMessages(prev => {
               const sid = currentSessionIdRef.current
