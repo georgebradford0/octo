@@ -567,6 +567,15 @@ const ChatPane = memo(function ChatPane({
                   result.push(bm)
                 }
               }
+              // Flush any trailing session/tool bubbles in local that come after
+              // the last matched server message (e.g. a currently-streaming
+              // session bubble).  Without this they were silently dropped on
+              // every reconnect.  Preserve the original streaming flag — a
+              // live session bubble must stay streaming: true so the animation
+              // continues; completed ones are already false in local.
+              while (li < local.length && (local[li].role === 'session' || local[li].role === 'tool')) {
+                result.push(local[li++])
+              }
               return result
             }
 
@@ -602,7 +611,19 @@ const ChatPane = memo(function ChatPane({
             } else {
               // No pending message — server is the ground truth, but
               // re-insert local session/tool bubbles so they survive reconnect.
-              setMessages(mergeSessionBubbles(serverMsgs))
+              const merged = mergeSessionBubbles(serverMsgs)
+              setMessages(merged)
+              // If a streaming session bubble was preserved in the tail, restore
+              // its ID so that incoming token/tool frames can find it by ID
+              // rather than falling back to the slower "last element" heuristic.
+              if (frame.live_gen > 0) {
+                const liveSession = merged.slice().reverse().find(
+                  m => m.role === 'session' && m.streaming,
+                )
+                if (liveSession) {
+                  currentSessionIdRef.current = liveSession.id
+                }
+              }
             }
 
             setPendingQuestion(false)
@@ -619,7 +640,7 @@ const ChatPane = memo(function ChatPane({
             }
             // Persist the merged list (including session bubbles) so the next
             // reconnect also has them available.
-            AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(mergeSessionBubbles(serverMsgs))).catch(() => {})
+            AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(messagesRef.current)).catch(() => {})
             break
           }
           case 'token': {
