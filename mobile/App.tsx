@@ -491,6 +491,12 @@ const ChatPane = memo(function ChatPane({
   // overwrite in-memory messages with the stale persisted snapshot.
   const storageLoadedRef = useRef(false)
 
+  // Incremented every time connect() is called.  Each ws.onmessage closure
+  // captures the epoch at creation time and discards frames if the epoch no
+  // longer matches — this prevents frames from a previous (stale) socket
+  // leaking into the new connection even when live_gen happens to be the same.
+  const connEpochRef    = useRef<number>(0)
+
   // The live_gen value from the most-recent 'history' frame.  Any live frame
   // (token/tool/question/done/error) whose live_gen differs is stale and must
   // be discarded — it belongs to a prior connection's replay that raced with
@@ -551,18 +557,25 @@ const ChatPane = memo(function ChatPane({
     // would cause the session log to disappear.
     const connect = () => {
       if (cancelled) return
+      // Close any existing socket synchronously so its in-flight frames cannot
+      // race with the new connection's frames (they would share the same
+      // live_gen and bypass the stale-frame guard).
+      wsRef.current?.close()
       console.log(`[ws] connecting to ${wsUrl} (storageLoaded=${storageLoadedRef.current})`)
       updateStatus('connecting')
       // Clear stale session ID so the token/tool fallback path can create a
       // fresh session bubble if the server is mid-stream on reconnect.
       currentSessionIdRef.current = null
+      // Advance the epoch so any onmessage closures from old sockets discard
+      // their frames immediately.
+      const myEpoch = ++connEpochRef.current
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onopen = () => console.log('[ws] opened')
 
       ws.onmessage = ({ data }: { data: string }) => {
-        if (cancelled) return
+        if (cancelled || connEpochRef.current !== myEpoch) return
         let frame: ServerFrame
         try { frame = JSON.parse(data as string) } catch { return }
 
@@ -639,10 +652,11 @@ const ChatPane = memo(function ChatPane({
                 // Try to match bm against the next local server message.
                 if (li < local.length && local[li].role === bm.role && local[li].text === bm.text) {
                   // Match — splice in the buffered client-only bubbles first,
-                  // then the server message (preserving client-only fields).
+                  // then the server message (preserving client-only fields and
+                  // the local id so FlatList keys are stable across reconnects).
                   result.push(...pending.map(m => ({ ...m, streaming: false })))
                   const lm = local[li]
-                  result.push({ ...bm, ...(lm.cost != null ? { cost: lm.cost } : {}) })
+                  result.push({ ...bm, id: lm.id, ...(lm.cost != null ? { cost: lm.cost } : {}) })
                   li++
                 } else {
                   // No match (local is stale/different) — still emit any
@@ -657,14 +671,17 @@ const ChatPane = memo(function ChatPane({
 
               // After base is exhausted, flush ALL remaining local entries.
               // This covers:
-              //  • A streaming session bubble (and its tool lines) that is
-              //    still live — must keep streaming:true so the animation runs.
+              //  • A session bubble (and its tool lines) that was still live at
+              //    disconnect time.  We mark it streaming:false here because
+              //    session_start will create a fresh bubble for the server replay;
+              //    keeping the old one streaming would leave two live bubbles.
               //  • A completed session bubble followed by the assistant summary
               //    produced by session_end — the summary has role='assistant'
               //    and is client-only (never in server history), so the old
               //    "session/tool only" flush silently dropped it every reconnect.
               while (li < local.length) {
-                result.push(local[li++])
+                const lm = local[li++]
+                result.push(lm.streaming ? { ...lm, streaming: false } : lm)
               }
 
               return result
@@ -723,22 +740,16 @@ const ChatPane = memo(function ChatPane({
             if (frame.live_gen !== liveGenRef.current) break
             updateStatus('streaming')
             pendingTextRef.current = ''
-            // Look for an existing session bubble with this server-assigned UUID
-            // (restored from local cache on reconnect).  If found, reuse it and
-            // reset its text so the server replay re-fills it from scratch.
-            const existing = messagesRef.current.find(m => m.sessionId === frame.session_id)
-            if (existing) {
-              console.log(`[session] reusing bubble id=${existing.id} sessionId=${frame.session_id}`)
-              currentSessionIdRef.current = existing.id
-              setMessages(prev => prev.map(m =>
-                m.id === existing.id ? { ...m, text: '', streaming: true, label: frame.label } : m
-              ))
-            } else {
-              const sid = uid()
-              console.log(`[session] new bubble id=${sid} sessionId=${frame.session_id}`)
-              currentSessionIdRef.current = sid
-              setMessages(prev => [...prev, { id: sid, role: 'session' as const, text: '', streaming: true, label: frame.label, sessionId: frame.session_id }])
-            }
+            // Always create a fresh bubble for this replay/new stream.  The
+            // history-merge step already restored the previous (completed)
+            // session bubble from local cache, so we do NOT reuse it here.
+            // Reusing and resetting to text:'' caused a double-fill: the merged
+            // bubble's content was already in the list, then the token replay
+            // appended on top of it again.
+            const sid = uid()
+            console.log(`[session] new bubble id=${sid} sessionId=${frame.session_id}`)
+            currentSessionIdRef.current = sid
+            setMessages(prev => [...prev, { id: sid, role: 'session' as const, text: '', streaming: true, label: frame.label, sessionId: frame.session_id }])
             break
           }
           case 'session_end': {
