@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-06
+
+### Fixed
+- **Session bubble preserved on reconnect** — server now assigns a UUID to each agentic session via `session_start`; mobile client uses it to find and reuse the existing session bubble when the server replays `session_start` after reconnect, preventing a duplicate stale bubble appearing alongside the live one
+
 ## [0.1.1] - 2026-04-06
 
 ### Changed
