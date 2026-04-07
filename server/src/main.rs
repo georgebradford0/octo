@@ -204,7 +204,7 @@ enum WsFrame {
     /// Current response ended with an error.
     Error    { message: String, live_gen: usize },
     /// Model is beginning a multi-step agentic session.
-    SessionStart { label: String, live_gen: usize },
+    SessionStart { label: String, session_id: String, live_gen: usize },
     /// Model is ending an agentic session; summary is the final prose response.
     SessionEnd   { summary: String, live_gen: usize },
     /// Acknowledgement that the user message was saved server-side.
@@ -305,7 +305,7 @@ fn chat_event_to_frame(event: &ChatEvent, live_gen: usize) -> Option<WsFrame> {
         "interrupted"   => Some(WsFrame::Done         { cost_usd: 0.0, live_gen }),
         "error"         => Some(WsFrame::Error        { message:  v["message"].as_str()?.to_string(), live_gen }),
         "question"      => Some(WsFrame::Question     { question: v["question"].as_str()?.to_string(), live_gen }),
-        "session_start" => Some(WsFrame::SessionStart { label:   v["label"].as_str()?.to_string(), live_gen }),
+        "session_start" => Some(WsFrame::SessionStart { label: v["label"].as_str()?.to_string(), session_id: v["session_id"].as_str()?.to_string(), live_gen }),
         "session_end"   => Some(WsFrame::SessionEnd   { summary: v["summary"].as_str()?.to_string(), live_gen }),
         _               => None,
     }

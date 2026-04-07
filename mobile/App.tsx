@@ -43,7 +43,7 @@ type ServerFrame =
   | { type: 'done';          cost_usd: number;    live_gen: number }
   | { type: 'error';         message: string;     live_gen: number }
   | { type: 'ack';           live_gen: number }
-  | { type: 'session_start'; label: string;       live_gen: number }
+  | { type: 'session_start'; label: string; session_id: string; live_gen: number }
   | { type: 'session_end';   summary: string;     live_gen: number }
 
 interface HistMsg { role: 'user' | 'assistant'; text: string }
@@ -56,6 +56,7 @@ interface Message {
   isQuestion?: boolean
   cost?:       number
   label?:      string
+  sessionId?:  string   // server-assigned UUID; set on session bubbles for reconnect matching
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -634,8 +635,7 @@ const ChatPane = memo(function ChatPane({
                 AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
                 // Server has the message; use authoritative history as-is,
                 // but re-insert any local session/tool bubbles.
-                const merged = mergeSessionBubbles(serverMsgs)
-                setMessages(merged)
+                setMessages(mergeSessionBubbles(serverMsgs))
               } else {
                 // Server never received it — show optimistic user bubble then
                 // resend.  The ack will clear pendingMsgRef.
@@ -652,8 +652,7 @@ const ChatPane = memo(function ChatPane({
             } else {
               // No pending message — server is the ground truth, but
               // re-insert local session/tool bubbles so they survive reconnect.
-              const merged = mergeSessionBubbles(serverMsgs)
-              setMessages(merged)
+              setMessages(mergeSessionBubbles(serverMsgs))
             }
 
             setPendingQuestion(false)
@@ -677,9 +676,20 @@ const ChatPane = memo(function ChatPane({
             if (frame.live_gen !== liveGenRef.current) break
             updateStatus('streaming')
             pendingTextRef.current = ''
-            const sid = uid()
-            currentSessionIdRef.current = sid
-            setMessages(prev => [...prev, { id: sid, role: 'session' as const, text: '', streaming: true, label: frame.label }])
+            // Look for an existing session bubble with this server-assigned UUID
+            // (restored from local cache on reconnect).  If found, reuse it and
+            // reset its text so the server replay re-fills it from scratch.
+            const existing = messagesRef.current.find(m => m.sessionId === frame.session_id)
+            if (existing) {
+              currentSessionIdRef.current = existing.id
+              setMessages(prev => prev.map(m =>
+                m.id === existing.id ? { ...m, text: '', streaming: true, label: frame.label } : m
+              ))
+            } else {
+              const sid = uid()
+              currentSessionIdRef.current = sid
+              setMessages(prev => [...prev, { id: sid, role: 'session' as const, text: '', streaming: true, label: frame.label, sessionId: frame.session_id }])
+            }
             break
           }
           case 'session_end': {

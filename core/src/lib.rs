@@ -157,7 +157,7 @@ pub enum ChatEvent {
     WorkerError        { message: String },
     WorkerSessionReady { branch: String, worktree_path: String, worker_session_id: String, task: String },
     /// Model is beginning a multi-step agentic session.
-    SessionStart       { label: String },
+    SessionStart       { label: String, session_id: String },
     /// Model is ending an agentic session; summary is the final prose response.
     SessionEnd         { summary: String },
 }
@@ -1138,7 +1138,8 @@ pub async fn run_agentic_loop(
                         // return a synthetic ok result, but do not execute anything.
                         if name == "session_start" {
                             let label = input["label"].as_str().unwrap_or("working").to_string();
-                            tx.send(ChatEvent::SessionStart { label }).await.ok();
+                            let session_id = uuid::Uuid::new_v4().to_string();
+                            tx.send(ChatEvent::SessionStart { label, session_id }).await.ok();
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
                                 content: vec![serde_json::json!({"type":"text","text":"ok"})],
