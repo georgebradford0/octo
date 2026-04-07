@@ -549,24 +549,9 @@ const ChatPane = memo(function ChatPane({
     // wsUrl changes (tunnel port changes on reconnect) the in-memory messages
     // are already up-to-date; overwriting them with the stale persisted snapshot
     // would cause the session log to disappear.
-    if (!storageLoadedRef.current) {
-      Promise.all([
-        AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
-        AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
-      ]).then(([msgsJson, pendingText]) => {
-        if (cancelled) return
-        storageLoadedRef.current = true
-        if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
-        if (pendingText) pendingMsgRef.current = pendingText
-        connect()
-      })
-    } else {
-      connect()
-    }
-
     const connect = () => {
       if (cancelled) return
-      console.log(`[ws] connecting to ${wsUrl}`)
+      console.log(`[ws] connecting to ${wsUrl} (storageLoaded=${storageLoadedRef.current})`)
       updateStatus('connecting')
       // Clear stale session ID so the token/tool fallback path can create a
       // fresh session bubble if the server is mid-stream on reconnect.
@@ -696,12 +681,14 @@ const ChatPane = memo(function ChatPane({
             // reset its text so the server replay re-fills it from scratch.
             const existing = messagesRef.current.find(m => m.sessionId === frame.session_id)
             if (existing) {
+              console.log(`[session] reusing bubble id=${existing.id} sessionId=${frame.session_id}`)
               currentSessionIdRef.current = existing.id
               setMessages(prev => prev.map(m =>
                 m.id === existing.id ? { ...m, text: '', streaming: true, label: frame.label } : m
               ))
             } else {
               const sid = uid()
+              console.log(`[session] new bubble id=${sid} sessionId=${frame.session_id}`)
               currentSessionIdRef.current = sid
               setMessages(prev => [...prev, { id: sid, role: 'session' as const, text: '', streaming: true, label: frame.label, sessionId: frame.session_id }])
             }
@@ -828,6 +815,24 @@ const ChatPane = memo(function ChatPane({
         updateStatus('connecting')
         reconnectTimer = setTimeout(connect, 1500)
       }
+    }
+
+    if (!storageLoadedRef.current) {
+      console.log('[ws] loading AsyncStorage before first connect')
+      Promise.all([
+        AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
+        AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
+      ]).then(([msgsJson, pendingText]) => {
+        if (cancelled) return
+        storageLoadedRef.current = true
+        console.log(`[ws] storage loaded msgs=${!!msgsJson} pending=${!!pendingText}`)
+        if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
+        if (pendingText) pendingMsgRef.current = pendingText
+        connect()
+      })
+    } else {
+      console.log('[ws] skipping AsyncStorage reload — using in-memory messages')
+      connect()
     }
 
     return () => {
