@@ -486,6 +486,11 @@ const ChatPane = memo(function ChatPane({
   // ack or when confirmed present in the next history frame.
   const pendingMsgRef   = useRef<string | null>(null)
 
+  // Whether we have already loaded the cached message list from AsyncStorage.
+  // Subsequent wsUrl changes (tunnel port changes on reconnect) must NOT
+  // overwrite in-memory messages with the stale persisted snapshot.
+  const storageLoadedRef = useRef(false)
+
   // The live_gen value from the most-recent 'history' frame.  Any live frame
   // (token/tool/question/done/error) whose live_gen differs is stale and must
   // be discarded — it belongs to a prior connection's replay that raced with
@@ -539,15 +544,25 @@ const ChatPane = memo(function ChatPane({
     // connecting.  If we connected first there would be a race where the
     // 'history' frame arrives before pendingMsgRef is restored, causing the
     // message to be silently dropped instead of resent.
-    Promise.all([
-      AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
-      AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
-    ]).then(([msgsJson, pendingText]) => {
-      if (cancelled) return
-      if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
-      if (pendingText) pendingMsgRef.current = pendingText
+    //
+    // Only load on the very first connection for this chat pane.  On subsequent
+    // wsUrl changes (tunnel port changes on reconnect) the in-memory messages
+    // are already up-to-date; overwriting them with the stale persisted snapshot
+    // would cause the session log to disappear.
+    if (!storageLoadedRef.current) {
+      Promise.all([
+        AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
+        AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
+      ]).then(([msgsJson, pendingText]) => {
+        if (cancelled) return
+        storageLoadedRef.current = true
+        if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
+        if (pendingText) pendingMsgRef.current = pendingText
+        connect()
+      })
+    } else {
       connect()
-    })
+    }
 
     const connect = () => {
       if (cancelled) return
