@@ -1237,25 +1237,6 @@ function ChildChatScreen({ child, onClose }: {
   )
 }
 
-// ── ConnRow ────────────────────────────────────────────────────────────────────
-
-function ConnRow({ conn, onSelect, onDelete }: {
-  conn:     NoiseConnectionInfo
-  onSelect: () => void
-  onDelete: () => void
-}) {
-  return (
-    <TouchableOpacity style={s.connRow} onPress={onSelect} activeOpacity={0.7}>
-      <View style={s.connInfo}>
-        <Text style={s.connLabel}>{conn.label ?? conn.host}</Text>
-        <Text style={s.connHost}>{conn.host}:{conn.port}</Text>
-      </View>
-      <TouchableOpacity onPress={onDelete} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-        <Text style={s.connDelete}>×</Text>
-      </TouchableOpacity>
-    </TouchableOpacity>
-  )
-}
 
 // ── AppInner ──────────────────────────────────────────────────────────────────
 
@@ -1264,34 +1245,29 @@ function AppInner() {
   const [tunnelPort,  setTunnelPort]  = useState<number | null>(null)
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [scanning,    setScanning]    = useState(false)
-  const [savedConns,  setSavedConns]  = useState<NoiseConnectionInfo[]>([])
-  const [repoName,    setRepoName]    = useState<string | null>(null)
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
   const [containers,  setContainers]  = useState<ContainerInfo[]>([])
   const [activeChild, setActiveChild] = useState<ContainerInfo | null>(null)
   // Incrementing this forces the master Noise tunnel effect to re-run and
-  // re-establish the master connection after a child modal closes.
+  // re-establish the master connection after a child screen closes.
   const [noiseKey,    setNoiseKey]    = useState(0)
   const clearChatRef     = useRef<() => void>(() => {})
   const interruptChatRef = useRef<() => void>(() => {})
 
-  // Load saved connections on mount; auto-connect if exactly one saved.
+  // Load saved master connection on mount and auto-connect.
   useEffect(() => {
     let cancelled = false
-    AsyncStorage.getItem('noiseConnections').then(json => {
-      if (cancelled) return
-      let conns: NoiseConnectionInfo[] = []
-      if (json) { try { conns = JSON.parse(json) } catch {} }
-      // In dev builds, always ensure the local dev connection is listed first.
+    const load = async () => {
+      let saved: NoiseConnectionInfo | null = null
       if (__DEV__) {
-        const devKey = connKeyFor(DEV_CONN)
-        if (!conns.some(c => connKeyFor(c) === devKey)) {
-          conns = [DEV_CONN, ...conns]
-        }
+        saved = DEV_CONN
+      } else {
+        const json = await AsyncStorage.getItem('masterConnection').catch(() => null)
+        if (json) { try { saved = JSON.parse(json) } catch {} }
       }
-      setSavedConns(conns)
-      if (conns.length === 1) setConn(conns[0])
-    })
+      if (!cancelled && saved) setConn(saved)
+    }
+    load()
     return () => { cancelled = true }
   }, [])
 
@@ -1300,7 +1276,6 @@ function AppInner() {
   useEffect(() => {
     setTunnelPort(null)
     setTunnelError(null)
-    setRepoName(null)
     if (!conn) return
     let connected = false
     const timer = setTimeout(() => {
@@ -1342,39 +1317,11 @@ function AppInner() {
     return () => sub.remove()
   }, [conn])
 
-  // Fetch repo name once tunnel is up.
-  useEffect(() => {
-    if (!tunnelPort || !conn) return
-    fetch(`http://127.0.0.1:${tunnelPort}/config`)
-      .then(r => r.ok ? r.json() : null)
-      .then((d: { name?: string | null } | null) => {
-        const name = d?.name ?? null
-        setRepoName(name)
-        if (name) {
-          setSavedConns(prev => {
-            const updated = prev.map(c =>
-              c.host === conn.host && c.port === conn.port ? { ...c, label: name } : c
-            )
-            AsyncStorage.setItem('noiseConnections', JSON.stringify(updated))
-            return updated
-          })
-        }
-      })
-      .catch(() => {})
-  }, [tunnelPort, conn])
-
   const handleQrScanned = useCallback((raw: string) => {
     setScanning(false)
     const parsed = parseQrData(raw)
     if (!parsed) { setTunnelError('Invalid QR code'); return }
-    setSavedConns(prev => {
-      const updated = [
-        ...prev.filter(c => !(c.host === parsed.host && c.port === parsed.port)),
-        parsed,
-      ]
-      AsyncStorage.setItem('noiseConnections', JSON.stringify(updated))
-      return updated
-    })
+    AsyncStorage.setItem('masterConnection', JSON.stringify(parsed)).catch(() => {})
     setConn(parsed)
   }, [])
 
@@ -1385,15 +1332,6 @@ function AppInner() {
     }
     setScanning(true)
   }, [])
-
-  const deleteConn = useCallback((c: NoiseConnectionInfo) => {
-    setSavedConns(prev => {
-      const updated = prev.filter(x => !(x.host === c.host && x.port === c.port))
-      AsyncStorage.setItem('noiseConnections', JSON.stringify(updated))
-      return updated
-    })
-    if (conn?.host === c.host && conn?.port === c.port) setConn(null)
-  }, [conn])
 
   const handleContainerFrame = useCallback((frame: ServerFrame) => {
     if (frame.type === 'container_list') {
@@ -1429,37 +1367,18 @@ function AppInner() {
     )
   }
 
-  // ── Connection picker (no conn selected) ────────────────────────────────────
+  // ── No master connection yet ─────────────────────────────────────────────────
   if (!conn) {
     return (
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
-        {savedConns.length === 0 ? (
-          <View style={s.setupCenter}>
-            <CreatureAnim />
-            <Text style={s.setupTitle}>claudulhu</Text>
-            <Text style={s.setupDesc}>Connect to your Claude Code server</Text>
-            <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
-              <Text style={s.setupBtnText}>Scan QR code</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={s.pickerWrap}>
-            <View style={s.pickerHeader}>
-              <CreatureAnim />
-              <Text style={s.setupTitle}>claudulhu</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              {savedConns.map(c => (
-                <ConnRow key={connKeyFor(c)} conn={c} onSelect={() => setConn(c)} onDelete={() => deleteConn(c)} />
-              ))}
-            </View>
-            <View style={s.pickerFooter}>
-              <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
-                <Text style={s.setupBtnText}>Scan QR code</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+        <View style={s.setupCenter}>
+          <CreatureAnim />
+          <Text style={s.setupTitle}>claudulhu</Text>
+          <Text style={s.setupDesc}>Scan your master container QR code to connect</Text>
+          <TouchableOpacity style={s.setupBtn} onPress={requestCameraAndScan}>
+            <Text style={s.setupBtnText}>Scan QR code</Text>
+          </TouchableOpacity>
+        </View>
       </SafeAreaView>
     )
   }
@@ -1483,17 +1402,8 @@ function AppInner() {
       <View style={s.paneArea}>
         <View style={s.header}>
           <View style={s.headerLeft}>
-            <TouchableOpacity
-              style={s.backBtn}
-              onPress={() => setConn(null)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Text style={s.backBtnText}>‹</Text>
-            </TouchableOpacity>
             <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
-            <View>
-              <Text style={s.headerTitle}>{repoName ?? ''}</Text>
-            </View>
+            <Text style={s.headerTitle}>master</Text>
           </View>
           {chatStatus === 'streaming' ? (
             <TouchableOpacity
@@ -1554,14 +1464,6 @@ const s = StyleSheet.create({
   setupError:   { fontSize: 14, color: '#ffe0d6', textAlign: 'center', lineHeight: 20, fontFamily: ARIMO },
   setupBtn:     { backgroundColor: '#fff', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 32, alignItems: 'center', marginTop: 8 },
   setupBtnText: { color: '#EB4F0B', fontWeight: '700', fontSize: 16, fontFamily: ARIMO },
-  pickerWrap:   { flex: 1, backgroundColor: '#EB4F0B' },
-  pickerHeader: { alignItems: 'center', paddingTop: 48, paddingBottom: 24, gap: 8 },
-  pickerFooter: { paddingHorizontal: 24, paddingBottom: 32, paddingTop: 16 },
-  connRow:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.25)' },
-  connInfo:     { flex: 1 },
-  connLabel:    { color: '#fff', fontSize: 16, fontWeight: '600', fontFamily: ARIMO },
-  connHost:     { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2, fontFamily: ARIMO },
-  connDelete:   { color: 'rgba(255,255,255,0.6)', fontSize: 22, paddingLeft: 16, fontFamily: ARIMO },
 
   // QR scanner
   creatureImg:       { width: 120, height: 120, borderRadius: 26, marginBottom: 12 },
