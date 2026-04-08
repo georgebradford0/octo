@@ -1,8 +1,32 @@
 services:
+  # ── Master control node ────────────────────────────────────────────────────
+  # Single entry point for the mobile app.  Manages child repo containers via
+  # the Docker socket.  Scan its QR code once; child containers appear in-app.
+  master:
+    build:
+      context: .
+      dockerfile: master/Dockerfile
+    ports:
+      - "${MASTER_PORT:-9000}:${MASTER_PORT:-9000}"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - PUBLIC_HOST=${PUBLIC_HOST:-}
+      - NOISE_PORT=${MASTER_PORT:-9000}
+      - CHILD_PORT_RANGE=${CHILD_PORT_RANGE:-9100-9199}
+      - CLAUDULHU_DEV=${CLAUDULHU_DEV:-0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - claudulhu-master-data:/data
+    networks:
+      - claudulhu-net
+
+  # ── Standalone child server (optional / dev) ───────────────────────────────
+  # Use this to run a single repo server without master, or as a template for
+  # understanding the env vars master uses when spawning child containers.
   claudulhu:
     build: .
     ports:
-      - "${NOISE_PORT:-9000}:${NOISE_PORT:-9000}"
+      - "${NOISE_PORT:-9100}:${NOISE_PORT:-9100}"
     environment:
       - GIT_URL=${GIT_URL}
       - GH_TOKEN=${GH_TOKEN:-}
@@ -10,14 +34,27 @@ services:
       - GIT_USER_NAME=${GIT_USER_NAME:-claudulhu}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL:-claudulhu@localhost}
       - PUBLIC_HOST=${PUBLIC_HOST:-}
-      - NOISE_PORT=${NOISE_PORT:-9000}
+      - NOISE_PORT=${NOISE_PORT:-9100}
       - CLAUDULHU_DEV=${CLAUDULHU_DEV:-0}
     volumes:
       - workspace:/workspace
-      - claudulhu-data:/root/.claudulhu
+      - claudulhu-data:/data
       # Uncomment to use SSH key auth instead of GH_TOKEN:
       # - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+    networks:
+      - claudulhu-net
+    labels:
+      claudulhu.managed: "1"
+      claudulhu.git_url: "${GIT_URL}"
+    profiles:
+      - standalone
+
+networks:
+  claudulhu-net:
+    name: claudulhu-net
+    driver: bridge
 
 volumes:
   workspace:
   claudulhu-data:
+  claudulhu-master-data:
