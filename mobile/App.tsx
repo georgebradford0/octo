@@ -1108,35 +1108,6 @@ const ChatPane = memo(function ChatPane({
   )
 })
 
-// ── ContainersBar ─────────────────────────────────────────────────────────────
-
-function ContainersBar({ containers, onSelect }: {
-  containers: ContainerInfo[]
-  onSelect:   (c: ContainerInfo) => void
-}) {
-  if (containers.length === 0) return null
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      style={s.containersBar}
-      contentContainerStyle={s.containersBarContent}
-      keyboardShouldPersistTaps="handled"
-    >
-      {containers.map(c => (
-        <TouchableOpacity
-          key={c.id}
-          style={s.containerChip}
-          onPress={() => onSelect(c)}
-          activeOpacity={0.7}
-        >
-          <View style={[s.containerDot, { backgroundColor: c.status === 'running' ? C.green : C.textMuted }]} />
-          <Text style={s.containerChipText} numberOfLines={1}>{c.name}</Text>
-        </TouchableOpacity>
-      ))}
-    </ScrollView>
-  )
-}
 
 // ── ChildChatScreen ───────────────────────────────────────────────────────────
 
@@ -1246,8 +1217,9 @@ function AppInner() {
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [scanning,    setScanning]    = useState(false)
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
-  const [containers,  setContainers]  = useState<ContainerInfo[]>([])
-  const [activeChild, setActiveChild] = useState<ContainerInfo | null>(null)
+  const [containers,        setContainers]        = useState<ContainerInfo[]>([])
+  const [activeChild,       setActiveChild]       = useState<ContainerInfo | null>(null)
+  const [showContainerMenu, setShowContainerMenu] = useState(false)
   // Incrementing this forces the master Noise tunnel effect to re-run and
   // re-establish the master connection after a child screen closes.
   const [noiseKey,    setNoiseKey]    = useState(0)
@@ -1405,27 +1377,71 @@ function AppInner() {
             <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
             <Text style={s.headerTitle}>dispatch</Text>
           </View>
-          {chatStatus === 'streaming' ? (
-            <TouchableOpacity
-              style={s.clearBtn}
-              onPress={() => interruptChatRef.current()}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Text style={s.stopBtnText}>■ stop</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={s.clearBtn}
-              onPress={() => clearChatRef.current()}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              disabled={chatStatus !== 'ready'}
-            >
-              <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
-            </TouchableOpacity>
-          )}
+          <View style={s.headerRight}>
+            {containers.length > 0 && (
+              <TouchableOpacity
+                style={s.containersMenuBtn}
+                onPress={() => setShowContainerMenu(v => !v)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <View style={[s.containerDot, {
+                  backgroundColor: containers.some(c => c.status === 'running') ? C.green : C.textMuted,
+                }]} />
+                <Text style={s.containersMenuBtnText}>
+                  {containers.filter(c => c.status === 'running').length}/{containers.length}
+                </Text>
+                <Text style={s.containersMenuChevron}>{showContainerMenu ? '▴' : '▾'}</Text>
+              </TouchableOpacity>
+            )}
+            {chatStatus === 'streaming' ? (
+              <TouchableOpacity
+                style={s.clearBtn}
+                onPress={() => interruptChatRef.current()}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={s.stopBtnText}>■ stop</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={s.clearBtn}
+                onPress={() => clearChatRef.current()}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                disabled={chatStatus !== 'ready'}
+              >
+                <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
 
-        <ContainersBar containers={containers} onSelect={setActiveChild} />
+        {showContainerMenu && (
+          <View style={s.containerMenuWrap} pointerEvents="box-none">
+            <TouchableOpacity
+              style={StyleSheet.absoluteFillObject}
+              activeOpacity={1}
+              onPress={() => setShowContainerMenu(false)}
+            />
+            <View style={s.containerMenu}>
+              {containers.map(c => (
+                <TouchableOpacity
+                  key={c.id}
+                  style={s.containerMenuItem}
+                  onPress={() => { setShowContainerMenu(false); setActiveChild(c) }}
+                  activeOpacity={0.7}
+                >
+                  <View style={[s.containerDot, {
+                    backgroundColor: c.status === 'running' ? C.green : C.textMuted,
+                  }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.containerMenuItemName}>{c.name}</Text>
+                    {c.git_url ? <Text style={s.containerMenuItemUrl} numberOfLines={1}>{c.git_url}</Text> : null}
+                  </View>
+                  <Text style={s.containerMenuItemStatus}>{c.status}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
 
         <ChatPane
           wsUrl={`ws://127.0.0.1:${tunnelPort}/chat`}
@@ -1531,12 +1547,18 @@ const s = StyleSheet.create({
   input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 15, lineHeight: 22, minHeight: 48, maxHeight: 140, fontFamily: ARIMO },
   stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600', fontFamily: ARIMO },
 
-  // Containers bar
-  containersBar:        { backgroundColor: C.surface, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border, maxHeight: 44 },
-  containersBarContent: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, gap: 8 },
-  containerChip:        { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: C.bg, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 16, paddingHorizontal: 10, paddingVertical: 5 },
-  containerDot:         { width: 6, height: 6, borderRadius: 3 },
-  containerChipText:    { fontSize: 13, color: C.textPrimary, fontWeight: '500', fontFamily: ARIMO, maxWidth: 120 },
+  // Containers header button + dropdown
+  headerRight:              { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  containersMenuBtn:        { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 4, paddingHorizontal: 6 },
+  containersMenuBtnText:    { fontSize: 13, color: C.textSecondary, fontWeight: '600', fontFamily: ARIMO },
+  containersMenuChevron:    { fontSize: 10, color: C.textMuted, fontFamily: ARIMO },
+  containerDot:             { width: 6, height: 6, borderRadius: 3 },
+  containerMenuWrap:        { position: 'absolute', top: 44, right: 0, left: 0, zIndex: 100 },
+  containerMenu:            { position: 'absolute', right: 12, top: 4, minWidth: 240, backgroundColor: C.bg, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 8, overflow: 'hidden' },
+  containerMenuItem:        { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  containerMenuItemName:    { fontSize: 14, fontWeight: '600', color: C.textPrimary, fontFamily: ARIMO },
+  containerMenuItemUrl:     { fontSize: 11, color: C.textMuted, fontFamily: ARIMO, marginTop: 1 },
+  containerMenuItemStatus:  { fontSize: 11, color: C.textMuted, fontFamily: ARIMO },
 
   // Agent session bubble (collapsed inline)
   sessionWrap:        { paddingHorizontal: 14, marginBottom: 14 },
