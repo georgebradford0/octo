@@ -603,6 +603,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudulhu-master"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "claudulhu-core",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "snow",
+ "tokio",
+ "tower-http 0.5.2",
+]
+
+[[package]]
 name = "claudulhu-server"
 version = "0.1.2"
 dependencies = [
