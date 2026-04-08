@@ -661,7 +661,6 @@ const ChatPane = memo(function ChatPane({
             // the user is scrolled up mid-stream — that's what stopped the
             // scroll-to-bottom button from ever appearing.
             if (isAtBottomRef.current || serverMsgs.length === 0) {
-              setShowScrollBtn(false)
               setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
             }
             if (!didResend) {
@@ -856,10 +855,12 @@ const ChatPane = memo(function ChatPane({
     return () => sub.remove()
   }, [])
 
-  // Scroll to bottom when the keyboard appears so the latest messages stay visible.
+  // Scroll to bottom when the keyboard appears, but only if already near bottom.
   useEffect(() => {
     const sub = Keyboard.addListener('keyboardDidShow', () => {
-      listRef.current?.scrollToEnd({ animated: false })
+      if (isAtBottomRef.current) {
+        listRef.current?.scrollToEnd({ animated: false })
+      }
     })
     return () => sub.remove()
   }, [])
@@ -943,18 +944,15 @@ const ChatPane = memo(function ChatPane({
           ListEmptyComponent={<Text style={s.emptyState}>say something</Text>}
           onContentSizeChange={() => {
             if (isAtBottomRef.current) {
-              listRef.current?.scrollToEnd({ animated: true })
-              setShowScrollBtn(false)
-            } else {
-              // Content grew while user is scrolled up — make the button visible
-              // so they know new content has arrived.
-              setShowScrollBtn(true)
+              listRef.current?.scrollToEnd({ animated: false })
             }
           }}
           onScroll={({ nativeEvent: { layoutMeasurement, contentOffset, contentSize } }) => {
-            const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40
-            isAtBottomRef.current = atBottom
-            setShowScrollBtn(!atBottom)
+            const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80
+            if (atBottom !== isAtBottomRef.current) {
+              isAtBottomRef.current = atBottom
+              setShowScrollBtn(!atBottom)
+            }
           }}
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
