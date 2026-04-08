@@ -1403,7 +1403,7 @@ function AppInner() {
         <View style={s.header}>
           <View style={s.headerLeft}>
             <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
-            <Text style={s.headerTitle}>master</Text>
+            <Text style={s.headerTitle}>dispatch</Text>
           </View>
           {chatStatus === 'streaming' ? (
             <TouchableOpacity
