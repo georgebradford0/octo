@@ -2,7 +2,7 @@ services:
   # ── Master control node ────────────────────────────────────────────────────
   # Single entry point for the mobile app.  Manages child repo containers via
   # the Docker socket.  Scan its QR code once; child containers appear in-app.
-  master:
+  rulyeh:
     build:
       context: .
       dockerfile: rulyeh/Dockerfile
