@@ -518,6 +518,7 @@ You have full bash access with the Docker socket available.\n\n\
 Standard child image: ghcr.io/georgebradford0/claudulhu-server:latest\n\n\
 When creating child containers use:\n\
   --network claudulhu-net\n\
+  -p ${NOISE_PORT}:${NOISE_PORT}\n\
   --label claudulhu.managed=1\n\
   --label claudulhu.git_url=<url>\n\
   NOISE_PORT set to a free port in CHILD_PORT_RANGE (default 9100-9199)\n\

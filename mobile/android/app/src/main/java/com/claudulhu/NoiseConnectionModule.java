@@ -82,8 +82,12 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
                 serverStaticPub = pk;
 
                 ServerSocket ss = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+                // Install the new server socket and close the old one atomically so
+                // the previous acceptLoop unblocks and exits without a separate disconnect().
+                ServerSocket old = localServer;
                 localServer = ss;
                 running.set(true);
+                if (old != null) { try { old.close(); } catch (IOException ignored) {} }
 
                 new Thread(() -> acceptLoop(ss), "NoiseAccept").start();
 

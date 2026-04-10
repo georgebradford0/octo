@@ -1149,8 +1149,6 @@ function ChildChatScreen({ child, onClose }: {
   }, [])
 
   const handleBack = useCallback(() => {
-    // Clear the child's session before navigating away, then close.
-    clearRef.current()
     onClose()
   }, [onClose])
 

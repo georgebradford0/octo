@@ -316,9 +316,15 @@ final class NoiseConnection: NSObject {
                 guard fd >= 0, localPort > 0 else { throw NoiseError.ioError }
 
                 self.stateLock.lock()
+                let oldFd = self.listenFd
                 self.listenFd = fd
                 self.active   = true
                 self.stateLock.unlock()
+
+                // Close the old listen socket (if any) after installing the new one.
+                // This unblocks the previous acceptLoop's Darwin.accept() call, causing
+                // it to exit cleanly, without needing a separate disconnect() call first.
+                if oldFd >= 0 { Darwin.close(oldFd) }
 
                 DispatchQueue.global(qos: .utility).async { [weak self] in self?.acceptLoop(fd: fd) }
 
