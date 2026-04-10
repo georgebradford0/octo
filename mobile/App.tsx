@@ -234,6 +234,12 @@ function parseAtQuery(text: string): { atIndex: number; dirPart: string; filePar
     : { atIndex, dirPart: query.slice(0, lastSlash + 1), filePart: query.slice(lastSlash + 1) }
 }
 
+// ── Container display name ─────────────────────────────────────────────────────
+
+function containerDisplayName(name: string): string {
+  return name.replace(/^claudulhu-/, '')
+}
+
 // ── Tool call formatting ───────────────────────────────────────────────────────
 
 function formatToolCall(name: string, input?: Record<string, unknown>): string {
@@ -1196,7 +1202,7 @@ function ChildChatScreen({ child, onClose }: {
             </TouchableOpacity>
             <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
             <View>
-              <Text style={s.headerTitle}>{child.name}</Text>
+              <Text style={s.headerTitle}>{containerDisplayName(child.name)}</Text>
             </View>
           </View>
           {chatStatus === 'streaming' ? (
@@ -1482,7 +1488,7 @@ function AppInner() {
                     backgroundColor: c.status === 'running' ? C.green : C.textMuted,
                   }]} />
                   <View style={{ flex: 1 }}>
-                    <Text style={s.containerMenuItemName}>{c.name}</Text>
+                    <Text style={s.containerMenuItemName}>{containerDisplayName(c.name)}</Text>
                     {c.git_url ? <Text style={s.containerMenuItemUrl} numberOfLines={1}>{c.git_url}</Text> : null}
                   </View>
                   <Text style={s.containerMenuItemStatus}>{c.status}</Text>
