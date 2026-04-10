@@ -31,12 +31,19 @@ RUN cargo build --release -p claudulhu-server
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
-    git \
-    qrencode \
     ca-certificates \
     curl \
+    git \
+    gnupg \
     nodejs \
     npm \
+    qrencode \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /etc/apt/keyrings/githubcli.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/claudulhu-server /usr/local/bin/claudulhu-server
