@@ -88,8 +88,9 @@ enum WsFrame {
     SessionEnd   { summary: String, live_gen: usize },
     Ack          { live_gen: usize },
     // Master-specific frames
-    ContainerList   { containers: Vec<ContainerInfo> },
-    ContainerStatus { id: String, name: String, status: String },
+    ContainerList       { containers: Vec<ContainerInfo> },
+    ContainerStatus     { id: String, name: String, status: String },
+    ContainerStartError { id: String, message: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -369,7 +370,9 @@ async fn chat_ws_handler(
                         containers.iter().find(|c| c.id == id).map(|c| c.name.clone())
                     };
                     if let Some(name) = name {
-                        let trigger = state.poll_trigger.clone();
+                        let trigger  = state.poll_trigger.clone();
+                        let tx       = ws_tx.clone();
+                        let id_clone = id.clone();
                         tokio::spawn(async move {
                             println!("[containers] starting container {name}");
                             let result = tokio::process::Command::new("docker")
@@ -382,13 +385,31 @@ async fn chat_ws_handler(
                                     tokio::time::sleep(Duration::from_secs(3)).await;
                                     trigger.notify_one();
                                 }
-                                Ok(out) => eprintln!("[containers] docker start failed: {}",
-                                    String::from_utf8_lossy(&out.stderr)),
-                                Err(e)  => eprintln!("[containers] docker start error: {e}"),
+                                Ok(out) => {
+                                    let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                                    let msg = if msg.is_empty() { "docker start failed".to_string() } else { msg };
+                                    eprintln!("[containers] docker start failed: {msg}");
+                                    let frame = serde_json::to_string(&WsFrame::ContainerStartError {
+                                        id: id_clone, message: msg,
+                                    }).unwrap_or_default();
+                                    tx.send(frame).await.ok();
+                                }
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    eprintln!("[containers] docker start error: {msg}");
+                                    let frame = serde_json::to_string(&WsFrame::ContainerStartError {
+                                        id: id_clone, message: msg,
+                                    }).unwrap_or_default();
+                                    tx.send(frame).await.ok();
+                                }
                             }
                         });
                     } else {
                         eprintln!("[containers] start_container: id {id} not found");
+                        let frame = serde_json::to_string(&WsFrame::ContainerStartError {
+                            id, message: "container not found".to_string(),
+                        }).unwrap_or_default();
+                        ws_tx.send(frame).await.ok();
                     }
                 }
 

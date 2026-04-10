@@ -55,8 +55,9 @@ type ServerFrame =
   | { type: 'ack';              live_gen: number }
   | { type: 'session_start';    label: string; session_id: string; live_gen: number }
   | { type: 'session_end';      summary: string;     live_gen: number }
-  | { type: 'container_list';   containers: ContainerInfo[] }
-  | { type: 'container_status'; id: string; name: string; status: string }
+  | { type: 'container_list';        containers: ContainerInfo[] }
+  | { type: 'container_status';      id: string; name: string; status: string }
+  | { type: 'container_start_error'; id: string; message: string }
 
 interface HistMsg { role: 'user' | 'assistant'; text: string }
 
@@ -595,7 +596,7 @@ const ChatPane = memo(function ChatPane({
         if (frame.type !== 'token') console.log(`[ws] frame: ${JSON.stringify(frame).slice(0, 200)}`)
 
         // Route master-specific frames to AppInner without touching chat state.
-        if (frame.type === 'container_list' || frame.type === 'container_status') {
+        if (frame.type === 'container_list' || frame.type === 'container_status' || frame.type === 'container_start_error') {
           onContainerFrame?.(frame)
           return
         }
@@ -1232,6 +1233,7 @@ function AppInner() {
   const [activeChild,          setActiveChild]          = useState<ContainerInfo | null>(null)
   const [showSettingsMenu,     setShowSettingsMenu]     = useState(false)
   const [startingContainerId,  setStartingContainerId]  = useState<string | null>(null)
+  const [startingError,        setStartingError]        = useState<string | null>(null)
   const startingContainerIdRef = useRef<string | null>(null)
   const masterSendRef          = useRef<(msg: object) => void>(() => {})
   // Incrementing this forces the master Noise tunnel effect to re-run and
@@ -1335,6 +1337,7 @@ function AppInner() {
         if (started) {
           startingContainerIdRef.current = null
           setStartingContainerId(null)
+          setStartingError(null)
           setActiveChild(started)
         }
       }
@@ -1342,6 +1345,10 @@ function AppInner() {
       setContainers(prev => prev.map(c =>
         c.id === frame.id ? { ...c, status: frame.status } : c
       ))
+    } else if (frame.type === 'container_start_error') {
+      if (frame.id === startingContainerIdRef.current) {
+        setStartingError(frame.message)
+      }
     }
   }, [])
 
@@ -1445,6 +1452,7 @@ function AppInner() {
                     } else {
                       startingContainerIdRef.current = c.id
                       setStartingContainerId(c.id)
+                      setStartingError(null)
                       masterSendRef.current({ type: 'start_container', id: c.id })
                     }
                   }}
@@ -1497,16 +1505,26 @@ function AppInner() {
 
         {startingContainerId !== null && (
           <View style={s.startingOverlay}>
-            <ActivityIndicator color={C.accent} size="large" />
-            <Text style={s.startingText}>Starting container...</Text>
+            {startingError ? (
+              <>
+                <Text style={s.startingErrorText}>Failed to start container</Text>
+                <Text style={s.startingErrorDetail}>{startingError}</Text>
+              </>
+            ) : (
+              <>
+                <ActivityIndicator color={C.accent} size="large" />
+                <Text style={s.startingText}>Starting container...</Text>
+              </>
+            )}
             <TouchableOpacity
               style={s.startingCancelBtn}
               onPress={() => {
                 startingContainerIdRef.current = null
                 setStartingContainerId(null)
+                setStartingError(null)
               }}
             >
-              <Text style={s.startingCancelText}>cancel</Text>
+              <Text style={s.startingCancelText}>{startingError ? 'dismiss' : 'cancel'}</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -1542,10 +1560,12 @@ const s = StyleSheet.create({
 
   // QR scanner
   creatureImg:       { width: 120, height: 120, borderRadius: 26, marginBottom: 12 },
-  startingOverlay:   { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  startingText:      { fontSize: 15, color: C.textSecondary, fontFamily: ARIMO },
-  startingCancelBtn: { marginTop: 8, paddingVertical: 10, paddingHorizontal: 28, borderRadius: 10, borderWidth: 1, borderColor: C.border },
-  startingCancelText:{ fontSize: 15, color: C.textPrimary, fontFamily: ARIMO },
+  startingOverlay:    { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', gap: 16, paddingHorizontal: 32 },
+  startingText:       { fontSize: 15, color: C.textSecondary, fontFamily: ARIMO },
+  startingErrorText:  { fontSize: 16, fontWeight: '600', color: C.red, fontFamily: ARIMO, textAlign: 'center' },
+  startingErrorDetail:{ fontSize: 13, color: C.textSecondary, fontFamily: ARIMO, textAlign: 'center', lineHeight: 18 },
+  startingCancelBtn:  { marginTop: 8, paddingVertical: 10, paddingHorizontal: 28, borderRadius: 10, borderWidth: 1, borderColor: C.border },
+  startingCancelText: { fontSize: 15, color: C.textPrimary, fontFamily: ARIMO },
   scannerFull:       { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
   scannerOverlay:    { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60 },
   scannerTopBar:     { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
