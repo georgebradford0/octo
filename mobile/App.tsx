@@ -932,7 +932,8 @@ const ChatPane = memo(function ChatPane({
   }, [wsUrl, connKey])
 
   // When app foregrounds: force-close WS so onclose fires and we reconnect.
-  // (Noise tunnel re-establishment is handled by AppInner.)
+  // (Noise tunnel re-establishment is handled by AppInner for the master
+  // connection, and by ChildChatScreen for child connections.)
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
@@ -1155,6 +1156,25 @@ function ChildChatScreen({ child, onClose }: {
       NoiseConnection.disconnect()
     }
   }, [])
+
+  // Re-establish child Noise tunnel when app returns to foreground (the native
+  // TCP proxy is killed during suspension, so the WS reconnect would otherwise
+  // silently fail — same logic as AppInner does for the master tunnel).
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', nextState => {
+      if (nextState === 'active') {
+        console.log('[child-noise] app foregrounded — re-establishing tunnel')
+        NoiseConnection.disconnect()
+        NoiseConnection.connect(child.host, child.port, child.pubkey)
+          .then(port => {
+            console.log(`[child-noise] tunnel re-established → local port ${port}`)
+            setChildTunnelPort(port)
+          })
+          .catch(e => console.error(`[child-noise] reconnect failed: ${e?.message ?? e}`))
+      }
+    })
+    return () => sub.remove()
+  }, [child.host, child.port, child.pubkey])
 
   const handleBack = useCallback(() => {
     onClose()
