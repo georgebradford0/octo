@@ -26,6 +26,13 @@ NOISE_PORT="${NOISE_PORT:-9000}"
 CLAUDULHU_DATA_DIR="${CLAUDULHU_DATA_DIR:-/data}"
 mkdir -p "$CLAUDULHU_DATA_DIR"
 
+# ── Startup script ────────────────────────────────────────────────────────────
+if [ -n "$STARTUP_SCRIPT" ]; then
+    echo "[claudulhu-rulyeh] Running STARTUP_SCRIPT..."
+    printf '%s' "$STARTUP_SCRIPT" | bash
+    echo "[claudulhu-rulyeh] STARTUP_SCRIPT complete."
+fi
+
 # ── Docker network ────────────────────────────────────────────────────────────
 # Create the shared bridge network for master ↔ child container communication.
 docker network create claudulhu-net 2>/dev/null || true

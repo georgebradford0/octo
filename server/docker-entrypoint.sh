@@ -83,6 +83,13 @@ printf '{"repo":"%s","name":"%s"}\n' "$WORKSPACE" "$REPO_NAME" > "$CLAUDULHU_DAT
 
 echo "[claudulhu] Starting server (repo: $WORKSPACE)"
 
+# ── Startup script ────────────────────────────────────────────────────────────
+if [ -n "$STARTUP_SCRIPT" ]; then
+    echo "[claudulhu] Running STARTUP_SCRIPT..."
+    printf '%s' "$STARTUP_SCRIPT" | bash
+    echo "[claudulhu] STARTUP_SCRIPT complete."
+fi
+
 # ── Start server, then print QR once it is listening ─────────────────────────
 # Run the server in the background, tee its output to stdout, and watch for
 # the sentinel line it emits after both listeners are bound.  Only then print

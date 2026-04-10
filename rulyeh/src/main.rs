@@ -579,12 +579,14 @@ When creating child containers use:\n\
   NOISE_PORT set to a free port in CHILD_PORT_RANGE (default 9100-9199)\n\
   Named volumes for /data and /workspace\n\
   Required env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN\n\
+  Optional env vars: STARTUP_SCRIPT (bash script run at container start before the server)\n\
   IMPORTANT: Always check that $GH_TOKEN is set before creating a child container.\n\
   If it is not set, do not create the container — tell the user GH_TOKEN is required.\n\
   When it is set, always pass these env vars to every child container:\n\
     -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY\n\
     -e GH_TOKEN=$GH_TOKEN\n\
-    -e PUBLIC_HOST=$PUBLIC_HOST\n\n\
+    -e PUBLIC_HOST=$PUBLIC_HOST\n\
+  If the user provides a startup script, pass it as -e STARTUP_SCRIPT='<script>'\n\n\
 Use bash freely: docker ps, docker start/stop/rm, docker logs, docker inspect, \
 and any other system commands.\n\n\
 Do not narrate or comment while working. Perform all tool calls silently. \
