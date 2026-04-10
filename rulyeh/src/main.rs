@@ -21,7 +21,7 @@ use axum::{
 };
 use claudulhu_core::{
     init_mcp_pool, init_shell_env, load_or_generate_keypair, resolve_api_key, run_agentic_loop,
-    run_noise_proxy, to_base32, ApiMessage, ChatEvent, ContentBlock, Session,
+    run_noise_proxy, run_startup_prompt, to_base32, ApiMessage, ChatEvent, ContentBlock, Session,
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -580,13 +580,15 @@ When creating child containers use:\n\
   Named volumes for /data and /workspace\n\
   Required env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN\n\
   Optional env vars: STARTUP_SCRIPT (bash script run at container start before the server)\n\
+                     STARTUP_PROMPT (plain-text prompt run through the agentic loop before accepting connections)\n\
   IMPORTANT: Always check that $GH_TOKEN is set before creating a child container.\n\
   If it is not set, do not create the container — tell the user GH_TOKEN is required.\n\
   When it is set, always pass these env vars to every child container:\n\
     -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY\n\
     -e GH_TOKEN=$GH_TOKEN\n\
     -e PUBLIC_HOST=$PUBLIC_HOST\n\
-  If the user provides a startup script, pass it as -e STARTUP_SCRIPT='<script>'\n\n\
+  If the user provides a startup script, pass it as -e STARTUP_SCRIPT='<script>'\n\
+  If the user provides a startup prompt, pass it as -e STARTUP_PROMPT='<prompt>'\n\n\
 Use bash freely: docker ps, docker start/stop/rm, docker logs, docker inspect, \
 and any other system commands.\n\n\
 Do not narrate or comment while working. Perform all tool calls silently. \
@@ -664,6 +666,15 @@ async fn main() {
 
     // Background container poller.
     tokio::spawn(poll_containers(state.clone()));
+
+    // ── Startup prompt ────────────────────────────────────────────────────────
+    if let Ok(prompt) = std::env::var("STARTUP_PROMPT") {
+        if !prompt.trim().is_empty() {
+            let api_key = resolve_api_key().expect("ANTHROPIC_API_KEY required for STARTUP_PROMPT");
+            let model   = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-opus-4-5".to_string());
+            run_startup_prompt(&prompt, state.session.clone(), &api_key, &model).await;
+        }
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

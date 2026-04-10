@@ -17,7 +17,7 @@ use axum::{
 use claudulhu_core::{
     build_system_prompt, effective_repo, get_branches_for_repo, init_mcp_pool, init_shell_env,
     load_or_generate_keypair, read_config, resolve_api_key, run_agentic_loop, run_noise_proxy,
-    to_base32, write_config, ApiMessage, ChatEvent, Config, ContentBlock, Session,
+    run_startup_prompt, to_base32, write_config, ApiMessage, ChatEvent, Config, ContentBlock, Session,
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -500,6 +500,15 @@ async fn main() {
             notify: Notify::new(),
         }),
     });
+
+    // ── Startup prompt ────────────────────────────────────────────────────────
+    if let Ok(prompt) = std::env::var("STARTUP_PROMPT") {
+        if !prompt.trim().is_empty() {
+            let api_key = resolve_api_key().expect("ANTHROPIC_API_KEY required for STARTUP_PROMPT");
+            let model   = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-opus-4-5".to_string());
+            run_startup_prompt(&prompt, state.session.clone(), &api_key, &model).await;
+        }
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

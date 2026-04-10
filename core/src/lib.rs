@@ -1187,6 +1187,60 @@ pub async fn run_agentic_loop(
     }
 }
 
+// ── Startup Prompt ────────────────────────────────────────────────────────────
+
+/// Run the agentic loop once with `prompt` as the sole user message, logging
+/// all output to stdout.  Returns when the loop completes (or errors).
+/// Intended to be called at container startup before accepting connections.
+pub async fn run_startup_prompt(
+    prompt:  &str,
+    session: Arc<Mutex<Session>>,
+    api_key: &str,
+    model:   &str,
+) {
+    println!("[claudulhu] Running STARTUP_PROMPT...");
+
+    // Inject the user message into the session.
+    {
+        let mut s = session.lock().unwrap();
+        s.messages.push(ApiMessage {
+            role:    "user".to_string(),
+            content: vec![ContentBlock::Text { text: prompt.to_string() }],
+        });
+    }
+
+    let (tx, mut rx) = mpsc::channel::<ChatEvent>(256);
+    let session_c = session.clone();
+    let api_key_s = api_key.to_string();
+    let model_s   = model.to_string();
+
+    let handle = tokio::spawn(async move {
+        run_agentic_loop(session_c, "startup".to_string(), api_key_s, model_s, tx).await;
+    });
+
+    // Drain events, printing them so they appear in `docker logs`.
+    while let Some(event) = rx.recv().await {
+        match &event {
+            ChatEvent::Text { text } => print!("{text}"),
+            ChatEvent::ToolUse { tool, input } => {
+                println!("\n[startup] tool: {tool} {input}");
+            }
+            ChatEvent::ToolResult { content, .. } => {
+                println!("[startup] result: {content}");
+            }
+            ChatEvent::Error { message } => {
+                eprintln!("[startup] error: {message}");
+            }
+            ChatEvent::Result { cost_usd, turns, .. } => {
+                println!("\n[claudulhu] STARTUP_PROMPT complete ({turns} turns, ${cost_usd:.4})");
+            }
+            _ => {}
+        }
+    }
+
+    let _ = handle.await;
+}
+
 // ── System Prompt ─────────────────────────────────────────────────────────────
 
 pub fn build_system_prompt(repo_path: &str, branch: Option<&str>, worktree_path: Option<&str>) -> String {
