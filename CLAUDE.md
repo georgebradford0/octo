@@ -90,6 +90,10 @@ Image: `ghcr.io/georgebradford0/claudulhu-rulyeh`
 | `PUBLIC_HOST` | no | Advertised host in QR (auto-detected if unset) |
 | `NOISE_PORT` | no | Listening port (default: 9000) |
 
+### server (child container) runtime tools
+
+The child container image (`ghcr.io/georgebradford0/claudulhu-server`) ships with `gh` pre-installed. When `GH_TOKEN` is set, `gh` is immediately usable inside the container without a separate `gh auth login`.
+
 ### server (child container) environment variables
 
 | Variable | Required | Purpose |
