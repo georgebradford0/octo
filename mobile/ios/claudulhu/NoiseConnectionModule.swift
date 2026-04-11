@@ -285,9 +285,6 @@ private func connectSocket(host: String, port: Int) -> Int32 {
 final class NoiseConnection: NSObject {
 
     private var listenFd: Int32 = -1
-    private var remoteHost = ""
-    private var remotePort = 0
-    private var remotePub  = Data()
     private let stateLock  = NSLock()
     private var active     = false
 
@@ -313,10 +310,6 @@ final class NoiseConnection: NSObject {
                     reject("NOISE_ERROR", "serverPubKey must be a 52-char base32 Curve25519 key", nil)
                     return
                 }
-                self.remoteHost = host
-                self.remotePort = Int(port)
-                self.remotePub  = pk
-
                 let (fd, localPort) = makeServerSocket()
                 guard fd >= 0, localPort > 0 else { throw NoiseError.ioError }
 
@@ -331,7 +324,7 @@ final class NoiseConnection: NSObject {
                 // it to exit cleanly, without needing a separate disconnect() call first.
                 if oldFd >= 0 { Darwin.close(oldFd) }
 
-                DispatchQueue.global(qos: .utility).async { [weak self] in self?.acceptLoop(fd: fd) }
+                DispatchQueue.global(qos: .utility).async { [weak self] in self?.acceptLoop(fd: fd, host: host, port: Int(port), serverPub: pk) }
 
                 resolve(localPort)
             } catch {
@@ -356,15 +349,14 @@ final class NoiseConnection: NSObject {
         fds.forEach { Darwin.close($0) }
     }
 
-    private func acceptLoop(fd: Int32) {
+    private func acceptLoop(fd: Int32, host: String, port: Int, serverPub: Data) {
         while true {
             stateLock.lock(); let alive = active; stateLock.unlock()
             guard alive else { break }
             let clientFd = Darwin.accept(fd, nil, nil)
             if clientFd < 0 { break }
-            let h = remoteHost; let p = remotePort; let pk = remotePub
             DispatchQueue.global(qos: .utility).async {
-                self.proxyConnection(localFd: clientFd, host: h, port: p, serverPub: pk)
+                self.proxyConnection(localFd: clientFd, host: host, port: port, serverPub: serverPub)
             }
         }
     }

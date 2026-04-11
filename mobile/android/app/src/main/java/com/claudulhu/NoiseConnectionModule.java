@@ -55,9 +55,6 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
             "Noise_XX_25519_ChaChaPoly_SHA256".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
     @Nullable private volatile ServerSocket localServer = null;
-    @Nullable private volatile String remoteHost = null;
-    private volatile int remotePort = 0;
-    @Nullable private volatile byte[] serverStaticPub = null;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
 
@@ -82,10 +79,6 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
                     return;
                 }
 
-                remoteHost = host;
-                remotePort = (int) port;
-                serverStaticPub = pk;
-
                 ServerSocket ss = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
                 // Install the new server socket and close the old one atomically so
                 // the previous acceptLoop unblocks and exits without a separate disconnect().
@@ -94,7 +87,7 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
                 running.set(true);
                 if (old != null) { try { old.close(); } catch (IOException ignored) {} }
 
-                new Thread(() -> acceptLoop(ss), "NoiseAccept").start();
+                new Thread(() -> acceptLoop(ss, host, (int) port, pk), "NoiseAccept").start();
 
                 promise.resolve(ss.getLocalPort());
             } catch (Throwable t) {
@@ -120,11 +113,11 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
 
     // ─── Accept loop ──────────────────────────────────────────────────────────
 
-    private void acceptLoop(ServerSocket ss) {
+    private void acceptLoop(ServerSocket ss, String host, int port, byte[] serverPub) {
         while (running.get()) {
             try {
                 Socket local = ss.accept();
-                new Thread(() -> proxy(local), "NoiseProxy").start();
+                new Thread(() -> proxy(local, host, port, serverPub), "NoiseProxy").start();
             } catch (IOException e) {
                 if (running.get()) Log.e(TAG, "accept error", e);
                 break;
@@ -134,18 +127,18 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
 
     // ─── Per-connection proxy ─────────────────────────────────────────────────
 
-    private void proxy(Socket local) {
+    private void proxy(Socket local, String host, int port, byte[] serverPub) {
         proxySockets.add(local);
         Socket remote = null;
         try {
-            remote = new Socket(remoteHost, remotePort);
+            remote = new Socket(host, port);
             proxySockets.add(remote);
             remote.setTcpNoDelay(true);
 
             InputStream  ris = remote.getInputStream();
             OutputStream ros = remote.getOutputStream();
 
-            NoiseTransport noise = handshake(ris, ros);
+            NoiseTransport noise = handshake(ris, ros, serverPub);
 
             // After handshake the two directions are independent; use separate threads.
             final Socket   rFinal = remote;
@@ -207,7 +200,7 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
 
     // ─── Noise_XX Handshake (Initiator) ──────────────────────────────────────
 
-    private NoiseTransport handshake(InputStream ris, OutputStream ros) throws Exception {
+    private NoiseTransport handshake(InputStream ris, OutputStream ros, byte[] serverPub) throws Exception {
         // State
         byte[] h  = Arrays.copyOf(PROTOCOL_NAME, 32); // exactly 32 bytes
         byte[] ck = Arrays.copyOf(h, 32);
@@ -251,7 +244,7 @@ public class NoiseConnectionModule extends NativeNoiseConnectionSpec {
         h = mixHash(h, encRs);
 
         // Verify the decrypted server static pubkey against what was in the QR
-        if (!Arrays.equals(rsPub, serverStaticPub)) {
+        if (!Arrays.equals(rsPub, serverPub)) {
             throw new Exception("Server identity mismatch — wrong server or MITM attack");
         }
 
