@@ -656,27 +656,20 @@ const ChatPane = memo(function ChatPane({
                 // Collect any client-only bubbles that precede the next
                 // server-matched anchor in local.
                 //
-                // A message is considered client-only (will never appear in
-                // the server history frame) if:
-                //   • Its role is 'session' or 'tool' (always client-only), OR
-                //   • Its role is 'assistant' AND we have already seen a
-                //     'session' bubble in the current pending run — such an
-                //     assistant message is the session_end summary, which the
-                //     server never includes in history because the agentic
-                //     assistant turn has only tool-use blocks (no text).
+                // Only 'session' and 'tool' role bubbles are client-only —
+                // they are never sent in the server's history frame.
                 //
-                // Regular (non-agentic) assistant replies DO appear in server
-                // history and must NOT be swallowed here.
+                // IMPORTANT: 'assistant' messages (including session_end
+                // summaries) are NOT client-only. When an assistant turn
+                // includes text, the server records that text in conversation
+                // history and sends it back in the history frame.  Treating
+                // the local assistant bubble as client-only caused it to be
+                // swallowed into pending, then emitted alongside a fresh copy
+                // from base — producing the visible duplication.
                 const pending: Message[] = []
-                let sawSession = false
                 while (li < local.length) {
                   const lm = local[li]
                   if (lm.role === 'session' || lm.role === 'tool') {
-                    sawSession = true
-                    pending.push(lm)
-                    li++
-                  } else if (lm.role === 'assistant' && sawSession) {
-                    // session_end summary following a session bubble — client-only
                     pending.push(lm)
                     li++
                   } else {
