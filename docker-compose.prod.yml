@@ -2,7 +2,3 @@ services:
   rulyeh:
     build: !reset null
     image: ghcr.io/georgebradford0/claudulhu-rulyeh:latest
-
-networks:
-  claudulhu-net:
-    external: true
