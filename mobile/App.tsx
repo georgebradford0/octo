@@ -531,6 +531,7 @@ const ChatPane = memo(function ChatPane({
   // 'session_start', cleared on 'session_end' / 'done' / 'error'.
   const currentSessionIdRef = useRef<string | null>(null)
 
+
   // Fetch @ completions whenever the input changes.
   useEffect(() => {
     const parsed = parseAtQuery(input)
@@ -581,7 +582,6 @@ const ChatPane = memo(function ChatPane({
       // race with the new connection's frames (they would share the same
       // live_gen and bypass the stale-frame guard).
       wsRef.current?.close()
-      console.log(`[ws] connecting to ${wsUrl} (storageLoaded=${storageLoadedRef.current})`)
       updateStatus('connecting')
       // Clear stale session ID so the token/tool fallback path can create a
       // fresh session bubble if the server is mid-stream on reconnect.
@@ -592,14 +592,13 @@ const ChatPane = memo(function ChatPane({
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
-      ws.onopen = () => console.log('[ws] opened')
+      ws.onopen = () => {}
 
       ws.onmessage = ({ data }: { data: string }) => {
         if (cancelled || connEpochRef.current !== myEpoch) return
         let frame: ServerFrame
         try { frame = JSON.parse(data as string) } catch { return }
 
-        if (frame.type !== 'token') console.log(`[ws] frame: ${JSON.stringify(frame).slice(0, 200)}`)
 
         // Route master-specific frames to AppInner without touching chat state.
         if (frame.type === 'container_list' || frame.type === 'container_status' || frame.type === 'container_start_error') {
@@ -779,7 +778,6 @@ const ChatPane = memo(function ChatPane({
             // stale bubble (matched by sessionId) before appending the new one
             // so we don't end up with two session bubbles for the same session.
             const sid = uid()
-            console.log(`[session] new bubble id=${sid} sessionId=${frame.session_id}`)
             currentSessionIdRef.current = sid
             setMessages(prev => [
               ...prev.filter(m => m.sessionId !== frame.session_id),
@@ -900,33 +898,28 @@ const ChatPane = memo(function ChatPane({
 
       ws.onerror = (e: Event) => {
         if (cancelled) return
-        console.error('[ws] error', e)
         updateStatus('error')
       }
 
       ws.onclose = (e: CloseEvent) => {
         if (cancelled) return
-        console.log(`[ws] closed code=${e.code} reason=${e.reason}`)
         updateStatus('connecting')
         reconnectTimer = setTimeout(connect, 1500)
       }
     }
 
     if (!storageLoadedRef.current) {
-      console.log('[ws] loading AsyncStorage before first connect')
       Promise.all([
         AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
         AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
       ]).then(([msgsJson, pendingText]) => {
         if (cancelled) return
         storageLoadedRef.current = true
-        console.log(`[ws] storage loaded msgs=${!!msgsJson} pending=${!!pendingText}`)
         if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
         if (pendingText) pendingMsgRef.current = pendingText
         connect()
       })
     } else {
-      console.log('[ws] skipping AsyncStorage reload — using in-memory messages')
       connect()
     }
 
@@ -964,18 +957,9 @@ const ChatPane = memo(function ChatPane({
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
-    console.log(`[send] attempt text=${JSON.stringify(text)} status=${status}`)
-    if (!text || status === 'streaming') {
-      console.log(`[send] blocked — text empty: ${!text}, streaming: ${status === 'streaming'}`)
-      return
-    }
+    if (!text || status === 'streaming') return
     const ws = wsRef.current
-    const readyState = ws?.readyState ?? -1
-    console.log(`[send] ws readyState=${readyState}`)
-    if (!ws || readyState !== WebSocket.OPEN) {
-      console.log(`[send] blocked — ws not open (readyState=${readyState})`)
-      return
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
 
     // Reset session state for this new turn.
     currentSessionIdRef.current = null
@@ -987,23 +971,18 @@ const ChatPane = memo(function ChatPane({
     isAtBottomRef.current = true
 
     if (pendingQuestion) {
-      const payload = JSON.stringify({ type: 'answer', answer: text })
-      console.log(`[send] sending answer: ${payload}`)
-      ws.send(payload)
+      ws.send(JSON.stringify({ type: 'answer', answer: text }))
       setPendingQuestion(false)
     } else {
       // Persist before sending so a dropped connection doesn't silently lose
       // the message.  Cleared on ack from server or confirmed in next history.
       pendingMsgRef.current = text
       AsyncStorage.setItem(`pending_${connKey}`, text).catch(() => {})
-      const payload = JSON.stringify({ type: 'message', text })
-      console.log(`[send] sending message: ${payload}`)
-      ws.send(payload)
+      ws.send(JSON.stringify({ type: 'message', text }))
     }
     updateStatus('streaming')
 
     setInput('')
-    console.log(`[send] done`)
   }, [input, pendingQuestion, status])
 
   sendMessageRef.current = sendMessage
@@ -1145,18 +1124,9 @@ function ChildChatScreen({ child, onClose }: {
   useEffect(() => {
     let cancelled = false
     NoiseConnection.disconnect()
-    console.log(`[child-noise] connecting to ${child.host}:${child.port}`)
     NoiseConnection.connect(child.host, child.port, child.pubkey)
-      .then(port => {
-        if (cancelled) return
-        console.log(`[child-noise] tunnel established → local port ${port}`)
-        setChildTunnelPort(port)
-      })
-      .catch(e => {
-        if (cancelled) return
-        console.error(`[child-noise] connect failed: ${e?.message ?? e}`)
-        setTunnelError(e?.message ?? String(e))
-      })
+      .then(port => { if (!cancelled) setChildTunnelPort(port) })
+      .catch(e => { if (!cancelled) setTunnelError(e?.message ?? String(e)) })
     return () => {
       cancelled = true
       NoiseConnection.disconnect()
@@ -1169,14 +1139,10 @@ function ChildChatScreen({ child, onClose }: {
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
-        console.log('[child-noise] app foregrounded — re-establishing tunnel')
         NoiseConnection.disconnect()
         NoiseConnection.connect(child.host, child.port, child.pubkey)
-          .then(port => {
-            console.log(`[child-noise] tunnel re-established → local port ${port}`)
-            setChildTunnelPort(port)
-          })
-          .catch(e => console.error(`[child-noise] reconnect failed: ${e?.message ?? e}`))
+          .then(port => setChildTunnelPort(port))
+          .catch(() => {})
       }
     })
     return () => sub.remove()
@@ -1293,18 +1259,9 @@ function AppInner() {
     if (!conn) return
     let connected = false
     const timer = setTimeout(() => {
-      console.log(`[noise] connecting to ${conn.host}:${conn.port} pk=${conn.pk.slice(0, 8)}…`)
       NoiseConnection.connect(conn.host, conn.port, conn.pk)
-        .then(port => {
-          console.log(`[noise] tunnel established → local port ${port}`)
-          connected = true
-          setTunnelPort(port)
-        })
-        .catch(e => {
-          const msg = e?.message ?? String(e)
-          console.error(`[noise] connect failed: ${msg}`)
-          setTunnelError(msg)
-        })
+        .then(port => { connected = true; setTunnelPort(port) })
+        .catch(e => setTunnelError(e?.message ?? String(e)))
     }, 50)
     return () => {
       clearTimeout(timer)
@@ -1318,14 +1275,10 @@ function AppInner() {
     if (!conn) return
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
-        console.log('[noise] app foregrounded — re-establishing tunnel')
         NoiseConnection.disconnect()
         NoiseConnection.connect(conn.host, conn.port, conn.pk)
-          .then(port => {
-            console.log(`[noise] tunnel re-established → local port ${port}`)
-            setTunnelPort(port)
-          })
-          .catch(e => console.error(`[noise] reconnect failed: ${e?.message ?? e}`))
+          .then(port => setTunnelPort(port))
+          .catch(() => {})
       }
     })
     return () => sub.remove()

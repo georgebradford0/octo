@@ -257,7 +257,7 @@ async fn chat_ws_handler(
                     }
                 }
             }
-            let history = WsFrame::History { messages: hist_msgs, live_gen };
+let history = WsFrame::History { messages: hist_msgs, live_gen };
             (serde_json::to_string(&history).unwrap_or_default(), start_gen, start_idx)
         };
         ws_tx.send(history_json).await.ok();

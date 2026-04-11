@@ -1140,6 +1140,7 @@ pub async fn run_agentic_loop(
                 }
 
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
+                let mut session_ended = false;
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         // session_start / session_end are client-side signals — emit events,
@@ -1161,6 +1162,7 @@ pub async fn run_agentic_loop(
                                 tool_use_id: id.clone(),
                                 content: vec![serde_json::json!({"type":"text","text":"ok"})],
                             });
+                            session_ended = true;
                             continue;
                         }
                         let result = truncate_tool_output(
@@ -1181,6 +1183,17 @@ pub async fn run_agentic_loop(
                 {
                     let mut s = session.lock().unwrap();
                     s.messages.push(ApiMessage { role: "user".to_string(), content: tool_results });
+                }
+
+                // session_end is always the final tool call — stop here so the loop
+                // does not make another API call that would produce a redundant
+                // assistant text turn echoing the summary into session history.
+                if session_ended {
+                    let cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
+                    tx.send(ChatEvent::Result {
+                        cost_usd: cost, turns, session_id: session_id.clone(), result: None,
+                    }).await.ok();
+                    return;
                 }
             }
         }
