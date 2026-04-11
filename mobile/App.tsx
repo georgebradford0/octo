@@ -1123,13 +1123,17 @@ function ChildChatScreen({ child, onClose }: {
 
   useEffect(() => {
     let cancelled = false
-    NoiseConnection.disconnect()
-    NoiseConnection.connect(child.host, child.port, child.pubkey)
+    if (!NoiseConnection) {
+      setTunnelError('Native Noise module unavailable')
+      return
+    }
+    NoiseConnection!.disconnect()
+    NoiseConnection!.connect(child.host, child.port, child.pubkey)
       .then(port => { if (!cancelled) setChildTunnelPort(port) })
       .catch(e => { if (!cancelled) setTunnelError(e?.message ?? String(e)) })
     return () => {
       cancelled = true
-      NoiseConnection.disconnect()
+      NoiseConnection?.disconnect()
     }
   }, [])
 
@@ -1139,10 +1143,10 @@ function ChildChatScreen({ child, onClose }: {
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
-        NoiseConnection.disconnect()
-        NoiseConnection.connect(child.host, child.port, child.pubkey)
+        NoiseConnection?.disconnect()
+        NoiseConnection?.connect(child.host, child.port, child.pubkey)
           .then(port => setChildTunnelPort(port))
-          .catch(() => {})
+          .catch(e => setTunnelError(e?.message ?? String(e)))
       }
     })
     return () => sub.remove()
@@ -1213,6 +1217,32 @@ function ChildChatScreen({ child, onClose }: {
 }
 
 
+// ── ErrorBoundary ─────────────────────────────────────────────────────────────
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: string | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(e: unknown) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <View style={{ flex: 1, backgroundColor: '#EB4F0B', alignItems: 'center', justifyContent: 'center', padding: 32 }}>
+          <Text style={{ color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 12 }}>Something went wrong</Text>
+          <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 14, textAlign: 'center', lineHeight: 20 }}>{this.state.error}</Text>
+        </View>
+      )
+    }
+    return this.props.children
+  }
+}
+
 // ── AppInner ──────────────────────────────────────────────────────────────────
 
 function AppInner() {
@@ -1257,15 +1287,19 @@ function AppInner() {
     setTunnelPort(null)
     setTunnelError(null)
     if (!conn) return
+    if (!NoiseConnection) {
+      setTunnelError('Native Noise module unavailable')
+      return
+    }
     let connected = false
     const timer = setTimeout(() => {
-      NoiseConnection.connect(conn.host, conn.port, conn.pk)
+      NoiseConnection!.connect(conn.host, conn.port, conn.pk)
         .then(port => { connected = true; setTunnelPort(port) })
         .catch(e => setTunnelError(e?.message ?? String(e)))
     }, 50)
     return () => {
       clearTimeout(timer)
-      if (connected) NoiseConnection.disconnect()
+      if (connected) NoiseConnection?.disconnect()
     }
   }, [conn, noiseKey])
 
@@ -1275,10 +1309,10 @@ function AppInner() {
     if (!conn) return
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
-        NoiseConnection.disconnect()
-        NoiseConnection.connect(conn.host, conn.port, conn.pk)
+        NoiseConnection?.disconnect()
+        NoiseConnection?.connect(conn.host, conn.port, conn.pk)
           .then(port => setTunnelPort(port))
-          .catch(() => {})
+          .catch(e => setTunnelError(e?.message ?? String(e)))
       }
     })
     return () => sub.remove()
@@ -1303,7 +1337,7 @@ function AppInner() {
   const handleLogout = useCallback(async () => {
     setShowSettingsMenu(false)
     await AsyncStorage.clear().catch(() => {})
-    NoiseConnection.disconnect()
+    NoiseConnection?.disconnect()
     setConn(null)
   }, [])
 
@@ -1516,11 +1550,13 @@ function AppInner() {
 
 export default function App() {
   return (
-    <KeyboardProvider>
-      <SafeAreaProvider>
-        <AppInner />
-      </SafeAreaProvider>
-    </KeyboardProvider>
+    <ErrorBoundary>
+      <KeyboardProvider>
+        <SafeAreaProvider>
+          <AppInner />
+        </SafeAreaProvider>
+      </KeyboardProvider>
+    </ErrorBoundary>
   )
 }
 

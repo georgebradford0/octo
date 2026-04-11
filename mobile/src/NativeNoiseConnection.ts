@@ -24,6 +24,6 @@ export interface Spec extends TurboModule {
   disconnect(): void;
 }
 
-const NativeNoiseConnection = TurboModuleRegistry.getEnforcing<Spec>('NoiseConnection');
+const NativeNoiseConnection = TurboModuleRegistry.get<Spec>('NoiseConnection');
 
 export default NativeNoiseConnection;
