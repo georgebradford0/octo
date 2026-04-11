@@ -1633,7 +1633,7 @@ const s = StyleSheet.create({
   messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
   messageWrapRight: { alignItems: 'flex-end' },
   userBubble:       { backgroundColor: C.surface, borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '80%' },
-  textBlock:        { color: C.textPrimary, fontSize: 15, lineHeight: 22, fontWeight: '400', fontFamily: ARIMO },
+  textBlock:        { color: C.textPrimary, fontSize: 18, lineHeight: 26, fontWeight: '400', fontFamily: ARIMO },
   inlineCode:        { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, color: C.textPrimary, backgroundColor: C.surface, paddingHorizontal: 3, borderRadius: 3 },
   codeBlock:         { backgroundColor: C.surface, borderRadius: 6, padding: 10, marginVertical: 4 },
   codeBlockText:     { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 12, color: C.textPrimary, lineHeight: 18 },
@@ -1647,7 +1647,7 @@ const s = StyleSheet.create({
   completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   inputRow:     { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
-  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 15, lineHeight: 22, minHeight: 48, maxHeight: 140, fontFamily: ARIMO },
+  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 18, lineHeight: 26, minHeight: 48, maxHeight: 140, fontFamily: ARIMO },
   stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600', fontFamily: ARIMO },
 
   // Settings header button + dropdown
