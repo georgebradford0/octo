@@ -1026,7 +1026,7 @@ const ChatPane = memo(function ChatPane({
           data={messages}
           keyExtractor={m => m.id}
           renderItem={({ item }) => <MessageBubble message={item} />}
-          contentContainerStyle={[s.messageListContent, { paddingBottom: 8 }]}
+          contentContainerStyle={[s.messageListContent, { paddingBottom: inputAreaH + 8 }]}
           style={s.messageList}
           ListEmptyComponent={<Text style={s.emptyState}>say something</Text>}
           onContentSizeChange={() => {
@@ -1056,7 +1056,7 @@ const ChatPane = memo(function ChatPane({
           </View>
         )}
 
-        <View style={{ backgroundColor: C.surface }} onLayout={e => setInputAreaH(e.nativeEvent.layout.height)}>
+        <View style={s.inputFloat} onLayout={e => setInputAreaH(e.nativeEvent.layout.height)}>
           {completions.length > 0 && (
             <ScrollView
               style={s.completionList}
@@ -1070,23 +1070,21 @@ const ChatPane = memo(function ChatPane({
               ))}
             </ScrollView>
           )}
-          <View style={s.inputRow}>
-            <TextInput
-              style={s.input}
-              value={input}
-              onChangeText={text => {
-                if (text.includes('\n')) { sendMessageRef.current(); return }
-                setInput(text)
-              }}
-              onSubmitEditing={() => sendMessageRef.current()}
-              placeholder={pendingQuestion ? 'answer…' : 'message…'}
-              placeholderTextColor={C.textMuted}
-              multiline
-              returnKeyType="send"
-              blurOnSubmit={false}
-              editable={status !== 'streaming'}
-            />
-          </View>
+          <TextInput
+            style={s.input}
+            value={input}
+            onChangeText={text => {
+              if (text.includes('\n')) { sendMessageRef.current(); return }
+              setInput(text)
+            }}
+            onSubmitEditing={() => sendMessageRef.current()}
+            placeholder={pendingQuestion ? 'answer…' : 'message…'}
+            placeholderTextColor={C.textMuted}
+            multiline
+            returnKeyType="send"
+            blurOnSubmit={false}
+            editable={status !== 'streaming'}
+          />
         </View>
 
         {showScrollBtn && (
@@ -1646,8 +1644,8 @@ const s = StyleSheet.create({
   completionList: { maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
   completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  inputRow:     { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, paddingBottom: Platform.OS === 'android' ? 14 : 10, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.surface },
-  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 18, lineHeight: 26, minHeight: 48, maxHeight: 140, fontFamily: ARIMO },
+  inputFloat:   { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 12 },
+  input:        { backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 16, paddingVertical: 12, color: C.textPrimary, fontSize: 18, lineHeight: 26, minHeight: 48, maxHeight: 140, fontFamily: ARIMO, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
   stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600', fontFamily: ARIMO },
 
   // Settings header button + dropdown
