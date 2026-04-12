@@ -9,7 +9,7 @@ services:
     ports:
       - "${MASTER_PORT:-9000}:${MASTER_PORT:-9000}"
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY_CLAUDULHU}
       - GH_TOKEN=${GH_TOKEN:-}
       - PUBLIC_HOST=${PUBLIC_HOST:-}
       - NOISE_PORT=${MASTER_PORT:-9000}

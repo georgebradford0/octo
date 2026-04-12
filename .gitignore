@@ -6,3 +6,4 @@ mobile/android/zotik-456123-a116e792e9e6.json
 target/
 *.p8
 deploy/update_container.sh
+.env
