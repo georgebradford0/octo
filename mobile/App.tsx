@@ -536,6 +536,13 @@ const ChatPane = memo(function ChatPane({
   // 'session_start', cleared on 'session_end' / 'done' / 'error'.
   const currentSessionIdRef = useRef<string | null>(null)
 
+  // Server-assigned session UUID for the session currently being streamed.
+  // Mirrors currentSessionIdRef but holds the server's UUID rather than the
+  // local bubble id.  Stored on the session_end assistant summary so that
+  // mergeSessionBubbles can treat it as client-only (never in server history)
+  // and session_start can remove it before the live replay re-creates it.
+  const serverSessionIdRef  = useRef<string | null>(null)
+
 
   // Fetch @ completions whenever the input changes.
   useEffect(() => {
@@ -621,6 +628,7 @@ const ChatPane = memo(function ChatPane({
             // accumulated before the disconnect, which caused message duplication.
             pendingTextRef.current = ''
             currentSessionIdRef.current = null
+            serverSessionIdRef.current  = null
 
             const serverMsgs: Message[] = frame.messages.map((m, i) => ({
               id: `h${i}`, role: m.role, text: m.text,
@@ -656,20 +664,28 @@ const ChatPane = memo(function ChatPane({
                 // Collect any client-only bubbles that precede the next
                 // server-matched anchor in local.
                 //
-                // Only 'session' and 'tool' role bubbles are client-only —
-                // they are never sent in the server's history frame.
+                // Client-only bubbles are those the server never includes in
+                // its history frame:
+                //   • 'session' and 'tool' role bubbles — always client-only.
+                //   • 'assistant' bubbles that have a sessionId set — these are
+                //     session_end summaries.  The server's history only contains
+                //     ContentBlock::Text turns; a session_end assistant turn
+                //     contains only a ToolUse block and is therefore excluded by
+                //     messages_to_history.  The summary will be re-created by
+                //     the session_end live-replay frame, so it must NOT be
+                //     matched against a server base message here.
                 //
-                // IMPORTANT: 'assistant' messages (including session_end
-                // summaries) are NOT client-only. When an assistant turn
-                // includes text, the server records that text in conversation
-                // history and sends it back in the history frame.  Treating
-                // the local assistant bubble as client-only caused it to be
-                // swallowed into pending, then emitted alongside a fresh copy
-                // from base — producing the visible duplication.
+                //     NOTE: plain assistant messages from the simple-answer
+                //     path (done handler) have no sessionId and ARE in server
+                //     history — leave those for matching.
                 const pending: Message[] = []
                 while (li < local.length) {
                   const lm = local[li]
-                  if (lm.role === 'session' || lm.role === 'tool') {
+                  if (
+                    lm.role === 'session' ||
+                    lm.role === 'tool' ||
+                    (lm.role === 'assistant' && lm.sessionId != null)
+                  ) {
                     pending.push(lm)
                     li++
                   } else {
@@ -775,8 +791,11 @@ const ChatPane = memo(function ChatPane({
             // (incomplete) session bubble from local cache.  Remove any such
             // stale bubble (matched by sessionId) before appending the new one
             // so we don't end up with two session bubbles for the same session.
+            // The session_end summary also carries the same sessionId, so it
+            // is removed here too — the live replay's session_end will re-add it.
             const sid = uid()
             currentSessionIdRef.current = sid
+            serverSessionIdRef.current  = frame.session_id
             setMessages(prev => [
               ...prev.filter(m => m.sessionId !== frame.session_id),
               { id: sid, role: 'session' as const, text: '', streaming: true, label: frame.label, sessionId: frame.session_id },
@@ -785,8 +804,10 @@ const ChatPane = memo(function ChatPane({
           }
           case 'session_end': {
             if (frame.live_gen !== liveGenRef.current) break
-            const finishedSessionId = currentSessionIdRef.current
+            const finishedSessionId       = currentSessionIdRef.current
+            const finishedServerSessionId = serverSessionIdRef.current
             currentSessionIdRef.current = null
+            serverSessionIdRef.current  = null
             pendingTextRef.current = ''
             setMessages(prev => {
               const finalized = prev.map(m =>
@@ -797,8 +818,15 @@ const ChatPane = memo(function ChatPane({
               // Only append the summary bubble if there is actually summary text.
               // Sessions that only call tools with no final text response should
               // not create an empty assistant bubble.
+              // Tag with the server sessionId so mergeSessionBubbles treats it
+              // as client-only on reconnect (session_end turns are never in the
+              // server's history frame) and session_start can filter it out
+              // before the live replay re-creates it.
               return frame.summary
-                ? [...finalized, { id: uid(), role: 'assistant' as const, text: frame.summary }]
+                ? [...finalized, {
+                    id: uid(), role: 'assistant' as const, text: frame.summary,
+                    ...(finishedServerSessionId ? { sessionId: finishedServerSessionId } : {}),
+                  }]
                 : finalized
             })
             break
@@ -821,6 +849,7 @@ const ChatPane = memo(function ChatPane({
             const pendingText = pendingTextRef.current
             pendingTextRef.current = ''
             currentSessionIdRef.current = null
+            serverSessionIdRef.current  = null
             setMessages(prev => {
               // If session_end already ran, just attach cost to the last assistant message.
               // If this is a simple answer (no session), append the accumulated text now.
@@ -850,6 +879,7 @@ const ChatPane = memo(function ChatPane({
             if (frame.live_gen !== liveGenRef.current) break
             pendingTextRef.current = ''
             currentSessionIdRef.current = null
+            serverSessionIdRef.current  = null
             setMessages(prev => {
               const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
               return [...finalized, { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true }]
@@ -882,6 +912,7 @@ const ChatPane = memo(function ChatPane({
             if (frame.live_gen !== liveGenRef.current) break
             pendingTextRef.current = ''
             currentSessionIdRef.current = null
+            serverSessionIdRef.current  = null
             setMessages(prev => {
               const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
               const updated = [...finalized, { id: uid(), role: 'assistant' as const, text: `\u2717 ${frame.message}` }]
