@@ -891,6 +891,8 @@ const ChatPane = memo(function ChatPane({
           case 'tool': {
             // Discard tool frames from a stale generation.
             if (frame.live_gen !== liveGenRef.current) break
+            // session_start / session_end are housekeeping — don't clutter the log.
+            if (frame.name === 'session_start' || frame.name === 'session_end') break
             const toolLine = '\n\u25b8 ' + formatToolCall(frame.name, frame.input) + '\n'
             const sid = currentSessionIdRef.current
             if (sid) {
