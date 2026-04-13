@@ -59,6 +59,11 @@ enum WsFrame {
 struct HistMsg {
     role: String,
     text: String,
+    /// Present only when `role == "tool"` — the tool name and input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_input: Option<serde_json::Value>,
 }
 
 /// Frames sent from mobile client to server over WebSocket.
@@ -98,15 +103,40 @@ fn load_messages() -> Vec<ApiMessage> {
         .unwrap_or_default()
 }
 
-/// Convert internal API messages to the wire history format (text-only, skipping empty turns).
+/// Convert internal API messages to the wire history format.
+/// Each ApiMessage may contribute multiple HistMsgs:
+///   - Text blocks → a single `user`/`assistant` HistMsg with concatenated text.
+///   - ToolUse blocks in an assistant message → one `tool` HistMsg per block.
+/// Pure tool-result user messages (no Text content) are skipped entirely — the
+/// tool bubble on the client is driven by the preceding ToolUse block.
 fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
-    messages.iter().filter_map(|m| {
+    let mut out = Vec::new();
+    for m in messages {
+        // Collect any plain text from this message.
         let text: String = m.content.iter()
             .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
             .collect();
-        if text.is_empty() { None }
-        else { Some(HistMsg { role: m.role.clone(), text }) }
-    }).collect()
+
+        if !text.is_empty() {
+            out.push(HistMsg { role: m.role.clone(), text, tool_name: None, tool_input: None });
+        }
+
+        // For assistant messages, also emit a HistMsg for every ToolUse block so
+        // the client can reconstruct tool call bubbles on reconnect.
+        if m.role == "assistant" {
+            for block in &m.content {
+                if let ContentBlock::ToolUse { name, input, .. } = block {
+                    out.push(HistMsg {
+                        role:       "tool".to_string(),
+                        text:       String::new(),
+                        tool_name:  Some(name.clone()),
+                        tool_input: Some(input.clone()),
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 // ── Live event buffer ─────────────────────────────────────────────────────────
@@ -243,12 +273,16 @@ async fn chat_ws_handler(
             let mut hist_msgs = messages_to_history(&state.session.lock().unwrap().messages);
             // If the loop is running, the live token replay covers the in-progress
             // (or just-completed) assistant turn.  Strip any trailing assistant
-            // message from the history snapshot to avoid duplication.
+            // message and its associated tool entries from the history snapshot
+            // to avoid duplication (they will be replayed via live events).
             if loop_running {
-                if let Some(last) = hist_msgs.last() {
-                    if last.role == "assistant" {
-                        hist_msgs.pop();
-                    }
+                // Drop trailing `tool` entries first (they belong to the in-progress turn).
+                while hist_msgs.last().map(|m| m.role == "tool").unwrap_or(false) {
+                    hist_msgs.pop();
+                }
+                // Then drop the trailing assistant message itself.
+                if hist_msgs.last().map(|m| m.role == "assistant").unwrap_or(false) {
+                    hist_msgs.pop();
                 }
             }
 let history = WsFrame::History { messages: hist_msgs, live_gen };

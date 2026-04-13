@@ -57,7 +57,7 @@ type ServerFrame =
   | { type: 'container_status';      id: string; name: string; status: string }
   | { type: 'container_start_error'; id: string; message: string }
 
-interface HistMsg { role: 'user' | 'assistant'; text: string }
+interface HistMsg { role: 'user' | 'assistant' | 'tool'; text: string; tool_name?: string; tool_input?: Record<string, unknown> }
 
 interface Message {
   id:          string
@@ -501,26 +501,80 @@ const ChatPane = memo(function ChatPane({
             currentAssistantIdRef.current = null
 
             const serverMsgs: Message[] = frame.messages.map((m, i) => ({
-              id: `h${i}`, role: m.role, text: m.text,
+              id: `h${i}`,
+              role: m.role,
+              text: m.role === 'tool'
+                ? '\u25b8 ' + formatToolCall(m.tool_name ?? '', m.tool_input)
+                : m.text,
             }))
 
             // Merge server messages with local cache to preserve stable FlatList
-            // ids and cost labels.  Tool lines are ephemeral and not re-inserted.
+            // ids and cost labels.  Tool messages from the server are matched
+            // against the local cache by text; any that can't be matched get a
+            // fresh id.  Tool messages that only exist in the local cache (e.g.
+            // from an in-progress live turn) are preserved by re-attaching them
+            // after their parent assistant bubble.
             const mergeWithHistory = (base: Message[]): Message[] => {
+              // Build a map: local assistant msg id → the tool bubbles that follow it.
+              const toolsAfter = new Map<string, Message[]>()
+              let lastAsstId: string | null = null
+              for (const m of messagesRef.current) {
+                if (m.role === 'assistant') { lastAsstId = m.id }
+                else if (m.role === 'tool' && lastAsstId) {
+                  const arr = toolsAfter.get(lastAsstId) ?? []
+                  arr.push(m)
+                  toolsAfter.set(lastAsstId, arr)
+                }
+              }
+
               const local = messagesRef.current.filter(
-                m => m.role === 'user' || m.role === 'assistant'
+                m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool'
               )
+              // Separate local non-tool messages for assistant/user matching.
+              const localConversation = local.filter(m => m.role !== 'tool')
+              const localToolsByText = new Map<string, Message>()
+              for (const m of local) {
+                if (m.role === 'tool' && !localToolsByText.has(m.text)) {
+                  localToolsByText.set(m.text, m)
+                }
+              }
+
               let li = 0
-              return base.map(bm => {
-                for (let i = li; i < local.length; i++) {
-                  if (local[i].role === bm.role && local[i].text === bm.text) {
-                    const lm = local[i]
-                    li = i + 1
-                    return { ...bm, id: lm.id, ...(lm.cost != null ? { cost: lm.cost } : {}) }
+              const result: Message[] = []
+              for (const bm of base) {
+                if (bm.role === 'tool') {
+                  // Match tool bubble by text; give it a stable id from cache if found.
+                  const cached = localToolsByText.get(bm.text)
+                  result.push(cached ? { ...bm, id: cached.id } : { ...bm, id: uid() })
+                } else {
+                  // Match user/assistant messages in order.
+                  let matched: Message | null = null
+                  for (let i = li; i < localConversation.length; i++) {
+                    if (localConversation[i].role === bm.role && localConversation[i].text === bm.text) {
+                      matched = localConversation[i]
+                      li = i + 1
+                      break
+                    }
+                  }
+                  const merged = matched
+                    ? { ...bm, id: matched.id, ...(matched.cost != null ? { cost: matched.cost } : {}) }
+                    : { ...bm, id: uid() }
+                  result.push(merged)
+                  // If this assistant message had tool bubbles in the local cache that
+                  // the server didn't include (e.g. live turn still in progress),
+                  // re-attach them so they aren't lost.
+                  if (bm.role === 'assistant' && matched) {
+                    const cachedTools = toolsAfter.get(matched.id) ?? []
+                    const serverToolTexts = new Set(
+                      base.filter(b => b.role === 'tool').map(b => b.text)
+                    )
+                    for (const t of cachedTools) {
+                      if (!serverToolTexts.has(t.text)) result.push(t)
+                    }
                   }
                 }
-                return { ...bm, id: uid() }
-              })
+              }
+              return result
             }
 
             // If there's an unacknowledged pending message check whether the
