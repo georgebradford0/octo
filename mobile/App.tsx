@@ -613,7 +613,6 @@ const ChatPane = memo(function ChatPane({
           }
           case 'tool': {
             if (frame.live_gen !== liveGenRef.current) break
-            if (frame.name === 'session_start' || frame.name === 'session_end') break
             setMessages(prev => [
               ...prev,
               { id: uid(), role: 'tool' as const, text: '\u25b8 ' + formatToolCall(frame.name, frame.input) },

@@ -26,7 +26,6 @@ fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
 }
 
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -162,10 +161,6 @@ pub enum ChatEvent {
     WorkerCreated      { branch: String, worktree_path: String, task: String },
     WorkerError        { message: String },
     WorkerSessionReady { branch: String, worktree_path: String, worker_session_id: String, task: String },
-    /// Model is beginning a multi-step agentic session.
-    SessionStart       { label: String, session_id: String },
-    /// Model is ending an agentic session; summary is the final prose response.
-    SessionEnd         { summary: String },
 }
 
 // ── Branch ────────────────────────────────────────────────────────────────────
@@ -405,12 +400,6 @@ pub fn tool_definitions() -> Vec<AnthropicTool> {
                 "env":     { "type": "object", "additionalProperties": { "type": "string" }, "description": "Extra environment variables for the server process. Values of the form \"${VAR}\" are expanded from the host environment." }
             }, "required": ["name", "command"] }) },
     ];
-    tools.push(AnthropicTool { name: "session_start".into(),
-        description: "MUST be called before any other tool. Required whenever any tool use is needed — even a single tool call. Provide a short label describing what you are about to do. Do NOT call this for simple questions or responses that require no tools.".into(),
-        input_schema: serde_json::json!({ "type": "object", "properties": { "label": { "type": "string", "description": "Short description of the work being done, e.g. \"refactoring the auth module\"" } }, "required": ["label"] }) });
-    tools.push(AnthropicTool { name: "session_end".into(),
-        description: "MUST be called after all other tools, as the final tool call. Required whenever session_start was called. Provide a concise summary of what was done and the outcome — this is shown to the user as the response.".into(),
-        input_schema: serde_json::json!({ "type": "object", "properties": { "summary": { "type": "string", "description": "Concise summary of what was done and the outcome." } }, "required": ["summary"] }) });
     if std::env::var("BRAVE_API_KEY").ok().filter(|s| !s.is_empty()).is_some() {
         tools.push(AnthropicTool { name: "web_search".into(),
             description: "Search the web via Brave Search.".into(),
@@ -835,11 +824,6 @@ pub struct StreamUsage {
     pub cache_read_input_tokens: u64,
 }
 
-enum PartialBlock {
-    Text    { text: String },
-    ToolUse { id: String, name: String, partial_json: String },
-}
-
 /// Compact old turns in the message history to avoid quadratic context growth.
 ///
 /// The most recent `keep_full` tool-result user messages and their paired assistant
@@ -934,7 +918,7 @@ pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMess
     }).collect()
 }
 
-pub async fn stream_turn(
+pub async fn call_turn(
     messages:  &[ApiMessage],
     system:    &str,
     model:     &str,
@@ -952,33 +936,15 @@ pub async fn stream_turn(
 
     let compacted = compact_history(messages, 20);
 
-    // Serialize messages to JSON so we can inject cache_control without
-    // polluting the ContentBlock data model with API transport concerns.
     let mut messages_json: Vec<serde_json::Value> = compacted
         .iter()
         .map(|m| serde_json::to_value(m).unwrap())
         .collect();
 
     // Distribute up to 2 cache breakpoints across the message history.
-    // The system prompt and tool list each consume one of Anthropic's 4
-    // breakpoint limit, leaving 2 for message history.  Spreading them out
-    // means later turns hit multiple cached prefixes instead of just the most
-    // recent one, which cuts costs in long agentic sessions.
-    //
-    // We always anchor one breakpoint at the second-to-last message (the most
-    // recent stable point before the current user input) and spread the
-    // remaining one through the earlier history.
     let n = messages_json.len();
     if n >= 2 {
-        // Candidate indices: evenly spaced, always including n-2.
-        let candidates: Vec<usize> = if n < 4 {
-            vec![n - 2]
-        } else {
-            // 2 breakpoints: full history cached at n-2; n/2 as TTL fallback.
-            vec![n - 2, n / 2]
-        };
-
-        // Deduplicate and apply.
+        let candidates: Vec<usize> = if n < 4 { vec![n - 2] } else { vec![n - 2, n / 2] };
         let mut seen = std::collections::HashSet::new();
         for idx in candidates {
             if seen.insert(idx) {
@@ -997,7 +963,6 @@ pub async fn stream_turn(
         "system": [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
         "tools": tools,
         "messages": messages_json,
-        "stream": true,
     });
 
     let response = http_client()
@@ -1014,107 +979,45 @@ pub async fn stream_turn(
         return Err(format!("API error {status}: {text}"));
     }
 
-    let mut stream = response.bytes_stream();
-    let mut buf    = String::new();
-    let mut partial: HashMap<usize, PartialBlock> = HashMap::new();
-    let mut completed: Vec<(usize, ContentBlock)> = Vec::new();
-    let mut input_tokens:  u64 = 0;
-    let mut output_tokens: u64 = 0;
-    let mut cache_creation_input_tokens: u64 = 0;
-    let mut cache_read_input_tokens:     u64 = 0;
-    let mut stop_reason = "end_turn".to_string();
+    if aborted.load(Ordering::Relaxed) {
+        return Err("__interrupted__".to_string());
+    }
 
-    while let Some(chunk) = stream.next().await {
-        if aborted.load(Ordering::Relaxed) {
-            return Err("__interrupted__".to_string());
-        }
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
 
-        let bytes = chunk.map_err(|e| e.to_string())?;
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+    let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
+    let usage = &json["usage"];
+    let stream_usage = StreamUsage {
+        input_tokens:                usage["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens:               usage["output_tokens"].as_u64().unwrap_or(0),
+        cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        cache_read_input_tokens:     usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+    };
 
-        loop {
-            let Some(nl) = buf.find('\n') else { break };
-            let line = buf[..nl].trim_end_matches('\r').to_string();
-            buf = buf[nl + 1..].to_string();
-
-            if !line.starts_with("data: ") { continue; }
-            let json_str = &line[6..];
-            if json_str == "[DONE]" { break; }
-
-            let Ok(ev) = serde_json::from_str::<serde_json::Value>(json_str) else { continue; };
-
-            match ev["type"].as_str().unwrap_or("") {
-                "message_start" => {
-                    let usage = &ev["message"]["usage"];
-                    if let Some(u) = usage["input_tokens"].as_u64()                  { input_tokens = u; }
-                    if let Some(u) = usage["cache_creation_input_tokens"].as_u64()   { cache_creation_input_tokens = u; }
-                    if let Some(u) = usage["cache_read_input_tokens"].as_u64()        { cache_read_input_tokens = u; }
-                }
-                "content_block_start" => {
-                    let idx = ev["index"].as_u64().unwrap_or(0) as usize;
-                    match ev["content_block"]["type"].as_str().unwrap_or("") {
-                        "text"     => { partial.insert(idx, PartialBlock::Text { text: String::new() }); }
-                        "tool_use" => {
-                            let id   = ev["content_block"]["id"].as_str().unwrap_or("").to_string();
-                            let name = ev["content_block"]["name"].as_str().unwrap_or("").to_string();
-                            partial.insert(idx, PartialBlock::ToolUse { id, name, partial_json: String::new() });
-                        }
-                        _ => {}
+    let mut blocks = Vec::new();
+    if let Some(content) = json["content"].as_array() {
+        for block in content {
+            match block["type"].as_str().unwrap_or("") {
+                "text" => {
+                    let text = block["text"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        tx.send(ChatEvent::Text { text: text.clone() }).await.ok();
+                        blocks.push(ContentBlock::Text { text });
                     }
                 }
-                "content_block_delta" => {
-                    let idx = ev["index"].as_u64().unwrap_or(0) as usize;
-                    match ev["delta"]["type"].as_str().unwrap_or("") {
-                        "text_delta" => {
-                            let delta = ev["delta"]["text"].as_str().unwrap_or("");
-                            if !delta.is_empty() {
-                                if let Some(PartialBlock::Text { text }) = partial.get_mut(&idx) {
-                                    text.push_str(delta);
-                                }
-                                tx.send(ChatEvent::Text { text: delta.to_string() }).await.ok();
-                            }
-                        }
-                        "input_json_delta" => {
-                            let delta = ev["delta"]["partial_json"].as_str().unwrap_or("");
-                            if let Some(PartialBlock::ToolUse { partial_json, .. }) = partial.get_mut(&idx) {
-                                partial_json.push_str(delta);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "content_block_stop" => {
-                    let idx = ev["index"].as_u64().unwrap_or(0) as usize;
-                    if let Some(block) = partial.remove(&idx) {
-                        match block {
-                            PartialBlock::Text { text } => {
-                                completed.push((idx, ContentBlock::Text { text }));
-                            }
-                            PartialBlock::ToolUse { id, name, partial_json } => {
-                                let input: serde_json::Value = serde_json::from_str(&partial_json)
-                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                                tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
-                                completed.push((idx, ContentBlock::ToolUse { id, name, input }));
-                            }
-                        }
-                    }
-                }
-                "message_delta" => {
-                    if let Some(sr) = ev["delta"]["stop_reason"].as_str() {
-                        stop_reason = sr.to_string();
-                    }
-                    if let Some(u) = ev["usage"]["output_tokens"].as_u64() {
-                        output_tokens = u;
-                    }
+                "tool_use" => {
+                    let id    = block["id"].as_str().unwrap_or("").to_string();
+                    let name  = block["name"].as_str().unwrap_or("").to_string();
+                    let input = block["input"].clone();
+                    tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
+                    blocks.push(ContentBlock::ToolUse { id, name, input });
                 }
                 _ => {}
             }
         }
     }
 
-    completed.sort_by_key(|(i, _)| *i);
-    let blocks: Vec<ContentBlock> = completed.into_iter().map(|(_, b)| b).collect();
-    Ok((blocks, stop_reason, StreamUsage { input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens }))
+    Ok((blocks, stop_reason, stream_usage))
 }
 
 // ── Agentic Loop ──────────────────────────────────────────────────────────────
@@ -1153,7 +1056,7 @@ pub async fn run_agentic_loop(
             return;
         }
 
-        match stream_turn(&messages, &system, &model, &api_key, &aborted, &tx, &mcp_pool).await {
+        match call_turn(&messages, &system, &model, &api_key, &aborted, &tx, &mcp_pool).await {
             Err(e) if e == "__interrupted__" => {
                 let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
                 tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
@@ -1184,31 +1087,8 @@ pub async fn run_agentic_loop(
                 }
 
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
-                let mut session_ended = false;
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
-                        // session_start / session_end are client-side signals — emit events,
-                        // return a synthetic ok result, but do not execute anything.
-                        if name == "session_start" {
-                            let label = input["label"].as_str().unwrap_or("working").to_string();
-                            let session_id = uuid::Uuid::new_v4().to_string();
-                            tx.send(ChatEvent::SessionStart { label, session_id }).await.ok();
-                            tool_results.push(ContentBlock::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: vec![serde_json::json!({"type":"text","text":"ok"})],
-                            });
-                            continue;
-                        }
-                        if name == "session_end" {
-                            let summary = input["summary"].as_str().unwrap_or("").to_string();
-                            tx.send(ChatEvent::SessionEnd { summary }).await.ok();
-                            tool_results.push(ContentBlock::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: vec![serde_json::json!({"type":"text","text":"ok"})],
-                            });
-                            session_ended = true;
-                            continue;
-                        }
                         let result = truncate_tool_output(
                             execute_tool(name, input, &cwd, &tx, pending_question.clone(), &mcp_pool).await,
                             tool_output_limit(name),
@@ -1227,17 +1107,6 @@ pub async fn run_agentic_loop(
                 {
                     let mut s = session.lock().unwrap();
                     s.messages.push(ApiMessage { role: "user".to_string(), content: tool_results });
-                }
-
-                // session_end is always the final tool call — stop here so the loop
-                // does not make another API call that would produce a redundant
-                // assistant text turn echoing the summary into session history.
-                if session_ended {
-                    let cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
-                    tx.send(ChatEvent::Result {
-                        cost_usd: cost, turns, session_id: session_id.clone(), result: None,
-                    }).await.ok();
-                    return;
                 }
             }
         }
@@ -1301,12 +1170,7 @@ pub async fn run_startup_prompt(
 // ── System Prompt ─────────────────────────────────────────────────────────────
 
 pub fn build_system_prompt(repo_path: &str, branch: Option<&str>, worktree_path: Option<&str>) -> String {
-    let tool_guidance = "\n\nSession guidelines (CRITICAL):\
-        \n- ANY use of tools — even a single tool call — MUST be wrapped: call session_start first, then the tool(s), then session_end last.\
-        \n- session_start must be the very first tool call; no other tool may be called before it.\
-        \n- session_end must be the very last tool call; no other tool may be called after it.\
-        \n- For simple questions or conversational replies that require no tool use, answer directly — do NOT call session_start or session_end.\
-        \n\nTool use guidelines (IMPORTANT — follow to minimise token cost):\
+    let tool_guidance = "\n\nTool use guidelines (IMPORTANT — follow to minimise token cost):\
         \n- To modify an existing file use edit_file (str_replace). Never read the whole file just to rewrite it.\
         \n- Use read_file with offset+limit to read only the section you need.\
         \n- Use grep to locate the exact lines before reading or editing.\
