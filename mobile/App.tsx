@@ -44,15 +44,12 @@ interface ContainerInfo {
 }
 
 type ServerFrame =
-  | { type: 'history';          messages: HistMsg[]; live_gen: number }
-  | { type: 'token';            text: string;        live_gen: number }
-  | { type: 'tool';             name: string; input?: Record<string, unknown>; live_gen: number }
-  | { type: 'question';         question: string;    live_gen: number }
-  | { type: 'done';             cost_usd: number;    live_gen: number }
-  | { type: 'error';            message: string;     live_gen: number }
-  | { type: 'ack';              live_gen: number }
-  | { type: 'session_start';    label: string; session_id: string; live_gen: number }
-  | { type: 'session_end';      summary: string;     live_gen: number }
+  | { type: 'history';  messages: HistMsg[] }
+  | { type: 'ack' }
+  | { type: 'tool';     name: string; input?: Record<string, unknown> }
+  | { type: 'done';     text: string; cost_usd: number }
+  | { type: 'question'; question: string }
+  | { type: 'error';    message: string }
   | { type: 'container_list';        containers: ContainerInfo[] }
   | { type: 'container_status';      id: string; name: string; status: string }
   | { type: 'container_start_error'; id: string; message: string }
@@ -63,11 +60,8 @@ interface Message {
   id:          string
   role:        'user' | 'assistant' | 'tool' | 'session'
   text:        string
-  streaming?:  boolean
   isQuestion?: boolean
   cost?:       number
-  label?:      string
-  sessionId?:  string   // server-assigned UUID; set on session bubbles for reconnect matching
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -275,7 +269,6 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
       <View style={[s.messageWrap, s.messageWrapRight]}>
         <View style={s.userBubble}>
           {renderText(message.text, s.textBlock)}
-          {message.streaming && <Text style={s.cursor}>▋</Text>}
         </View>
       </View>
     )
@@ -284,7 +277,6 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
     <View style={s.messageWrap}>
       {message.isQuestion && <Text style={s.questionMark}>?</Text>}
       {renderText(message.text, s.textBlock)}
-      {message.streaming && <Text style={s.cursor}>▋</Text>}
       {message.cost != null && (
         <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
       )}
@@ -368,57 +360,26 @@ const ChatPane = memo(function ChatPane({
     height: Math.max(insets.bottom, -keyboardHeight.value),
   }))
 
-  const [messages,       setMessagesState]  = useState<Message[]>([])
-  const messagesRef = useRef<Message[]>([])
-  // Keep messagesRef in sync immediately (not via useEffect) so that
-  // ws.onmessage handlers always read the current list, even when React
-  // hasn't re-rendered yet (e.g. the 'history' frame arrives before the
-  // useEffect that would sync the ref from the AsyncStorage load).
-  const setMessages = useCallback((arg: Message[] | ((prev: Message[]) => Message[])) => {
-    setMessagesState(prev => {
-      const next = typeof arg === 'function' ? arg(prev) : arg
-      messagesRef.current = next
-      return next
-    })
-  }, [])
-  const [status,         setStatus]         = useState<ConnStatus>('connecting')
-  const [input,          setInput]          = useState('')
+  const [messages, setMessages] = useState<Message[]>([])
+  const [status,          setStatus]          = useState<ConnStatus>('connecting')
+  const [input,           setInput]           = useState('')
   const [pendingQuestion, setPendingQuestion] = useState(false)
-  const [completions,    setCompletions]    = useState<string[]>([])
-  const [showScrollBtn,  setShowScrollBtn]  = useState(false)
-  const [inputAreaH,     setInputAreaH]     = useState(0)
+  const [completions,     setCompletions]     = useState<string[]>([])
+  const [showScrollBtn,   setShowScrollBtn]   = useState(false)
+  const [inputAreaH,      setInputAreaH]      = useState(0)
 
   const httpBase = wsUrl.replace(/^ws:/, 'http:').replace(/\/chat$/, '')
 
-  const wsRef           = useRef<WebSocket | null>(null)
-  const sendMessageRef  = useRef<() => void>(() => {})
-  const listRef         = useRef<FlatList<Message>>(null)
-  const isAtBottomRef   = useRef(true)
+  const wsRef          = useRef<WebSocket | null>(null)
+  const sendMessageRef = useRef<() => void>(() => {})
+  const listRef        = useRef<FlatList<Message>>(null)
+  const isAtBottomRef  = useRef(true)
   // Text of the last sent message that hasn't been ack'd by the server yet.
   // Persisted to AsyncStorage so it survives a killed connection; cleared on
   // ack or when confirmed present in the next history frame.
-  const pendingMsgRef   = useRef<string | null>(null)
-
-  // Whether we have already loaded the cached message list from AsyncStorage.
-  // Subsequent wsUrl changes (tunnel port changes on reconnect) must NOT
-  // overwrite in-memory messages with the stale persisted snapshot.
+  const pendingMsgRef  = useRef<string | null>(null)
+  // True once we've attempted the initial AsyncStorage load for this connKey.
   const storageLoadedRef = useRef(false)
-
-  // Incremented every time connect() is called.  Each ws.onmessage closure
-  // captures the epoch at creation time and discards frames if the epoch no
-  // longer matches — this prevents frames from a previous (stale) socket
-  // leaking into the new connection even when live_gen happens to be the same.
-  const connEpochRef    = useRef<number>(0)
-
-  // The live_gen value from the most-recent 'history' frame.  Any live frame
-  // (token/tool/question/done/error) whose live_gen differs is stale and must
-  // be discarded — it belongs to a prior connection's replay that raced with
-  // the history frame of the current connection.
-  const liveGenRef      = useRef<number>(-1)
-
-  // ID of the assistant message currently being streamed into via 'token' frames.
-  // Set on the first token of a new response, cleared on 'done' / 'error' / 'question'.
-  const currentAssistantIdRef = useRef<string | null>(null)
 
 
   // Fetch @ completions whenever the input changes.
@@ -456,38 +417,20 @@ const ChatPane = memo(function ChatPane({
     let cancelled = false
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-    // Load both cached messages and the unacknowledged-pending entry before
-    // connecting.  If we connected first there would be a race where the
-    // 'history' frame arrives before pendingMsgRef is restored, causing the
-    // message to be silently dropped instead of resent.
-    //
-    // Only load on the very first connection for this chat pane.  On subsequent
-    // wsUrl changes (tunnel port changes on reconnect) the in-memory messages
-    // are already up-to-date; overwriting them with the stale persisted snapshot
-    // would cause the session log to disappear.
     const connect = () => {
       if (cancelled) return
-      // Close any existing socket synchronously so its in-flight frames cannot
-      // race with the new connection's frames (they would share the same
-      // live_gen and bypass the stale-frame guard).
       wsRef.current?.close()
       updateStatus('connecting')
-      currentAssistantIdRef.current = null
-      // Advance the epoch so any onmessage closures from old sockets discard
-      // their frames immediately.
-      const myEpoch = ++connEpochRef.current
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
-      ws.onopen = () => {}
-
-      ws.onmessage = ({ data }: { data: string }) => {
-        if (cancelled || connEpochRef.current !== myEpoch) return
+      ws.onmessage = (event: WebSocketMessageEvent) => {
+        const data = event.data as string
+        if (cancelled) return
         let frame: ServerFrame
-        try { frame = JSON.parse(data as string) } catch { return }
+        try { frame = JSON.parse(data) } catch { return }
 
-
-        // Route master-specific frames to AppInner without touching chat state.
+        // Route container management frames to AppInner.
         if (frame.type === 'container_list' || frame.type === 'container_status' || frame.type === 'container_start_error') {
           onContainerFrame?.(frame)
           return
@@ -495,201 +438,78 @@ const ChatPane = memo(function ChatPane({
 
         switch (frame.type) {
           case 'history': {
-            // Record the authoritative live_gen from this snapshot so we can
-            // discard any stale live frames that arrive after reconnect.
-            liveGenRef.current = frame.live_gen
-            currentAssistantIdRef.current = null
-
-            const serverMsgs: Message[] = frame.messages.map((m, i) => ({
-              id: `h${i}`,
+            const msgs: Message[] = frame.messages.map((m, i) => ({
+              id:   `h${i}`,
               role: m.role,
               text: m.role === 'tool'
                 ? '\u25b8 ' + formatToolCall(m.tool_name ?? '', m.tool_input)
                 : m.text,
             }))
 
-            // Merge server messages with local cache to preserve stable FlatList
-            // ids and cost labels.  Tool messages from the server are matched
-            // against the local cache by text; any that can't be matched get a
-            // fresh id.  Tool messages that only exist in the local cache (e.g.
-            // from an in-progress live turn) are preserved by re-attaching them
-            // after their parent assistant bubble.
-            const mergeWithHistory = (base: Message[]): Message[] => {
-              // Build a map: local assistant msg id → the tool bubbles that follow it.
-              const toolsAfter = new Map<string, Message[]>()
-              let lastAsstId: string | null = null
-              for (const m of messagesRef.current) {
-                if (m.role === 'assistant') { lastAsstId = m.id }
-                else if (m.role === 'tool' && lastAsstId) {
-                  const arr = toolsAfter.get(lastAsstId) ?? []
-                  arr.push(m)
-                  toolsAfter.set(lastAsstId, arr)
-                }
-              }
-
-              const local = messagesRef.current.filter(
-                m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool'
-              )
-              // Separate local non-tool messages for assistant/user matching.
-              const localConversation = local.filter(m => m.role !== 'tool')
-              const localToolsByText = new Map<string, Message>()
-              for (const m of local) {
-                if (m.role === 'tool' && !localToolsByText.has(m.text)) {
-                  localToolsByText.set(m.text, m)
-                }
-              }
-
-              let li = 0
-              const result: Message[] = []
-              for (const bm of base) {
-                if (bm.role === 'tool') {
-                  // Match tool bubble by text; give it a stable id from cache if found.
-                  const cached = localToolsByText.get(bm.text)
-                  result.push(cached ? { ...bm, id: cached.id } : { ...bm, id: uid() })
-                } else {
-                  // Match user/assistant messages in order.
-                  let matched: Message | null = null
-                  for (let i = li; i < localConversation.length; i++) {
-                    if (localConversation[i].role === bm.role && localConversation[i].text === bm.text) {
-                      matched = localConversation[i]
-                      li = i + 1
-                      break
-                    }
-                  }
-                  const merged = matched
-                    ? { ...bm, id: matched.id, ...(matched.cost != null ? { cost: matched.cost } : {}) }
-                    : { ...bm, id: uid() }
-                  result.push(merged)
-                  // If this assistant message had tool bubbles in the local cache that
-                  // the server didn't include (e.g. live turn still in progress),
-                  // re-attach them so they aren't lost.
-                  if (bm.role === 'assistant' && matched) {
-                    const cachedTools = toolsAfter.get(matched.id) ?? []
-                    const serverToolTexts = new Set(
-                      base.filter(b => b.role === 'tool').map(b => b.text)
-                    )
-                    for (const t of cachedTools) {
-                      if (!serverToolTexts.has(t.text)) result.push(t)
-                    }
-                  }
-                }
-              }
-              return result
-            }
-
-            // If there's an unacknowledged pending message check whether the
-            // server already has it in history.
+            // If there's an unacknowledged pending message, check whether the
+            // server already has it in history.  If not, resend it.
             const pending = pendingMsgRef.current
-            let didResend = false
             if (pending) {
-              const lastUserMsg = [...frame.messages].reverse().find(m => m.role === 'user')
-              if (lastUserMsg?.text === pending) {
-                pendingMsgRef.current = null
-                AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
-                setMessages(mergeWithHistory(serverMsgs))
-              } else {
-                pendingMsgRef.current = null
-                AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
-                const optimisticBubble: Message = { id: uid(), role: 'user', text: pending }
-                setMessages([...mergeWithHistory(serverMsgs), optimisticBubble])
+              pendingMsgRef.current = null
+              AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
+              const lastUser = [...frame.messages].reverse().find(m => m.role === 'user')
+              if (lastUser?.text !== pending) {
+                // Server doesn't have it — show optimistic bubble and resend.
+                setMessages([...msgs, { id: uid(), role: 'user' as const, text: pending }])
                 ws.send(JSON.stringify({ type: 'message', text: pending }))
                 updateStatus('streaming')
-                didResend = true
+                break
               }
-            } else {
-              setMessages(mergeWithHistory(serverMsgs))
             }
 
+            setMessages(msgs)
             setPendingQuestion(false)
-            // Only force-scroll on initial load (list was empty) or if user
-            // was already at the bottom.  Don't clobber isAtBottomRef when
-            // the user is scrolled up mid-stream — that's what stopped the
-            // scroll-to-bottom button from ever appearing.
-            if (isAtBottomRef.current || serverMsgs.length === 0) {
+            if (isAtBottomRef.current || msgs.length === 0) {
               setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
             }
-            if (!didResend) {
-              updateStatus('ready')
-            }
-            // Persist the merged list (including session bubbles) so the next
-            // reconnect also has them available.
-            AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(messagesRef.current)).catch(() => {})
-            break
-          }
-          case 'session_start': {
-            if (frame.live_gen !== liveGenRef.current) break
-            updateStatus('streaming')
-            break
-          }
-          case 'session_end': {
-            break
-          }
-          case 'token': {
-            if (frame.live_gen !== liveGenRef.current) break
-            updateStatus('streaming')
-            const aid = currentAssistantIdRef.current
-            if (aid) {
-              setMessages(prev => prev.map(m => m.id === aid ? { ...m, text: m.text + frame.text } : m))
-            } else {
-              const newId = uid()
-              currentAssistantIdRef.current = newId
-              setMessages(prev => [...prev, { id: newId, role: 'assistant' as const, text: frame.text, streaming: true }])
-            }
-            break
-          }
-          case 'done': {
-            if (frame.live_gen !== liveGenRef.current) break
-            const cost = frame.cost_usd
-            const aid = currentAssistantIdRef.current
-            currentAssistantIdRef.current = null
-            setMessages(prev => {
-              const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-              const updated = aid
-                ? finalized.map(m => m.id === aid ? { ...m, cost } : m)
-                : finalized
-              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(updated)).catch(() => {})
-              return updated
-            })
             updateStatus('ready')
-            setPendingQuestion(false)
+            AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(msgs)).catch(() => {})
             break
           }
-          case 'question': {
-            if (frame.live_gen !== liveGenRef.current) break
-            currentAssistantIdRef.current = null
-            setMessages(prev => {
-              const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-              return [...finalized, { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true }]
-            })
-            setPendingQuestion(true)
-            updateStatus('ready')
+          case 'ack': {
+            pendingMsgRef.current = null
+            AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
             break
           }
           case 'tool': {
-            if (frame.live_gen !== liveGenRef.current) break
             setMessages(prev => [
               ...prev,
               { id: uid(), role: 'tool' as const, text: '\u25b8 ' + formatToolCall(frame.name, frame.input) },
             ])
             break
           }
-          case 'ack': {
-            // Update liveGenRef to the gen the server is about to stream.
-            // Without this, all live frames would be discarded as "stale"
-            // because they carry a gen one higher than the history frame.
-            liveGenRef.current = frame.live_gen
-            pendingMsgRef.current = null
-            AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
+          case 'done': {
+            setMessages(prev => {
+              const next = [
+                ...prev,
+                { id: uid(), role: 'assistant' as const, text: frame.text, cost: frame.cost_usd },
+              ]
+              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
+              return next
+            })
+            updateStatus('ready')
+            setPendingQuestion(false)
+            break
+          }
+          case 'question': {
+            setMessages(prev => [
+              ...prev,
+              { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true },
+            ])
+            setPendingQuestion(true)
+            updateStatus('ready')
             break
           }
           case 'error': {
-            if (frame.live_gen !== liveGenRef.current) break
-            currentAssistantIdRef.current = null
             setMessages(prev => {
-              const finalized = prev.map(m => m.streaming ? { ...m, streaming: false } : m)
-              const updated = [...finalized, { id: uid(), role: 'assistant' as const, text: `\u2717 ${frame.message}` }]
-              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(updated)).catch(() => {})
-              return updated
+              const next = [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${frame.message}` }]
+              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
+              return next
             })
             updateStatus('ready')
             break
@@ -697,25 +517,28 @@ const ChatPane = memo(function ChatPane({
         }
       }
 
-      ws.onerror = (e: Event) => {
+      ws.onerror = () => {
         if (cancelled) return
         updateStatus('error')
       }
 
-      ws.onclose = (e: CloseEvent) => {
+      ws.onclose = () => {
         if (cancelled) return
         updateStatus('connecting')
         reconnectTimer = setTimeout(connect, 1500)
       }
     }
 
+    // Load cached messages and any unacknowledged pending message before
+    // connecting.  Only do this once per connKey — on tunnel reconnects the
+    // in-memory state is current and doesn't need reloading from disk.
     if (!storageLoadedRef.current) {
+      storageLoadedRef.current = true
       Promise.all([
         AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
         AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
       ]).then(([msgsJson, pendingText]) => {
         if (cancelled) return
-        storageLoadedRef.current = true
         if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
         if (pendingText) pendingMsgRef.current = pendingText
         connect()
@@ -762,11 +585,7 @@ const ChatPane = memo(function ChatPane({
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
 
-    currentAssistantIdRef.current = null
-    setMessages(prev => [
-      ...prev,
-      { id: uid(), role: 'user' as const, text },
-    ])
+    setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
     isAtBottomRef.current = true
 
     if (pendingQuestion) {
@@ -780,18 +599,12 @@ const ChatPane = memo(function ChatPane({
       ws.send(JSON.stringify({ type: 'message', text }))
     }
     updateStatus('streaming')
-
     setInput('')
   }, [input, pendingQuestion, status])
 
   sendMessageRef.current = sendMessage
 
   const clearConversation = useCallback(() => {
-    // Invalidate the current live generation immediately so any in-flight
-    // streaming frames that arrive before the server's history response are
-    // discarded, not appended to the now-empty conversation.
-    liveGenRef.current = -1
-    currentAssistantIdRef.current = null
     wsRef.current?.send(JSON.stringify({ type: 'clear' }))
     setMessages([])
     setPendingQuestion(false)
@@ -809,7 +622,7 @@ const ChatPane = memo(function ChatPane({
     }
   }
 
-  const isPending = status === 'streaming' && messages.length > 0 && !messages[messages.length - 1]?.streaming
+  const isPending = status === 'streaming'
 
   return (
     <View style={s.pane}>

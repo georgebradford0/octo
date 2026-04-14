@@ -1,5 +1,6 @@
 use std::{
     fs,
+    mem,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -22,7 +23,7 @@ use claudulhu_core::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{broadcast, mpsc};
 use tower_http::cors::{Any, CorsLayer};
 
 // ── Noise Protocol ────────────────────────────────────────────────────────────
@@ -36,30 +37,23 @@ const NOISE_KEY_FILE: &str = "/etc/claudulhu/noise_key.bin";
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsFrame {
     /// Full message history, sent once on connect.
-    /// `live_gen` tells the client which generation of live events to expect next,
-    /// so it can discard stale replays from a previous connection.
-    History  { messages: Vec<HistMsg>, live_gen: usize },
-    /// Streaming text token from the current assistant response.
-    Token    { text: String, live_gen: usize },
-    /// Tool being invoked (display only).  `input` was added in 0.0.19.
-    Tool     { name: String, input: serde_json::Value, live_gen: usize },
+    History  { messages: Vec<HistMsg> },
+    /// User message was saved; agentic loop is starting.
+    Ack,
+    /// Tool being invoked (display only).
+    Tool     { name: String, input: serde_json::Value },
+    /// Agentic turn complete — contains the full assistant response text.
+    Done     { text: String, cost_usd: f64 },
     /// Claude is asking the user a question and needs an answer.
-    Question { question: String, live_gen: usize },
-    /// Current response is complete.
-    Done { cost_usd: f64, live_gen: usize },
-    /// Current response ended with an error.
-    Error    { message: String, live_gen: usize },
-    /// Acknowledgement that the user message was saved server-side.
-    /// `live_gen` is the generation the client should expect for the upcoming
-    /// live frames so it doesn't discard them as stale.
-    Ack { live_gen: usize },
+    Question { question: String },
+    /// Response ended with an error.
+    Error    { message: String },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct HistMsg {
     role: String,
     text: String,
-    /// Present only when `role == "tool"` — the tool name and input.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,15 +98,13 @@ fn load_messages() -> Vec<ApiMessage> {
 }
 
 /// Convert internal API messages to the wire history format.
-/// Each ApiMessage may contribute multiple HistMsgs:
-///   - Text blocks → a single `user`/`assistant` HistMsg with concatenated text.
-///   - ToolUse blocks in an assistant message → one `tool` HistMsg per block.
-/// Pure tool-result user messages (no Text content) are skipped entirely — the
+/// Text blocks → a single `user`/`assistant` HistMsg with concatenated text.
+/// ToolUse blocks in an assistant message → one `tool` HistMsg per block.
+/// Pure tool-result user messages (no Text content) are skipped — the
 /// tool bubble on the client is driven by the preceding ToolUse block.
 fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
     let mut out = Vec::new();
     for m in messages {
-        // Collect any plain text from this message.
         let text: String = m.content.iter()
             .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
             .collect();
@@ -121,8 +113,6 @@ fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
             out.push(HistMsg { role: m.role.clone(), text, tool_name: None, tool_input: None });
         }
 
-        // For assistant messages, also emit a HistMsg for every ToolUse block so
-        // the client can reconstruct tool call bubbles on reconnect.
         if m.role == "assistant" {
             for block in &m.content {
                 if let ContentBlock::ToolUse { name, input, .. } = block {
@@ -139,81 +129,14 @@ fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
     out
 }
 
-// ── Live event buffer ─────────────────────────────────────────────────────────
-//
-// Accumulates WsFrames for the current in-progress response.
-// Cleared (with generation bump) at the start of each new response.
-// Allows reconnecting clients to replay the full current response from the top.
-
-struct LiveState {
-    buf:    Mutex<LiveBuffer>,
-    notify: Notify,
-}
-
-#[derive(Default)]
-struct LiveBuffer {
-    /// Incremented each time a new response starts (live events cleared).
-    gen:    usize,
-    events: Vec<WsFrame>,
-}
-
 // ── App state ─────────────────────────────────────────────────────────────────
 
 struct AppState {
     session:      Arc<Mutex<Session>>,
     loop_running: Arc<AtomicBool>,
-    live:         Arc<LiveState>,
-}
-
-// ── ChatEvent → WsFrame ───────────────────────────────────────────────────────
-
-fn chat_event_to_frame(event: &ChatEvent, live_gen: usize) -> Option<WsFrame> {
-    // Go through JSON so we're not coupled to internal enum layout.
-    let v: serde_json::Value = serde_json::to_value(event).ok()?;
-    match v["type"].as_str()? {
-        "text"          => Some(WsFrame::Token        { text:     v["text"].as_str()?.to_string(), live_gen }),
-        "tool_use"      => Some(WsFrame::Tool         { name: v["tool"].as_str()?.to_string(), input: v["input"].clone(), live_gen }),
-        "result"        => Some(WsFrame::Done         { cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
-        "interrupted"   => Some(WsFrame::Done         { cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
-        "error"         => Some(WsFrame::Error        { message:  v["message"].as_str()?.to_string(), live_gen }),
-        "question"      => Some(WsFrame::Question     { question: v["question"].as_str()?.to_string(), live_gen }),
-        _               => None,
-    }
-}
-
-// ── Live delivery task ────────────────────────────────────────────────────────
-//
-// Streams current live events to a WebSocket writer channel.
-// - start_gen / start_idx: atomically snapshotted by the connect handler so
-//   that history and the live-replay starting point are always consistent.
-// - On gen change: reset to idx=0 so every new response is fully delivered.
-
-async fn deliver_live(live: Arc<LiveState>, tx: mpsc::Sender<String>, start_gen: usize, start_idx: usize) {
-    let mut gen = start_gen;
-    let mut idx = start_idx;
-
-    loop {
-        loop {
-            let frame = {
-                let buf = live.buf.lock().unwrap();
-                if buf.gen != gen {
-                    gen = buf.gen;
-                    idx = 0;
-                }
-                buf.events.get(idx).cloned()
-            };
-            match frame {
-                Some(f) => {
-                    if tx.send(serde_json::to_string(&f).unwrap_or_default()).await.is_err() {
-                        return;
-                    }
-                    idx += 1;
-                }
-                None => break,
-            }
-        }
-        live.notify.notified().await;
-    }
+    /// Broadcast channel for live events (Tool, Done, Error, Question).
+    /// All connected clients receive every event.
+    event_tx:     broadcast::Sender<WsFrame>,
 }
 
 // ── WebSocket handler ─────────────────────────────────────────────────────────
@@ -239,59 +162,38 @@ async fn chat_ws_handler(
             }
         });
 
-        // Snapshot (loop_running, live_gen, live_idx, history) consistently so
-        // that the history frame and the live-replay starting point never
-        // double-deliver the last assistant turn.
-        //
-        // The tricky race: the agentic loop pushes the completed assistant message
-        // into session.messages *before* clearing loop_running.  If we read
-        // loop_running=true but session already contains the finished assistant
-        // turn, we would send it in the history frame AND replay it via live
-        // tokens → duplicate text on screen.
-        //
-        // Fix: hold the live.buf lock while reading both loop_running and
-        // session.messages.  The loop pushes to session without holding live.buf,
-        // but more importantly: when loop_running is true we strip any trailing
-        // assistant message from the history snapshot — the live token replay
-        // will reconstruct it from idx=0.
-        let (history_json, start_gen, start_idx) = {
-            let buf = state.live.buf.lock().unwrap();
+        // Subscribe to live events BEFORE reading history so we cannot miss
+        // events emitted between the history snapshot and our first recv().
+        let mut event_rx = state.event_tx.subscribe();
+
+        // Snapshot history.  When the loop is running, strip the trailing
+        // assistant message and its associated tool entries — they will arrive
+        // via the live broadcast instead.
+        let hist_msgs = {
+            let s = state.session.lock().unwrap();
             let loop_running = state.loop_running.load(Ordering::SeqCst);
-            let live_gen = buf.gen;
-            let (start_gen, start_idx) = if loop_running {
-                // Loop is still running — replay live events from the beginning
-                // of the current generation so the client sees every token.
-                (buf.gen, 0usize)
-            } else {
-                // Loop is idle — history already contains the completed text.
-                // Start past the end of the current gen so we only deliver
-                // future responses (next gen will reset idx to 0 automatically).
-                (buf.gen, buf.events.len())
-            };
-            // Read session while live.buf is still locked to prevent the loop
-            // from committing a new assistant message between the two reads.
-            let mut hist_msgs = messages_to_history(&state.session.lock().unwrap().messages);
-            // If the loop is running, the live token replay covers the in-progress
-            // (or just-completed) assistant turn.  Strip any trailing assistant
-            // message and its associated tool entries from the history snapshot
-            // to avoid duplication (they will be replayed via live events).
+            let mut msgs = messages_to_history(&s.messages);
             if loop_running {
-                // Drop trailing `tool` entries first (they belong to the in-progress turn).
-                while hist_msgs.last().map(|m| m.role == "tool").unwrap_or(false) {
-                    hist_msgs.pop();
+                while msgs.last().map(|m| m.role == "tool").unwrap_or(false) {
+                    msgs.pop();
                 }
-                // Then drop the trailing assistant message itself.
-                if hist_msgs.last().map(|m| m.role == "assistant").unwrap_or(false) {
-                    hist_msgs.pop();
+                if msgs.last().map(|m| m.role == "assistant").unwrap_or(false) {
+                    msgs.pop();
                 }
             }
-let history = WsFrame::History { messages: hist_msgs, live_gen };
-            (serde_json::to_string(&history).unwrap_or_default(), start_gen, start_idx)
+            msgs
         };
-        ws_tx.send(history_json).await.ok();
+        ws_tx.send(serde_json::to_string(&WsFrame::History { messages: hist_msgs }).unwrap_or_default()).await.ok();
 
-        // Deliver live events for the current (or future) response.
-        let deliver = tokio::spawn(deliver_live(state.live.clone(), ws_tx.clone(), start_gen, start_idx));
+        // Forward live events (Tool / Done / Error / Question) to this client.
+        let fwd_tx = ws_tx.clone();
+        let deliver = tokio::spawn(async move {
+            while let Ok(frame) = event_rx.recv().await {
+                if fwd_tx.send(serde_json::to_string(&frame).unwrap_or_default()).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         // Receive messages from client.
         while let Some(Ok(msg)) = ws_stream.next().await {
@@ -311,10 +213,8 @@ let history = WsFrame::History { messages: hist_msgs, live_gen };
                     let api_key = match resolve_api_key() {
                         Some(k) => k,
                         None    => {
-                            let live_gen = state.live.buf.lock().unwrap().gen;
                             ws_tx.send(serde_json::to_string(&WsFrame::Error {
                                 message: "no API key configured".into(),
-                                live_gen,
                             }).unwrap_or_default()).await.ok();
                             continue;
                         }
@@ -331,54 +231,55 @@ let history = WsFrame::History { messages: hist_msgs, live_gen };
                         save_messages(&s.messages);
                     }
 
-                    // Only start the loop if it isn't already running.  Bump
-                    // buf.gen BEFORE sending Ack so the client knows which
-                    // live_gen to expect for the upcoming frames.
-                    let ack_gen;
                     if !state.loop_running.swap(true, Ordering::SeqCst) {
-                        // Reset live buffer for the new response.
-                        let new_gen = {
-                            let mut buf = state.live.buf.lock().unwrap();
-                            buf.gen += 1;
-                            buf.events.clear();
-                            buf.gen
-                        };
-                        ack_gen = new_gen;
+                        // Ack goes directly to this client only.
+                        ws_tx.send(serde_json::to_string(&WsFrame::Ack).unwrap_or_default()).await.ok();
 
-                        // Acknowledge after gen bump so the Ack carries the correct live_gen.
-                        ws_tx.send(serde_json::to_string(&WsFrame::Ack { live_gen: ack_gen }).unwrap_or_default()).await.ok();
-                        state.live.notify.notify_waiters();
-
-                        let (loop_tx, mut loop_rx) = mpsc::channel::<ChatEvent>(256);
                         let session_c    = state.session.clone();
-                        let live_c       = state.live.clone();
                         let loop_running = state.loop_running.clone();
+                        let event_tx     = state.event_tx.clone();
 
-                        // Run the agentic loop; clear the running flag then save messages.
-                        // Order matters: set loop_running=false FIRST so any client
-                        // that connects after the loop ends sees idle state and does not
-                        // replay live events (which would duplicate the saved history).
                         tokio::spawn(async move {
-                            run_agentic_loop(
+                            let (loop_tx, mut loop_rx) = mpsc::channel::<ChatEvent>(256);
+                            tokio::spawn(run_agentic_loop(
                                 session_c.clone(), "main".to_string(), api_key, model, loop_tx,
-                            ).await;
+                            ));
+
+                            // Collect text across turns; emit Tool/Done/Error/Question.
+                            let mut text_buf = String::new();
+                            while let Some(event) = loop_rx.recv().await {
+                                match event {
+                                    ChatEvent::Text { text } => {
+                                        text_buf.push_str(&text);
+                                    }
+                                    ChatEvent::ToolUse { tool, input } => {
+                                        event_tx.send(WsFrame::Tool { name: tool, input }).ok();
+                                    }
+                                    ChatEvent::Question { question } => {
+                                        event_tx.send(WsFrame::Question { question }).ok();
+                                        // Don't break — loop resumes after Answer.
+                                    }
+                                    ChatEvent::Result { cost_usd, .. } => {
+                                        event_tx.send(WsFrame::Done { text: mem::take(&mut text_buf), cost_usd }).ok();
+                                        break;
+                                    }
+                                    ChatEvent::Interrupted { cost_usd } => {
+                                        event_tx.send(WsFrame::Done { text: mem::take(&mut text_buf), cost_usd }).ok();
+                                        break;
+                                    }
+                                    ChatEvent::Error { message } => {
+                                        event_tx.send(WsFrame::Error { message }).ok();
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
                             loop_running.store(false, Ordering::SeqCst);
                             save_messages(&session_c.lock().unwrap().messages);
                         });
-
-                        // Forward ChatEvents from the loop to the live buffer.
-                        tokio::spawn(async move {
-                            while let Some(event) = loop_rx.recv().await {
-                                if let Some(frame) = chat_event_to_frame(&event, new_gen) {
-                                    live_c.buf.lock().unwrap().events.push(frame);
-                                    live_c.notify.notify_waiters();
-                                }
-                            }
-                        });
                     } else {
-                        ack_gen = state.live.buf.lock().unwrap().gen;
                         eprintln!("[chat] warning: message received while loop already running");
-                        ws_tx.send(serde_json::to_string(&WsFrame::Ack { live_gen: ack_gen }).unwrap_or_default()).await.ok();
+                        ws_tx.send(serde_json::to_string(&WsFrame::Ack).unwrap_or_default()).await.ok();
                     }
                 }
 
@@ -393,23 +294,12 @@ let history = WsFrame::History { messages: hist_msgs, live_gen };
                 }
 
                 ClientMsg::Clear => {
-                    // Clear session messages first, then reset live buffer.
-                    // Take each lock separately (not nested) to avoid inversion.
                     {
                         let mut s = state.session.lock().unwrap();
                         s.messages.clear();
                         save_messages(&s.messages);
                     }
-                    let live_gen = {
-                        let mut buf = state.live.buf.lock().unwrap();
-                        buf.gen += 1;
-                        buf.events.clear();
-                        buf.gen
-                    };
-                    state.live.notify.notify_waiters();
-                    let json = serde_json::to_string(&WsFrame::History { messages: vec![], live_gen })
-                        .unwrap_or_default();
-                    ws_tx.send(json).await.ok();
+                    ws_tx.send(serde_json::to_string(&WsFrame::History { messages: vec![] }).unwrap_or_default()).await.ok();
                 }
             }
         }
@@ -513,6 +403,8 @@ async fn main() {
 
     let mcp_pool = init_mcp_pool().await;
 
+    let (event_tx, _) = broadcast::channel(64);
+
     let state = Arc::new(AppState {
         session: Arc::new(Mutex::new(Session {
             messages,
@@ -523,10 +415,7 @@ async fn main() {
             mcp_pool,
         })),
         loop_running: Arc::new(AtomicBool::new(false)),
-        live: Arc::new(LiveState {
-            buf:    Mutex::new(LiveBuffer::default()),
-            notify: Notify::new(),
-        }),
+        event_tx,
     });
 
     // ── Startup prompt ────────────────────────────────────────────────────────
