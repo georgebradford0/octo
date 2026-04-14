@@ -79,10 +79,9 @@ struct ContainerInfo {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsFrame {
     History      { messages: Vec<HistMsg>, live_gen: usize },
-    Token        { text: String, live_gen: usize },
     Tool         { name: String, input: serde_json::Value, live_gen: usize },
     Question     { question: String, live_gen: usize },
-    Done         { cost_usd: f64, live_gen: usize },
+    Done         { text: String, cost_usd: f64, live_gen: usize },
     Error        { message: String, live_gen: usize },
     Ack          { live_gen: usize },
     // Master-specific frames
@@ -164,15 +163,15 @@ struct AppState {
 
 // ── ChatEvent → WsFrame ───────────────────────────────────────────────────────
 
-fn chat_event_to_frame(event: &ChatEvent, live_gen: usize) -> Option<WsFrame> {
+fn chat_event_to_frame(event: &ChatEvent, text_buf: &mut String, live_gen: usize) -> Option<WsFrame> {
     let v: serde_json::Value = serde_json::to_value(event).ok()?;
     match v["type"].as_str()? {
-        "text"          => Some(WsFrame::Token        { text:     v["text"].as_str()?.to_string(), live_gen }),
-        "tool_use"      => Some(WsFrame::Tool         { name: v["tool"].as_str()?.to_string(), input: v["input"].clone(), live_gen }),
-        "result"        => Some(WsFrame::Done         { cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
-        "interrupted"   => Some(WsFrame::Done         { cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
-        "error"         => Some(WsFrame::Error        { message:  v["message"].as_str()?.to_string(), live_gen }),
-        "question"      => Some(WsFrame::Question     { question: v["question"].as_str()?.to_string(), live_gen }),
+        "text"                     => { if let Some(t) = v["text"].as_str() { text_buf.push_str(t); } None }
+        "tool_use"      => Some(WsFrame::Tool     { name: v["tool"].as_str()?.to_string(), input: v["input"].clone(), live_gen }),
+        "result"        => Some(WsFrame::Done     { text: std::mem::take(text_buf), cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
+        "interrupted"   => Some(WsFrame::Done     { text: std::mem::take(text_buf), cost_usd: v["cost_usd"].as_f64().unwrap_or(0.0), live_gen }),
+        "error"         => Some(WsFrame::Error    { message:  v["message"].as_str()?.to_string(), live_gen }),
+        "question"      => Some(WsFrame::Question { question: v["question"].as_str()?.to_string(), live_gen }),
         _               => None,
     }
 }
@@ -336,8 +335,9 @@ let history = WsFrame::History { messages: hist_msgs, live_gen };
                         });
 
                         tokio::spawn(async move {
+                            let mut text_buf = String::new();
                             while let Some(event) = loop_rx.recv().await {
-                                if let Some(frame) = chat_event_to_frame(&event, new_gen) {
+                                if let Some(frame) = chat_event_to_frame(&event, &mut text_buf, new_gen) {
                                     live_c.buf.lock().unwrap().events.push(frame);
                                     live_c.notify.notify_waiters();
                                 }

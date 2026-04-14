@@ -145,6 +145,7 @@ function renderInlineSegment(text: string, baseStyle: object, key: number) {
 }
 
 function renderText(text: string, baseStyle: object) {
+  if (!text) return null
   // Split on triple-backtick blocks first, then handle inline code within prose segments.
   const blocks = text.split(/(```[\s\S]*?```)/g)
   const elements: React.ReactNode[] = []
