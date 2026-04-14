@@ -438,37 +438,58 @@ const ChatPane = memo(function ChatPane({
 
         switch (frame.type) {
           case 'history': {
-            const msgs: Message[] = frame.messages.map((m, i) => ({
-              id:   `h${i}`,
-              role: m.role,
-              text: m.role === 'tool'
-                ? '\u25b8 ' + formatToolCall(m.tool_name ?? '', m.tool_input)
-                : m.text,
-            }))
-
-            // If there's an unacknowledged pending message, check whether the
-            // server already has it in history.  If not, resend it.
+            // Determine pending resend before touching state.
             const pending = pendingMsgRef.current
+            let resending = false
             if (pending) {
               pendingMsgRef.current = null
               AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
               const lastUser = [...frame.messages].reverse().find(m => m.role === 'user')
               if (lastUser?.text !== pending) {
-                // Server doesn't have it — show optimistic bubble and resend.
-                setMessages([...msgs, { id: uid(), role: 'user' as const, text: pending }])
-                ws.send(JSON.stringify({ type: 'message', text: pending }))
-                updateStatus('streaming')
-                break
+                resending = true
               }
             }
 
-            setMessages(msgs)
-            setPendingQuestion(false)
-            if (isAtBottomRef.current || msgs.length === 0) {
-              setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
+            // Use functional form so we can read current message costs.
+            // HistMsg has no cost field — restore them from in-memory state by
+            // matching assistant message text.  This preserves cost labels across
+            // WS reconnects (foreground/background cycles).
+            setMessages(prev => {
+              const costByText = new Map<string, number>()
+              for (const m of prev) {
+                if (m.role === 'assistant' && m.cost != null) costByText.set(m.text, m.cost)
+              }
+
+              const msgs: Message[] = frame.messages.map((m, i) => {
+                const base: Message = {
+                  id:   `h${i}`,
+                  role: m.role as Message['role'],
+                  text: m.role === 'tool'
+                    ? '\u25b8 ' + formatToolCall(m.tool_name ?? '', m.tool_input)
+                    : m.text,
+                }
+                const cost = m.role === 'assistant' ? costByText.get(m.text) : undefined
+                if (cost != null) base.cost = cost
+                return base
+              })
+
+              const next = resending
+                ? [...msgs, { id: uid(), role: 'user' as const, text: pending! }]
+                : msgs
+              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
+              return next
+            })
+
+            if (resending) {
+              ws.send(JSON.stringify({ type: 'message', text: pending }))
+              updateStatus('streaming')
+            } else {
+              setPendingQuestion(false)
+              if (isAtBottomRef.current || frame.messages.length === 0) {
+                setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
+              }
+              updateStatus('ready')
             }
-            updateStatus('ready')
-            AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(msgs)).catch(() => {})
             break
           }
           case 'ack': {
@@ -758,25 +779,15 @@ function ChildChatScreen({ child, onClose }: {
   // Re-establish child Noise tunnel when app returns to foreground (the native
   // TCP proxy is killed during suspension, so the WS reconnect would otherwise
   // silently fail — same logic as AppInner does for the master tunnel).
-  // We reset childTunnelPort to null first so ChatPane unmounts while the
-  // tunnel is being re-established (mirrors AppInner's "connecting" screen
-  // behaviour), preventing the WS retry loop from hammering a dead port.
+  // Don't null childTunnelPort here — that would unmount ChatPane and lose the
+  // input draft.  ChatPane handles the wsUrl change and dead-port retries fine.
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
-        console.log('[child-noise] app foregrounded — re-establishing tunnel')
-        setChildTunnelPort(null)
-        setTunnelError(null)
         NoiseConnection?.disconnect()
         NoiseConnection?.connect(child.host, child.port, child.pubkey)
-          .then(port => {
-            console.log(`[child-noise] tunnel re-established → local port ${port}`)
-            setChildTunnelPort(port)
-          })
-          .catch(e => {
-            console.error(`[child-noise] reconnect failed: ${e?.message ?? e}`)
-            setTunnelError(e?.message ?? String(e))
-          })
+          .then(port => setChildTunnelPort(port))
+          .catch(e => setTunnelError(e?.message ?? String(e)))
       }
     })
     return () => sub.remove()
