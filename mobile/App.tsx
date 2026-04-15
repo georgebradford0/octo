@@ -325,9 +325,11 @@ const ChatPane = memo(function ChatPane({
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const [inputAreaH,    setInputAreaH]    = useState(0)
 
-  const sendMessageRef = useRef<() => void>(() => {})
-  const listRef        = useRef<FlatList<Message>>(null)
-  const isAtBottomRef  = useRef(true)
+  const sendMessageRef    = useRef<() => void>(() => {})
+  const listRef           = useRef<FlatList<Message>>(null)
+  const isAtBottomRef     = useRef(true)
+  const contentHeightRef  = useRef(0)
+  const listHeightRef     = useRef(0)
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -350,7 +352,10 @@ const ChatPane = memo(function ChatPane({
         }
         setMessages(msgs)
         updateStatus('ready')
-        setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
+        setTimeout(() => {
+          const offset = Math.max(0, contentHeightRef.current - listHeightRef.current)
+          listRef.current?.scrollToOffset({ offset, animated: false })
+        }, 50)
       })
       .catch(() => updateStatus('error'))
   }, [baseUrl])
@@ -445,11 +450,14 @@ const ChatPane = memo(function ChatPane({
           contentContainerStyle={[s.messageListContent, { paddingBottom: inputAreaH + 8 }]}
           style={s.messageList}
           ListEmptyComponent={<Text style={s.emptyState}>say something</Text>}
-          onContentSizeChange={() => {
+          onContentSizeChange={(_, h) => {
+            contentHeightRef.current = h
             if (isAtBottomRef.current) {
-              listRef.current?.scrollToEnd({ animated: false })
+              const offset = Math.max(0, h - listHeightRef.current)
+              listRef.current?.scrollToOffset({ offset, animated: false })
             }
           }}
+          onLayout={e => { listHeightRef.current = e.nativeEvent.layout.height }}
           onScroll={({ nativeEvent: { layoutMeasurement, contentOffset, contentSize } }) => {
             const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80
             if (atBottom !== isAtBottomRef.current) {
@@ -507,7 +515,8 @@ const ChatPane = memo(function ChatPane({
               onPress={() => {
                 isAtBottomRef.current = true
                 setShowScrollBtn(false)
-                listRef.current?.scrollToEnd({ animated: true })
+                const offset = Math.max(0, contentHeightRef.current - listHeightRef.current)
+                listRef.current?.scrollToOffset({ offset, animated: true })
               }}
               activeOpacity={0.75}
             >
