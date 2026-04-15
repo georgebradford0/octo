@@ -148,13 +148,10 @@ async fn message_handler(
 
     let messages = state.messages.lock().unwrap().clone();
 
-    match send_message(&messages, &state.system, &model, &api_key).await {
-        Ok((text, cost_usd)) => {
+    match send_message(messages, &state.system, &model, &api_key, "/").await {
+        Ok((text, cost_usd, updated)) => {
             let mut msgs = state.messages.lock().unwrap();
-            msgs.push(ApiMessage {
-                role:    "assistant".to_string(),
-                content: vec![ContentBlock::Text { text: text.clone() }],
-            });
+            *msgs = updated;
             save_messages(&msgs);
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }

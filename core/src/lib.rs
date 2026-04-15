@@ -391,14 +391,6 @@ pub fn tool_definitions() -> Vec<AnthropicTool> {
                 "head":  { "type": "string", "description": "Source branch to merge from (defaults to current branch)" },
                 "base":  { "type": "string", "description": "Target branch to merge into (defaults to main)" }
             }, "required": ["title"] }) },
-        AnthropicTool { name: "add_mcp_server".into(),
-            description: "Add a new MCP server at runtime. Writes the entry to /data/mcp.json and connects to the server immediately — no container restart required. Use this to extend available tools on the fly.".into(),
-            input_schema: serde_json::json!({ "type": "object", "properties": {
-                "name":    { "type": "string", "description": "Logical name for the server (must be unique)" },
-                "command": { "type": "string", "description": "Executable to run, e.g. \"npx\", \"python3\", \"/data/tools/server.py\"" },
-                "args":    { "type": "array",  "items": { "type": "string" }, "description": "Arguments to pass to the command" },
-                "env":     { "type": "object", "additionalProperties": { "type": "string" }, "description": "Extra environment variables for the server process. Values of the form \"${VAR}\" are expanded from the host environment." }
-            }, "required": ["name", "command"] }) },
     ];
     if std::env::var("BRAVE_API_KEY").ok().filter(|s| !s.is_empty()).is_some() {
         tools.push(AnthropicTool { name: "web_search".into(),
@@ -416,7 +408,6 @@ pub async fn execute_tool(
     cwd:              &str,
     tx:               &mpsc::Sender<ChatEvent>,
     pending_question: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
-    mcp_pool:         &McpPool,
 ) -> String {
     match name {
         "bash" => {
@@ -768,50 +759,7 @@ pub async fn execute_tool(
                 format!("error: unsupported git host in remote URL: {remote_url}")
             }
         }
-        "add_mcp_server" => {
-            let name = match input["name"].as_str().filter(|s| !s.is_empty()) {
-                Some(n) => n.to_string(),
-                None    => return "error: 'name' is required".to_string(),
-            };
-            let command = match input["command"].as_str().filter(|s| !s.is_empty()) {
-                Some(c) => c.to_string(),
-                None    => return "error: 'command' is required".to_string(),
-            };
-            let args: Vec<String> = input["args"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
-                .unwrap_or_default();
-            let env: HashMap<String, String> = input["env"].as_object()
-                .map(|m| m.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                    .collect())
-                .unwrap_or_default();
-
-            let mut configs = mcp::load_mcp_configs();
-            if configs.iter().any(|c| c.name == name) {
-                return format!("error: MCP server '{name}' already exists");
-            }
-            configs.push(mcp::McpServerConfig { name: name.clone(), command, args, env });
-
-            let path = data_dir().join("mcp.json");
-            match serde_json::to_string_pretty(&configs) {
-                Err(e)   => format!("error serializing mcp.json: {e}"),
-                Ok(json) => match fs::write(&path, json) {
-                    Err(e) => format!("error writing mcp.json: {e}"),
-                    Ok(()) => {
-                        let summary = mcp::reload_mcp_pool(mcp_pool).await;
-                        format!("MCP server '{name}' added and connected. {summary}")
-                    }
-                }
-            }
-        }
-        _ => {
-            // Dispatch to MCP servers before giving up.
-            if let Some(result) = mcp::pool_call_tool(mcp_pool, name, input.clone()).await {
-                result
-            } else {
-                format!("unknown tool: {name}")
-            }
-        }
+        _ => format!("unknown tool: {name}"),
     }
 }
 
@@ -925,10 +873,8 @@ pub async fn call_turn(
     api_key:   &str,
     aborted:   &AtomicBool,
     tx:        &mpsc::Sender<ChatEvent>,
-    mcp_pool:  &McpPool,
 ) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
-    let mcp_tools = mcp::pool_tool_definitions(mcp_pool).await;
-    let mut tools: Vec<serde_json::Value> = tool_definitions_with_mcp(&mcp_tools)
+    let mut tools: Vec<serde_json::Value> = tool_definitions()
         .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
     if let Some(last) = tools.last_mut() {
         last["cache_control"] = serde_json::json!({"type": "ephemeral"});
@@ -1020,58 +966,147 @@ pub async fn call_turn(
     Ok((blocks, stop_reason, stream_usage))
 }
 
-/// Single-turn message: call Claude once with the current history, return (reply_text, cost_usd).
-/// No tools, no streaming — one HTTP call, one response.
+/// Send a message and run the tool loop until Claude stops with end_turn.
+/// Returns (final_text, total_cost_usd, updated_messages).
+/// MCP is disabled; only built-in tools are available.
 pub async fn send_message(
-    messages: &[ApiMessage],
-    system:   &str,
-    model:    &str,
-    api_key:  &str,
-) -> Result<(String, f64), String> {
-    let compacted = compact_history(messages, 20);
-    let messages_json: Vec<serde_json::Value> = compacted.iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
+    mut messages: Vec<ApiMessage>,
+    system:       &str,
+    model:        &str,
+    api_key:      &str,
+    cwd:          &str,
+) -> Result<(String, f64, Vec<ApiMessage>), String> {
+    let mut total_cost = 0.0f64;
 
-    let body = serde_json::json!({
-        "model":      model,
-        "max_tokens": 8192,
-        "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
-        "messages":   messages_json,
+    // Dummy event channel and auto-answering pending_question so execute_tool
+    // never blocks waiting for interactive input.
+    let (tx, _rx)      = mpsc::channel::<ChatEvent>(1);
+    let pending_question = std::sync::Arc::new(tokio::sync::Mutex::new(
+        None::<oneshot::Sender<String>>,
+    ));
+    let pq_watcher = pending_question.clone();
+    let watcher = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut slot = pq_watcher.lock().await;
+            if let Some(s) = slot.take() { s.send(String::new()).ok(); }
+        }
     });
 
-    let response = http_client()
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key",         api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("anthropic-beta",    "prompt-caching-2024-07-31")
-        .header("content-type",      "application/json")
-        .json(&body).send().await.map_err(|e| e.to_string())?;
+    let tools: Vec<serde_json::Value> = {
+        let mut t: Vec<serde_json::Value> = tool_definitions()
+            .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
+        if let Some(last) = t.last_mut() {
+            last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+        t
+    };
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let text   = response.text().await.unwrap_or_default();
-        return Err(format!("API error {status}: {text}"));
+    loop {
+        let compacted = compact_history(&messages, 20);
+        let mut messages_json: Vec<serde_json::Value> = compacted.iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+
+        // Prompt-cache breakpoints.
+        let n = messages_json.len();
+        if n >= 2 {
+            let candidates: Vec<usize> = if n < 4 { vec![n - 2] } else { vec![n - 2, n / 2] };
+            let mut seen = std::collections::HashSet::new();
+            for idx in candidates {
+                if seen.insert(idx) {
+                    if let Some(content) = messages_json[idx]["content"].as_array_mut() {
+                        if let Some(last_block) = content.last_mut() {
+                            last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                        }
+                    }
+                }
+            }
+        }
+
+        let body = serde_json::json!({
+            "model":      model,
+            "max_tokens": 8192,
+            "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
+            "tools":      tools,
+            "messages":   messages_json,
+        });
+
+        let response = http_client()
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key",         api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta",    "prompt-caching-2024-07-31")
+            .header("content-type",      "application/json")
+            .json(&body).send().await.map_err(|e| e.to_string())?;
+
+        if !response.status().is_success() {
+            watcher.abort();
+            let status = response.status();
+            let text   = response.text().await.unwrap_or_default();
+            return Err(format!("API error {status}: {text}"));
+        }
+
+        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+        let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
+        let usage = &json["usage"];
+        total_cost += cost_usd(
+            model,
+            usage["input_tokens"].as_u64().unwrap_or(0),
+            usage["output_tokens"].as_u64().unwrap_or(0),
+            usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+            usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        );
+
+        let mut text_buf  = String::new();
+        let mut blocks    = Vec::new();
+        let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
+
+        if let Some(content) = json["content"].as_array() {
+            for block in content {
+                match block["type"].as_str().unwrap_or("") {
+                    "text" => {
+                        let t = block["text"].as_str().unwrap_or("").to_string();
+                        if !t.is_empty() {
+                            text_buf.push_str(&t);
+                            blocks.push(ContentBlock::Text { text: t });
+                        }
+                    }
+                    "tool_use" => {
+                        let id    = block["id"].as_str().unwrap_or("").to_string();
+                        let name  = block["name"].as_str().unwrap_or("").to_string();
+                        let input = block["input"].clone();
+                        tool_uses.push((id.clone(), name.clone(), input.clone()));
+                        blocks.push(ContentBlock::ToolUse { id, name, input });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        messages.push(ApiMessage { role: "assistant".to_string(), content: blocks });
+
+        if stop_reason != "tool_use" || tool_uses.is_empty() {
+            watcher.abort();
+            return Ok((text_buf, total_cost, messages));
+        }
+
+        // Execute tools and collect results.
+        let mut results = Vec::new();
+        for (id, name, input) in tool_uses {
+            let result = truncate_tool_output(
+                execute_tool(&name, &input, cwd, &tx, pending_question.clone()).await,
+                tool_output_limit(&name),
+            );
+            results.push(ContentBlock::ToolResult {
+                tool_use_id: id,
+                content:     vec![serde_json::json!({"type":"text","text":result})],
+            });
+        }
+
+        messages.push(ApiMessage { role: "user".to_string(), content: results });
     }
-
-    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-
-    let text = json["content"].as_array()
-        .and_then(|arr| arr.iter().find(|b| b["type"] == "text"))
-        .and_then(|b|   b["text"].as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let usage = &json["usage"];
-    let cost  = cost_usd(
-        model,
-        usage["input_tokens"].as_u64().unwrap_or(0),
-        usage["output_tokens"].as_u64().unwrap_or(0),
-        usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-        usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
-    );
-
-    Ok((text, cost))
 }
 
 // ── Agentic Loop ──────────────────────────────────────────────────────────────
@@ -1099,9 +1134,9 @@ pub async fn run_agentic_loop(
             return;
         }
 
-        let (messages, system, cwd, aborted, pending_question, mcp_pool) = {
+        let (messages, system, cwd, aborted, pending_question) = {
             let s = session.lock().unwrap();
-            (s.messages.clone(), s.system_prompt.clone(), s.cwd.clone(), s.aborted.clone(), s.pending_question.clone(), s.mcp_pool.clone())
+            (s.messages.clone(), s.system_prompt.clone(), s.cwd.clone(), s.aborted.clone(), s.pending_question.clone())
         };
 
         if aborted.load(Ordering::Relaxed) {
@@ -1110,7 +1145,7 @@ pub async fn run_agentic_loop(
             return;
         }
 
-        match call_turn(&messages, &system, &model, &api_key, &aborted, &tx, &mcp_pool).await {
+        match call_turn(&messages, &system, &model, &api_key, &aborted, &tx).await {
             Err(e) if e == "__interrupted__" => {
                 let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
                 tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
@@ -1144,7 +1179,7 @@ pub async fn run_agentic_loop(
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         let result = truncate_tool_output(
-                            execute_tool(name, input, &cwd, &tx, pending_question.clone(), &mcp_pool).await,
+                            execute_tool(name, input, &cwd, &tx, pending_question.clone()).await,
                             tool_output_limit(name),
                         );
                         tx.send(ChatEvent::ToolResult {
