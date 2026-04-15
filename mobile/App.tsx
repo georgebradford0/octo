@@ -375,9 +375,6 @@ const ChatPane = memo(function ChatPane({
   const sendMessageRef = useRef<() => void>(() => {})
   const listRef        = useRef<FlatList<Message>>(null)
   const isAtBottomRef  = useRef(true)
-  // IDs of tool messages appended during the current live turn, so we can
-  // reorder them after the text arrives in the 'done' frame.
-  const currentTurnToolIdsRef = useRef<string[]>([])
   // Text of the last sent message that hasn't been ack'd by the server yet.
   // Persisted to AsyncStorage so it survives a killed connection; cleared on
   // ack or when confirmed present in the next history frame.
@@ -502,22 +499,12 @@ const ChatPane = memo(function ChatPane({
             break
           }
           case 'tool': {
-            const toolMsg: Message = { id: uid(), role: 'tool' as const, text: '\u25b8 ' + formatToolCall(frame.name, frame.input) }
-            currentTurnToolIdsRef.current = [...currentTurnToolIdsRef.current, toolMsg.id]
-            setMessages(prev => [...prev, toolMsg])
+            setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: '\u25b8 ' + formatToolCall(frame.name, frame.input) }])
             break
           }
           case 'done': {
             setMessages(prev => {
-              const turnToolIds = new Set(currentTurnToolIdsRef.current)
-              currentTurnToolIdsRef.current = []
-              const withoutTools = prev.filter(m => !turnToolIds.has(m.id))
-              const turnTools    = prev.filter(m => turnToolIds.has(m.id))
-              const next = [
-                ...withoutTools,
-                { id: uid(), role: 'assistant' as const, text: frame.text, cost: frame.cost_usd },
-                ...turnTools,
-              ]
+              const next = [...prev, { id: uid(), role: 'assistant' as const, text: frame.text, cost: frame.cost_usd }]
               AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
               return next
             })
@@ -535,7 +522,6 @@ const ChatPane = memo(function ChatPane({
             break
           }
           case 'error': {
-            currentTurnToolIdsRef.current = []
             setMessages(prev => {
               const next = [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${frame.message}` }]
               AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
