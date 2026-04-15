@@ -7,29 +7,32 @@ ENV OPENSSL_NO_VENDOR=1
 
 WORKDIR /build
 
-# Workspace manifest that includes only the crates we need.
-RUN printf '[workspace]\nmembers = ["core", "rulyeh"]\nresolver = "2"\n' > Cargo.toml
+# Workspace manifest includes all three crates so both binaries are built here.
+RUN printf '[workspace]\nmembers = ["core", "rulyeh", "server"]\nresolver = "2"\n' > Cargo.toml
 
 COPY Cargo.lock ./
 COPY core/Cargo.toml   core/
 COPY rulyeh/Cargo.toml rulyeh/
+COPY server/Cargo.toml server/
 
 # Stub sources for dep-caching layer.
-RUN mkdir -p core/src rulyeh/src && \
+RUN mkdir -p core/src rulyeh/src server/src && \
     echo '' > core/src/lib.rs && \
-    echo 'fn main() {}' > rulyeh/src/main.rs
+    echo 'fn main() {}' > rulyeh/src/main.rs && \
+    echo 'fn main() {}' > server/src/main.rs
 
 RUN cargo fetch
 
 COPY core/src   core/src
 COPY rulyeh/src rulyeh/src
+COPY server/src server/src
 
-RUN cargo build --release -p claudulhu-rulyeh
+RUN cargo build --release -p claudulhu-rulyeh -p claudulhu-server
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates curl gnupg && \
+RUN apt-get update && apt-get install -y ca-certificates curl git gnupg && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
     chmod a+r /etc/apt/keyrings/docker.gpg && \
@@ -46,9 +49,11 @@ RUN apt-get update && apt-get install -y ca-certificates curl gnupg && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/claudulhu-rulyeh /usr/local/bin/claudulhu-rulyeh
+COPY --from=builder /build/target/release/claudulhu-server /usr/local/bin/claudulhu-server
 
-COPY rulyeh/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY rulyeh/docker-entrypoint.sh        /usr/local/bin/docker-entrypoint.sh
+COPY server/docker-entrypoint.sh        /usr/local/bin/docker-entrypoint-server.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-server.sh
 
 LABEL org.opencontainers.image.source=https://github.com/georgebradford0/claudulhu
 

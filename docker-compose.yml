@@ -31,7 +31,8 @@ services:
   claudulhu:
     build:
       context: .
-      dockerfile: server/Dockerfile
+      dockerfile: rulyeh/Dockerfile
+    entrypoint: ["/usr/local/bin/docker-entrypoint-server.sh"]
     ports:
       - "${NOISE_PORT:-9100}:${NOISE_PORT:-9100}"
     environment:
