@@ -5,8 +5,6 @@ import {
   Animated,
   AppState,
   FlatList,
-  Keyboard,
-  PermissionsAndroid,
   Platform,
   ScrollView,
   StyleSheet,
@@ -19,6 +17,7 @@ import { KeyboardProvider, useReanimatedKeyboardAnimation } from 'react-native-k
 import Reanimated, { useAnimatedStyle } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
+import { PermissionsAndroid } from 'react-native'
 import NoiseConnection from './src/NativeNoiseConnection'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -43,25 +42,11 @@ interface ContainerInfo {
   pubkey:  string
 }
 
-type ServerFrame =
-  | { type: 'history';  messages: HistMsg[] }
-  | { type: 'ack' }
-  | { type: 'tool';     name: string; input?: Record<string, unknown> }
-  | { type: 'done';     text: string; cost_usd: number }
-  | { type: 'question'; question: string }
-  | { type: 'error';    message: string }
-  | { type: 'container_list';        containers: ContainerInfo[] }
-  | { type: 'container_status';      id: string; name: string; status: string }
-  | { type: 'container_start_error'; id: string; message: string }
-
-interface HistMsg { role: 'user' | 'assistant' | 'tool'; text: string; tool_name?: string; tool_input?: Record<string, unknown> }
-
 interface Message {
-  id:          string
-  role:        'user' | 'assistant' | 'tool' | 'session'
-  text:        string
-  isQuestion?: boolean
-  cost?:       number
+  id:    string
+  role:  'user' | 'assistant' | 'tool' | 'session'
+  text:  string
+  cost?: number
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -90,8 +75,7 @@ const connKeyFor = (c: NoiseConnectionInfo) => `${c.host}:${c.port}:${c.pk.slice
 // Public key (base32): 34577VOSZRDRTUB7XYTT6FS62Y4QYYVLQJCHP4XNDQA2763AU5YQ
 //
 // iOS Simulator shares the Mac's network stack — 127.0.0.1 reaches Docker's
-// bound port directly. (Hostnames like "localhost" won't work because the
-// native Swift layer uses inet_pton which only accepts numeric IP addresses.)
+// bound port directly.
 const DEV_HOST = '127.0.0.1'
 const DEV_CONN: NoiseConnectionInfo = {
   v:     2,
@@ -146,7 +130,6 @@ function renderInlineSegment(text: string, baseStyle: object, key: number) {
 
 function renderText(text: string, baseStyle: object) {
   if (!text) return null
-  // Split on triple-backtick blocks first, then handle inline code within prose segments.
   const blocks = text.split(/(```[\s\S]*?```)/g)
   const elements: React.ReactNode[] = []
   blocks.forEach((block, bi) => {
@@ -158,7 +141,6 @@ function renderText(text: string, baseStyle: object) {
         </View>
       )
     } else {
-      // Within a prose block, split on inline backticks.
       const inlineParts = block.split(/`([^`]+)`/g)
       if (inlineParts.length === 1) {
         elements.push(renderInlineSegment(block, baseStyle, bi))
@@ -219,7 +201,7 @@ function parseAtQuery(text: string): { atIndex: number; dirPart: string; filePar
   const atIndex = text.lastIndexOf('@')
   if (atIndex === -1) return null
   const query = text.slice(atIndex + 1)
-  if (query.includes(' ')) return null   // space ends the completion zone
+  if (query.includes(' ')) return null
   const lastSlash = query.lastIndexOf('/')
   return lastSlash === -1
     ? { atIndex, dirPart: '', filePart: query }
@@ -230,26 +212,6 @@ function parseAtQuery(text: string): { atIndex: number; dirPart: string; filePar
 
 function containerDisplayName(name: string): string {
   return name.replace(/^claudulhu-/, '')
-}
-
-// ── Tool call formatting ───────────────────────────────────────────────────────
-
-function formatToolCall(name: string, input?: Record<string, unknown>): string {
-  const capName = name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
-  const entries = Object.entries(input ?? {})
-  let args: string
-  if (entries.length === 0) {
-    args = ''
-  } else if (entries.length === 1) {
-    const val = String(entries[0][1])
-    args = val.length > 120 ? val.slice(0, 120) + '…' : val
-  } else {
-    args = entries.map(([k, v]) => {
-      const val = String(v)
-      return `${k}=${val.length > 60 ? val.slice(0, 60) + '…' : val}`
-    }).join(', ')
-  }
-  return `${capName}(${args})`
 }
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
@@ -276,7 +238,6 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
   }
   return (
     <View style={s.messageWrap}>
-      {message.isQuestion && <Text style={s.questionMark}>?</Text>}
       {renderText(message.text, s.textBlock)}
       {message.cost != null && (
         <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
@@ -345,15 +306,11 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
 const ChatPane = memo(function ChatPane({
-  wsUrl, connKey, onStatusChange, clearRef, interruptRef, onContainerFrame, sendRef,
+  baseUrl, onStatusChange, clearRef,
 }: {
-  wsUrl:              string
-  connKey:            string
-  onStatusChange:     (s: ConnStatus) => void
-  clearRef:           React.MutableRefObject<() => void>
-  interruptRef:       React.MutableRefObject<() => void>
-  onContainerFrame?:  (frame: ServerFrame) => void
-  sendRef?:           React.MutableRefObject<(msg: object) => void>
+  baseUrl:        string
+  onStatusChange: (s: ConnStatus) => void
+  clearRef:       React.MutableRefObject<() => void>
 }) {
   const insets                     = useSafeAreaInsets()
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
@@ -361,39 +318,62 @@ const ChatPane = memo(function ChatPane({
     height: Math.max(insets.bottom, -keyboardHeight.value),
   }))
 
-  const [messages, setMessages] = useState<Message[]>([])
-  const [status,          setStatus]          = useState<ConnStatus>('connecting')
-  const [input,           setInput]           = useState('')
-  const [pendingQuestion, setPendingQuestion] = useState(false)
-  const [completions,     setCompletions]     = useState<string[]>([])
-  const [showScrollBtn,   setShowScrollBtn]   = useState(false)
-  const [inputAreaH,      setInputAreaH]      = useState(0)
+  const [messages,      setMessages]      = useState<Message[]>([])
+  const [status,        setStatus]        = useState<ConnStatus>('connecting')
+  const [input,         setInput]         = useState('')
+  const [completions,   setCompletions]   = useState<string[]>([])
+  const [showScrollBtn, setShowScrollBtn] = useState(false)
+  const [inputAreaH,    setInputAreaH]    = useState(0)
 
-  const httpBase = wsUrl.replace(/^ws:/, 'http:').replace(/\/chat$/, '')
-
-  const wsRef          = useRef<WebSocket | null>(null)
   const sendMessageRef = useRef<() => void>(() => {})
   const listRef        = useRef<FlatList<Message>>(null)
   const isAtBottomRef  = useRef(true)
-  // Text of the last sent message that hasn't been ack'd by the server yet.
-  // Persisted to AsyncStorage so it survives a killed connection; cleared on
-  // ack or when confirmed present in the next history frame.
-  const pendingMsgRef  = useRef<string | null>(null)
-  // True once we've attempted the initial AsyncStorage load for this connKey.
-  const storageLoadedRef = useRef(false)
 
+  const updateStatus = useCallback((s: ConnStatus) => {
+    setStatus(s)
+    onStatusChange(s)
+  }, [onStatusChange])
 
-  // Fetch @ completions whenever the input changes.
+  const loadHistory = useCallback(() => {
+    fetch(`${baseUrl}/history`)
+      .then(r => r.json())
+      .then((data: { messages: Array<{ role: string; text: string }> }) => {
+        setMessages(data.messages.map((m, i) => ({
+          id:   `h${i}`,
+          role: m.role as Message['role'],
+          text: m.text,
+        })))
+        updateStatus('ready')
+        setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
+      })
+      .catch(() => updateStatus('error'))
+  }, [baseUrl])
+
+  // Fetch history on mount and when baseUrl changes.
+  useEffect(() => {
+    updateStatus('connecting')
+    loadHistory()
+  }, [baseUrl])
+
+  // Re-fetch history when app foregrounds (tunnel may have reconnected).
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', nextState => {
+      if (nextState === 'active') loadHistory()
+    })
+    return () => sub.remove()
+  }, [loadHistory])
+
+  // @ completions
   useEffect(() => {
     const parsed = parseAtQuery(input)
     if (!parsed) { setCompletions([]); return }
     let cancelled = false
-    fetch(`${httpBase}/completions?dir_part=${encodeURIComponent(parsed.dirPart)}&file_part=${encodeURIComponent(parsed.filePart)}`)
+    fetch(`${baseUrl}/completions?dir_part=${encodeURIComponent(parsed.dirPart)}&file_part=${encodeURIComponent(parsed.filePart)}`)
       .then(r => r.json())
       .then((data: string[]) => { if (!cancelled) setCompletions(data) })
       .catch(() => { if (!cancelled) setCompletions([]) })
     return () => { cancelled = true }
-  }, [input, httpBase])
+  }, [input, baseUrl])
 
   const applyCompletion = useCallback((completion: string) => {
     const parsed = parseAtQuery(input)
@@ -401,242 +381,49 @@ const ChatPane = memo(function ChatPane({
     const newText = input.slice(0, parsed.atIndex + 1) + completion
     if (completion.endsWith('/')) {
       setInput(newText)
-      // useEffect will re-fetch the next directory level
     } else {
       setInput(newText + ' ')
       setCompletions([])
     }
   }, [input])
 
-  const updateStatus = useCallback((s: ConnStatus) => {
-    setStatus(s)
-    onStatusChange(s)
-  }, [onStatusChange])
-
-  // WebSocket connection lifecycle
-  useEffect(() => {
-    let cancelled = false
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-
-    const connect = () => {
-      if (cancelled) return
-      wsRef.current?.close()
-      updateStatus('connecting')
-      const ws = new WebSocket(wsUrl)
-      wsRef.current = ws
-
-      ws.onmessage = (event: WebSocketMessageEvent) => {
-        const data = event.data as string
-        if (cancelled) return
-        let frame: ServerFrame
-        try { frame = JSON.parse(data) } catch { return }
-
-        // Route container management frames to AppInner.
-        if (frame.type === 'container_list' || frame.type === 'container_status' || frame.type === 'container_start_error') {
-          onContainerFrame?.(frame)
-          return
-        }
-
-        switch (frame.type) {
-          case 'history': {
-            // Determine pending resend before touching state.
-            const pending = pendingMsgRef.current
-            let resending = false
-            if (pending) {
-              pendingMsgRef.current = null
-              AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
-              const lastUser = [...frame.messages].reverse().find(m => m.role === 'user')
-              if (lastUser?.text !== pending) {
-                resending = true
-              }
-            }
-
-            // Use functional form so we can read current message costs.
-            // HistMsg has no cost field — restore them from in-memory state by
-            // matching assistant message text.  This preserves cost labels across
-            // WS reconnects (foreground/background cycles).
-            setMessages(prev => {
-              const costByText = new Map<string, number>()
-              for (const m of prev) {
-                if (m.role === 'assistant' && m.cost != null) costByText.set(m.text, m.cost)
-              }
-
-              const msgs: Message[] = frame.messages.map((m, i) => {
-                const base: Message = {
-                  id:   `h${i}`,
-                  role: m.role as Message['role'],
-                  text: m.role === 'tool'
-                    ? '\u25b8 ' + formatToolCall(m.tool_name ?? '', m.tool_input)
-                    : m.text,
-                }
-                const cost = m.role === 'assistant' ? costByText.get(m.text) : undefined
-                if (cost != null) base.cost = cost
-                return base
-              })
-
-              const next = resending
-                ? [...msgs, { id: uid(), role: 'user' as const, text: pending! }]
-                : msgs
-              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
-              return next
-            })
-
-            if (resending) {
-              ws.send(JSON.stringify({ type: 'message', text: pending }))
-              updateStatus('streaming')
-            } else {
-              setPendingQuestion(false)
-              if (isAtBottomRef.current || frame.messages.length === 0) {
-                setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
-              }
-              updateStatus('ready')
-            }
-            break
-          }
-          case 'ack': {
-            pendingMsgRef.current = null
-            AsyncStorage.removeItem(`pending_${connKey}`).catch(() => {})
-            break
-          }
-          case 'tool': {
-            setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: '\u25b8 ' + formatToolCall(frame.name, frame.input) }])
-            break
-          }
-          case 'done': {
-            setMessages(prev => {
-              const next = [...prev, { id: uid(), role: 'assistant' as const, text: frame.text, cost: frame.cost_usd }]
-              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
-              return next
-            })
-            updateStatus('ready')
-            setPendingQuestion(false)
-            break
-          }
-          case 'question': {
-            setMessages(prev => [
-              ...prev,
-              { id: uid(), role: 'assistant' as const, text: frame.question, isQuestion: true },
-            ])
-            setPendingQuestion(true)
-            updateStatus('ready')
-            break
-          }
-          case 'error': {
-            setMessages(prev => {
-              const next = [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${frame.message}` }]
-              AsyncStorage.setItem(`msgs_${connKey}`, JSON.stringify(next)).catch(() => {})
-              return next
-            })
-            updateStatus('ready')
-            break
-          }
-        }
-      }
-
-      ws.onerror = () => {
-        if (cancelled) return
-        updateStatus('error')
-      }
-
-      ws.onclose = () => {
-        if (cancelled) return
-        updateStatus('connecting')
-        reconnectTimer = setTimeout(connect, 1500)
-      }
-    }
-
-    // Load cached messages and any unacknowledged pending message before
-    // connecting.  Only do this once per connKey — on tunnel reconnects the
-    // in-memory state is current and doesn't need reloading from disk.
-    if (!storageLoadedRef.current) {
-      storageLoadedRef.current = true
-      Promise.all([
-        AsyncStorage.getItem(`msgs_${connKey}`).catch(() => null),
-        AsyncStorage.getItem(`pending_${connKey}`).catch(() => null),
-      ]).then(([msgsJson, pendingText]) => {
-        if (cancelled) return
-        if (msgsJson) try { setMessages(JSON.parse(msgsJson)) } catch {}
-        if (pendingText) pendingMsgRef.current = pendingText
-        connect()
-      })
-    } else {
-      connect()
-    }
-
-    return () => {
-      cancelled = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      wsRef.current?.close()
-    }
-  }, [wsUrl, connKey])
-
-  // When app foregrounds: force-close WS so onclose fires and we reconnect.
-  // (Noise tunnel re-establishment is handled by AppInner for the master
-  // connection, and by ChildChatScreen for child connections.)
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') {
-        const ws = wsRef.current
-        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-          ws.close()
-        }
-      }
-    })
-    return () => sub.remove()
-  }, [])
-
-  // Scroll to bottom when the keyboard appears, but only if already near bottom.
-  useEffect(() => {
-    const sub = Keyboard.addListener('keyboardDidShow', () => {
-      if (isAtBottomRef.current) {
-        listRef.current?.scrollToEnd({ animated: false })
-      }
-    })
-    return () => sub.remove()
-  }, [])
-
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text || status === 'streaming') return
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
 
     setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
     isAtBottomRef.current = true
-
-    if (pendingQuestion) {
-      ws.send(JSON.stringify({ type: 'answer', answer: text }))
-      setPendingQuestion(false)
-    } else {
-      // Persist before sending so a dropped connection doesn't silently lose
-      // the message.  Cleared on ack from server or confirmed in next history.
-      pendingMsgRef.current = text
-      AsyncStorage.setItem(`pending_${connKey}`, text).catch(() => {})
-      ws.send(JSON.stringify({ type: 'message', text }))
-    }
-    updateStatus('streaming')
     setInput('')
-  }, [input, pendingQuestion, status])
+    updateStatus('streaming')
+
+    fetch(`${baseUrl}/message`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ text }),
+    })
+      .then(r => r.json())
+      .then((data: { text?: string; cost_usd?: number; error?: string }) => {
+        if (data.error) {
+          setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${data.error}` }])
+        } else {
+          setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: data.text ?? '', cost: data.cost_usd }])
+        }
+        updateStatus('ready')
+      })
+      .catch(e => {
+        setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${String(e)}` }])
+        updateStatus('error')
+      })
+  }, [input, status, baseUrl])
 
   sendMessageRef.current = sendMessage
 
   const clearConversation = useCallback(() => {
-    wsRef.current?.send(JSON.stringify({ type: 'clear' }))
+    fetch(`${baseUrl}/clear`, { method: 'POST' }).catch(() => {})
     setMessages([])
-    setPendingQuestion(false)
-    AsyncStorage.removeItem(`msgs_${connKey}`).catch(() => {})
-  }, [connKey])
+    updateStatus('ready')
+  }, [baseUrl])
   clearRef.current = clearConversation
-
-  interruptRef.current = () => {
-    wsRef.current?.send(JSON.stringify({ type: 'interrupt' }))
-  }
-
-  if (sendRef) {
-    sendRef.current = (msg: object) => {
-      wsRef.current?.send(JSON.stringify(msg))
-    }
-  }
 
   const isPending = status === 'streaming'
 
@@ -669,12 +456,9 @@ const ChatPane = memo(function ChatPane({
           ListFooterComponent={isPending ? <PendingEllipsis /> : null}
         />
 
-        {(status === 'connecting' || status === 'error') && (
+        {status === 'error' && (
           <View style={s.reconnectBanner}>
-            {status !== 'error' && <ActivityIndicator size="small" color={C.yellow} style={{ marginRight: 6 }} />}
-            <Text style={s.reconnectText}>
-              {status === 'error' ? 'connection error — retrying…' : 'reconnecting…'}
-            </Text>
+            <Text style={s.reconnectText}>connection error</Text>
           </View>
         )}
 
@@ -692,30 +476,21 @@ const ChatPane = memo(function ChatPane({
               ))}
             </ScrollView>
           )}
-          {status === 'streaming' ? (
-            <TouchableOpacity
-              style={s.inputStopBtn}
-              onPress={() => interruptRef.current()}
-              activeOpacity={0.75}
-            >
-              <Text style={s.stopBtnText}>■ stop</Text>
-            </TouchableOpacity>
-          ) : (
-            <TextInput
-              style={s.input}
-              value={input}
-              onChangeText={text => {
-                if (text.includes('\n')) { sendMessageRef.current(); return }
-                setInput(text)
-              }}
-              onSubmitEditing={() => sendMessageRef.current()}
-              placeholder={pendingQuestion ? 'answer…' : 'message…'}
-              placeholderTextColor={C.textMuted}
-              multiline
-              returnKeyType="send"
-              blurOnSubmit={false}
-            />
-          )}
+          <TextInput
+            style={s.input}
+            value={input}
+            onChangeText={text => {
+              if (text.includes('\n')) { sendMessageRef.current(); return }
+              setInput(text)
+            }}
+            onSubmitEditing={() => sendMessageRef.current()}
+            placeholder="message…"
+            placeholderTextColor={C.textMuted}
+            multiline
+            returnKeyType="send"
+            blurOnSubmit={false}
+            editable={status !== 'streaming'}
+          />
         </View>
 
         {showScrollBtn && (
@@ -734,9 +509,6 @@ const ChatPane = memo(function ChatPane({
           </View>
         )}
       </View>
-      {/* Spacer whose height matches the keyboard height (or bottom safe area when
-          keyboard is hidden). Growing this spacer shrinks the flex:1 content above,
-          so the entire conversation+input block moves up with the keyboard. */}
       <Reanimated.View style={[{ backgroundColor: C.surface }, spacerStyle]} />
     </View>
   )
@@ -752,8 +524,7 @@ function ChildChatScreen({ child, onClose }: {
   const [childTunnelPort, setChildTunnelPort] = useState<number | null>(null)
   const [tunnelError,     setTunnelError]     = useState<string | null>(null)
   const [chatStatus,      setChatStatus]      = useState<ConnStatus>('connecting')
-  const clearRef     = useRef<() => void>(() => {})
-  const interruptRef = useRef<() => void>(() => {})
+  const clearRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     let cancelled = false
@@ -771,11 +542,6 @@ function ChildChatScreen({ child, onClose }: {
     }
   }, [])
 
-  // Re-establish child Noise tunnel when app returns to foreground (the native
-  // TCP proxy is killed during suspension, so the WS reconnect would otherwise
-  // silently fail — same logic as AppInner does for the master tunnel).
-  // Don't null childTunnelPort here — that would unmount ChatPane and lose the
-  // input draft.  ChatPane handles the wsUrl change and dead-port retries fine.
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
       if (nextState === 'active') {
@@ -788,12 +554,6 @@ function ChildChatScreen({ child, onClose }: {
     return () => sub.remove()
   }, [child.host, child.port, child.pubkey])
 
-  const handleBack = useCallback(() => {
-    onClose()
-  }, [onClose])
-
-  const connKey = `child:${child.id}`
-
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <View style={s.paneArea}>
@@ -801,7 +561,7 @@ function ChildChatScreen({ child, onClose }: {
           <View style={s.headerLeft}>
             <TouchableOpacity
               style={s.backBtn}
-              onPress={handleBack}
+              onPress={onClose}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Text style={s.backBtnText}>‹</Text>
@@ -811,33 +571,21 @@ function ChildChatScreen({ child, onClose }: {
               <Text style={s.headerTitle}>{containerDisplayName(child.name)}</Text>
             </View>
           </View>
-          {chatStatus === 'streaming' ? (
-            <TouchableOpacity
-              style={s.clearBtn}
-              onPress={() => interruptRef.current()}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Text style={s.stopBtnText}>■ stop</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={s.clearBtn}
-              onPress={() => clearRef.current()}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              disabled={chatStatus !== 'ready'}
-            >
-              <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity
+            style={s.clearBtn}
+            onPress={() => clearRef.current()}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            disabled={chatStatus !== 'ready'}
+          >
+            <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
+          </TouchableOpacity>
         </View>
 
         {childTunnelPort ? (
           <ChatPane
-            wsUrl={`ws://127.0.0.1:${childTunnelPort}/chat`}
-            connKey={connKey}
+            baseUrl={`http://127.0.0.1:${childTunnelPort}`}
             onStatusChange={setChatStatus}
             clearRef={clearRef}
-            interruptRef={interruptRef}
           />
         ) : (
           <View style={s.setupCenter}>
@@ -887,18 +635,16 @@ function AppInner() {
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [scanning,    setScanning]    = useState(false)
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
-  const [containers,           setContainers]           = useState<ContainerInfo[]>([])
-  const [activeChild,          setActiveChild]          = useState<ContainerInfo | null>(null)
-  const [showSettingsMenu,     setShowSettingsMenu]     = useState(false)
-  const [startingContainerId,  setStartingContainerId]  = useState<string | null>(null)
-  const [startingError,        setStartingError]        = useState<string | null>(null)
+  const [containers,          setContainers]          = useState<ContainerInfo[]>([])
+  const [activeChild,         setActiveChild]         = useState<ContainerInfo | null>(null)
+  const [showSettingsMenu,    setShowSettingsMenu]    = useState(false)
+  const [startingContainerId, setStartingContainerId] = useState<string | null>(null)
+  const [startingError,       setStartingError]       = useState<string | null>(null)
   const startingContainerIdRef = useRef<string | null>(null)
-  const masterSendRef          = useRef<(msg: object) => void>(() => {})
-  // Incrementing this forces the master Noise tunnel effect to re-run and
-  // re-establish the master connection after a child screen closes.
   const [noiseKey,    setNoiseKey]    = useState(0)
-  const clearChatRef     = useRef<() => void>(() => {})
-  const interruptChatRef = useRef<() => void>(() => {})
+  const clearChatRef = useRef<() => void>(() => {})
+
+  const masterBaseUrl = tunnelPort ? `http://127.0.0.1:${tunnelPort}` : null
 
   // Load saved master connection on mount and auto-connect.
   useEffect(() => {
@@ -917,8 +663,7 @@ function AppInner() {
     return () => { cancelled = true }
   }, [])
 
-  // Establish Noise tunnel when conn changes or after a child modal closes
-  // (noiseKey is incremented on child close to force reconnection to master).
+  // Establish Noise tunnel when conn changes or after a child modal closes.
   useEffect(() => {
     setTunnelPort(null)
     setTunnelError(null)
@@ -939,8 +684,7 @@ function AppInner() {
     }
   }, [conn, noiseKey])
 
-  // Re-establish Noise tunnel when app returns to foreground (iOS kills the
-  // native TCP proxy during suspension; without this the WS reconnect silently fails).
+  // Re-establish Noise tunnel when app returns to foreground.
   useEffect(() => {
     if (!conn) return
     const sub = AppState.addEventListener('change', nextState => {
@@ -953,6 +697,40 @@ function AppInner() {
     })
     return () => sub.remove()
   }, [conn])
+
+  // Fetch container list from rulyeh.
+  const fetchContainers = useCallback(() => {
+    if (!masterBaseUrl) return
+    fetch(`${masterBaseUrl}/containers`)
+      .then(r => r.json())
+      .then((data: { containers: ContainerInfo[] }) => {
+        setContainers(data.containers)
+        // If we're waiting for a container to start, check if it's up now.
+        const waitingId = startingContainerIdRef.current
+        if (waitingId) {
+          const started = data.containers.find(c => c.id === waitingId && c.status === 'running' && c.pubkey)
+          if (started) {
+            startingContainerIdRef.current = null
+            setStartingContainerId(null)
+            setStartingError(null)
+            setActiveChild(started)
+          }
+        }
+      })
+      .catch(() => {})
+  }, [masterBaseUrl])
+
+  // Fetch containers on connect and periodically while a start is in progress.
+  useEffect(() => {
+    if (!masterBaseUrl) return
+    fetchContainers()
+  }, [masterBaseUrl])
+
+  useEffect(() => {
+    if (!startingContainerId) return
+    const interval = setInterval(fetchContainers, 3000)
+    return () => clearInterval(interval)
+  }, [startingContainerId, fetchContainers])
 
   const handleQrScanned = useCallback((raw: string) => {
     setScanning(false)
@@ -977,36 +755,38 @@ function AppInner() {
     setConn(null)
   }, [])
 
-  const handleContainerFrame = useCallback((frame: ServerFrame) => {
-    if (frame.type === 'container_list') {
-      setContainers(frame.containers)
-      const waitingId = startingContainerIdRef.current
-      if (waitingId) {
-        const started = frame.containers.find(c => c.id === waitingId && c.status === 'running' && c.pubkey)
-        if (started) {
+  const startContainer = useCallback((id: string) => {
+    if (!masterBaseUrl) return
+    startingContainerIdRef.current = id
+    setStartingContainerId(id)
+    setStartingError(null)
+    fetch(`${masterBaseUrl}/containers/start`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id }),
+    })
+      .then(r => r.json())
+      .then((data: { error?: string }) => {
+        if (data.error) {
           startingContainerIdRef.current = null
           setStartingContainerId(null)
-          setStartingError(null)
-          setActiveChild(started)
+          setStartingError(data.error)
         }
-      }
-    } else if (frame.type === 'container_status') {
-      setContainers(prev => prev.map(c =>
-        c.id === frame.id ? { ...c, status: frame.status } : c
-      ))
-    } else if (frame.type === 'container_start_error') {
-      if (frame.id === startingContainerIdRef.current) {
-        setStartingError(frame.message)
-      }
-    }
-  }, [])
+        // On success, the poll interval will detect the running container.
+      })
+      .catch(e => {
+        startingContainerIdRef.current = null
+        setStartingContainerId(null)
+        setStartingError(String(e))
+      })
+  }, [masterBaseUrl])
 
   // ── QR scanner overlay ──────────────────────────────────────────────────────
   if (scanning) {
     return <QrScanner onScanned={handleQrScanned} onCancel={() => setScanning(false)} />
   }
 
-  // ── Connecting screen (conn selected, tunnel not yet up) ────────────────────
+  // ── Connecting screen ───────────────────────────────────────────────────────
   if (conn && !tunnelPort) {
     return (
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
@@ -1064,27 +844,20 @@ function AppInner() {
             <Text style={s.headerTitle}>rulyeh</Text>
           </View>
           <View style={s.headerRight}>
-            {chatStatus === 'streaming' ? (
-              <TouchableOpacity
-                style={s.clearBtn}
-                onPress={() => interruptChatRef.current()}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={s.stopBtnText}>■ stop</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={s.clearBtn}
-                onPress={() => clearChatRef.current()}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                disabled={chatStatus !== 'ready'}
-              >
-                <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
-              </TouchableOpacity>
-            )}
+            <TouchableOpacity
+              style={s.clearBtn}
+              onPress={() => clearChatRef.current()}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              disabled={chatStatus !== 'ready'}
+            >
+              <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={s.settingsMenuBtn}
-              onPress={() => setShowSettingsMenu(v => !v)}
+              onPress={() => {
+                fetchContainers()
+                setShowSettingsMenu(v => !v)
+              }}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Text style={s.settingsMenuBtnText}>···</Text>
@@ -1117,10 +890,7 @@ function AppInner() {
                     if (c.status === 'running') {
                       setActiveChild(c)
                     } else {
-                      startingContainerIdRef.current = c.id
-                      setStartingContainerId(c.id)
-                      setStartingError(null)
-                      masterSendRef.current({ type: 'start_container', id: c.id })
+                      startContainer(c.id)
                     }
                   }}
                   activeOpacity={0.7}
@@ -1143,15 +913,13 @@ function AppInner() {
           </View>
         )}
 
-        <ChatPane
-          wsUrl={`ws://127.0.0.1:${tunnelPort}/chat`}
-          connKey={connKeyFor(conn)}
-          onStatusChange={setChatStatus}
-          clearRef={clearChatRef}
-          interruptRef={interruptChatRef}
-          onContainerFrame={handleContainerFrame}
-          sendRef={masterSendRef}
-        />
+        {masterBaseUrl && (
+          <ChatPane
+            baseUrl={masterBaseUrl}
+            onStatusChange={setChatStatus}
+            clearRef={clearChatRef}
+          />
+        )}
 
         {startingContainerId !== null && (
           <View style={s.startingOverlay}>
@@ -1301,4 +1069,3 @@ const s = StyleSheet.create({
   containerMenuItemStatus:  { fontSize: 16, color: C.textMuted, fontFamily: ARIMO },
 
 })
-

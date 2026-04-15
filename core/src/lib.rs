@@ -1020,6 +1020,60 @@ pub async fn call_turn(
     Ok((blocks, stop_reason, stream_usage))
 }
 
+/// Single-turn message: call Claude once with the current history, return (reply_text, cost_usd).
+/// No tools, no streaming — one HTTP call, one response.
+pub async fn send_message(
+    messages: &[ApiMessage],
+    system:   &str,
+    model:    &str,
+    api_key:  &str,
+) -> Result<(String, f64), String> {
+    let compacted = compact_history(messages, 20);
+    let messages_json: Vec<serde_json::Value> = compacted.iter()
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
+
+    let body = serde_json::json!({
+        "model":      model,
+        "max_tokens": 8192,
+        "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
+        "messages":   messages_json,
+    });
+
+    let response = http_client()
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key",         api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta",    "prompt-caching-2024-07-31")
+        .header("content-type",      "application/json")
+        .json(&body).send().await.map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text   = response.text().await.unwrap_or_default();
+        return Err(format!("API error {status}: {text}"));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+    let text = json["content"].as_array()
+        .and_then(|arr| arr.iter().find(|b| b["type"] == "text"))
+        .and_then(|b|   b["text"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let usage = &json["usage"];
+    let cost  = cost_usd(
+        model,
+        usage["input_tokens"].as_u64().unwrap_or(0),
+        usage["output_tokens"].as_u64().unwrap_or(0),
+        usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+    );
+
+    Ok((text, cost))
+}
+
 // ── Agentic Loop ──────────────────────────────────────────────────────────────
 
 pub async fn run_agentic_loop(

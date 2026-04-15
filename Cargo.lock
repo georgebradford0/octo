@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "claudulhu-rulyeh"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "claudulhu-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",
