@@ -58,12 +58,47 @@ struct HistMsg {
 }
 
 fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
-    messages.iter().filter_map(|m| {
-        let text: String = m.content.iter()
-            .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
-            .collect();
-        if text.is_empty() { None } else { Some(HistMsg { role: m.role.clone(), text }) }
-    }).collect()
+    let mut result = Vec::new();
+    for m in messages {
+        match m.role.as_str() {
+            "user" => {
+                let text: String = m.content.iter()
+                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
+                    .collect();
+                if !text.is_empty() { result.push(HistMsg { role: "user".to_string(), text }); }
+            }
+            "assistant" => {
+                let text: String = m.content.iter()
+                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
+                    .collect();
+                if !text.is_empty() { result.push(HistMsg { role: "assistant".to_string(), text }); }
+                for block in &m.content {
+                    if let ContentBlock::ToolUse { name, input, .. } = block {
+                        let preview = input.as_object()
+                            .and_then(|map| map.values().next())
+                            .and_then(|v| v.as_str())
+                            .map(|s| {
+                                let s = s.trim();
+                                // safe truncation at char boundary
+                                let limit = 60;
+                                if s.len() <= limit { s.to_string() }
+                                else {
+                                    let b = s.char_indices().take_while(|(i, _)| *i <= limit).last().map(|(i, _)| i).unwrap_or(limit);
+                                    format!("{}…", &s[..b])
+                                }
+                            });
+                        let text = match preview {
+                            Some(p) => format!("{name}({p})"),
+                            None    => name.clone(),
+                        };
+                        result.push(HistMsg { role: "tool".to_string(), text });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────

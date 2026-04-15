@@ -334,15 +334,21 @@ const ChatPane = memo(function ChatPane({
     onStatusChange(s)
   }, [onStatusChange])
 
-  const loadHistory = useCallback(() => {
+  const loadHistory = useCallback((costForLast?: number) => {
     fetch(`${baseUrl}/history`)
       .then(r => r.json())
       .then((data: { messages: Array<{ role: string; text: string }> }) => {
-        setMessages(data.messages.map((m, i) => ({
+        const msgs: Message[] = data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
           text: m.text,
-        })))
+        }))
+        if (costForLast != null) {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === 'assistant') { msgs[i] = { ...msgs[i], cost: costForLast }; break }
+          }
+        }
+        setMessages(msgs)
         updateStatus('ready')
         setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50)
       })
@@ -405,16 +411,17 @@ const ChatPane = memo(function ChatPane({
       .then((data: { text?: string; cost_usd?: number; error?: string }) => {
         if (data.error) {
           setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${data.error}` }])
+          updateStatus('ready')
         } else {
-          setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: data.text ?? '', cost: data.cost_usd }])
+          // Reload full history so tool calls are shown in order
+          loadHistory(data.cost_usd)
         }
-        updateStatus('ready')
       })
       .catch(e => {
         setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${String(e)}` }])
         updateStatus('error')
       })
-  }, [input, status, baseUrl])
+  }, [input, status, baseUrl, loadHistory])
 
   sendMessageRef.current = sendMessage
 
