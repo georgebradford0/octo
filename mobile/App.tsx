@@ -533,42 +533,14 @@ const ChatPane = memo(function ChatPane({
 
 // ── ChildChatScreen ───────────────────────────────────────────────────────────
 
-function ChildChatScreen({ child, onClose }: {
-  child:   ContainerInfo
-  onClose: () => void
+function ChildChatScreen({ child, tunnelPort, tunnelError, onClose }: {
+  child:       ContainerInfo
+  tunnelPort:  number | null
+  tunnelError: string | null
+  onClose:     () => void
 }) {
-  const [childTunnelPort, setChildTunnelPort] = useState<number | null>(null)
-  const [tunnelError,     setTunnelError]     = useState<string | null>(null)
-  const [chatStatus,      setChatStatus]      = useState<ConnStatus>('connecting')
+  const [chatStatus, setChatStatus] = useState<ConnStatus>('connecting')
   const clearRef = useRef<() => void>(() => {})
-
-  useEffect(() => {
-    let cancelled = false
-    if (!NoiseConnection) {
-      setTunnelError('Native Noise module unavailable')
-      return
-    }
-    NoiseConnection!.disconnect()
-    NoiseConnection!.connect(child.host, child.port, child.pubkey)
-      .then(port => { if (!cancelled) setChildTunnelPort(port) })
-      .catch(e => { if (!cancelled) setTunnelError(e?.message ?? String(e)) })
-    return () => {
-      cancelled = true
-      NoiseConnection?.disconnect()
-    }
-  }, [])
-
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') {
-        NoiseConnection?.disconnect()
-        NoiseConnection?.connect(child.host, child.port, child.pubkey)
-          .then(port => setChildTunnelPort(port))
-          .catch(e => setTunnelError(e?.message ?? String(e)))
-      }
-    })
-    return () => sub.remove()
-  }, [child.host, child.port, child.pubkey])
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
@@ -597,9 +569,9 @@ function ChildChatScreen({ child, onClose }: {
           </TouchableOpacity>
         </View>
 
-        {childTunnelPort ? (
+        {tunnelPort ? (
           <ChatPane
-            baseUrl={`http://127.0.0.1:${childTunnelPort}`}
+            baseUrl={`http://127.0.0.1:${tunnelPort}`}
             onStatusChange={setChatStatus}
             clearRef={clearRef}
           />
@@ -646,9 +618,11 @@ class ErrorBoundary extends React.Component<
 // ── AppInner ──────────────────────────────────────────────────────────────────
 
 function AppInner() {
-  const [conn,        setConn]        = useState<NoiseConnectionInfo | null>(null)
-  const [tunnelPort,  setTunnelPort]  = useState<number | null>(null)
-  const [tunnelError, setTunnelError] = useState<string | null>(null)
+  const [conn,             setConn]             = useState<NoiseConnectionInfo | null>(null)
+  const [tunnelPort,       setTunnelPort]       = useState<number | null>(null)
+  const [tunnelError,      setTunnelError]      = useState<string | null>(null)
+  const [childTunnelPort,  setChildTunnelPort]  = useState<number | null>(null)
+  const [childTunnelError, setChildTunnelError] = useState<string | null>(null)
   const [scanning,    setScanning]    = useState(false)
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
   const [containers,          setContainers]          = useState<ContainerInfo[]>([])
@@ -700,19 +674,46 @@ function AppInner() {
     }
   }, [conn, noiseKey])
 
-  // Re-establish Noise tunnel when app returns to foreground.
+  // Refs so the single AppState listener always sees current values without re-registering.
+  const activeChildRef = useRef<ContainerInfo | null>(null)
+  useEffect(() => { activeChildRef.current = activeChild }, [activeChild])
+  const connRef = useRef<NoiseConnectionInfo | null>(null)
+  useEffect(() => { connRef.current = conn }, [conn])
+
+  // Connect to child container when activeChild is set; disconnect on close.
   useEffect(() => {
-    if (!conn) return
+    if (!activeChild) return
+    setChildTunnelPort(null)
+    setChildTunnelError(null)
+    if (!NoiseConnection) { setChildTunnelError('Native Noise module unavailable'); return }
+    NoiseConnection.disconnect()
+    let connected = false
+    NoiseConnection.connect(activeChild.host, activeChild.port, activeChild.pubkey)
+      .then(port => { connected = true; setChildTunnelPort(port) })
+      .catch(e => setChildTunnelError(e?.message ?? String(e)))
+    return () => { if (connected) NoiseConnection?.disconnect() }
+  }, [activeChild])
+
+  // Single AppState listener — reconnects whichever tunnel was live when backgrounded.
+  useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') {
+      if (nextState !== 'active') return
+      const child = activeChildRef.current
+      const c     = connRef.current
+      if (child) {
         NoiseConnection?.disconnect()
-        NoiseConnection?.connect(conn.host, conn.port, conn.pk)
+        NoiseConnection?.connect(child.host, child.port, child.pubkey)
+          .then(port => setChildTunnelPort(port))
+          .catch(e => setChildTunnelError(e?.message ?? String(e)))
+      } else if (c) {
+        NoiseConnection?.disconnect()
+        NoiseConnection?.connect(c.host, c.port, c.pk)
           .then(port => setTunnelPort(port))
           .catch(e => setTunnelError(e?.message ?? String(e)))
       }
     })
     return () => sub.remove()
-  }, [conn])
+  }, [])
 
   // Fetch container list from rulyeh.
   const fetchContainers = useCallback(() => {
@@ -842,6 +843,8 @@ function AppInner() {
     return (
       <ChildChatScreen
         child={activeChild}
+        tunnelPort={childTunnelPort}
+        tunnelError={childTunnelError}
         onClose={() => {
           setActiveChild(null)
           setNoiseKey(k => k + 1)
