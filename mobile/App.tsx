@@ -321,6 +321,7 @@ const ChatPane = memo(function ChatPane({
   const [messages,      setMessages]      = useState<Message[]>([])
   const [status,        setStatus]        = useState<ConnStatus>('connecting')
   const [input,         setInput]         = useState('')
+  const draftKey = `draft:${baseUrl}`
   const [completions,   setCompletions]   = useState<string[]>([])
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const [inputAreaH,    setInputAreaH]    = useState(0)
@@ -359,6 +360,16 @@ const ChatPane = memo(function ChatPane({
       })
       .catch(() => updateStatus('error'))
   }, [baseUrl])
+
+  // Restore draft input on mount / baseUrl change.
+  useEffect(() => {
+    AsyncStorage.getItem(draftKey).then(v => { if (v != null) setInput(v) }).catch(() => {})
+  }, [draftKey])
+
+  // Persist draft on every change.
+  useEffect(() => {
+    AsyncStorage.setItem(draftKey, input).catch(() => {})
+  }, [draftKey, input])
 
   // Fetch history on mount and when baseUrl changes.
   useEffect(() => {
@@ -405,6 +416,7 @@ const ChatPane = memo(function ChatPane({
     setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
     isAtBottomRef.current = true
     setInput('')
+    AsyncStorage.removeItem(draftKey).catch(() => {})
     updateStatus('streaming')
 
     fetch(`${baseUrl}/message`, {
