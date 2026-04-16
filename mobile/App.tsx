@@ -306,11 +306,13 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
 const ChatPane = memo(function ChatPane({
-  baseUrl, onStatusChange, clearRef,
+  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange,
 }: {
   baseUrl:        string
   onStatusChange: (s: ConnStatus) => void
   clearRef:       React.MutableRefObject<() => void>
+  initialDraft?:  string
+  onDraftChange?: (draft: string) => void
 }) {
   const insets                     = useSafeAreaInsets()
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
@@ -320,7 +322,7 @@ const ChatPane = memo(function ChatPane({
 
   const [messages,      setMessages]      = useState<Message[]>([])
   const [status,        setStatus]        = useState<ConnStatus>('connecting')
-  const [input,         setInput]         = useState('')
+  const [input,         setInput]         = useState(initialDraft ?? '')
   const draftKey = `draft:${baseUrl}`
   const [completions,   setCompletions]   = useState<string[]>([])
   const [showScrollBtn, setShowScrollBtn] = useState(false)
@@ -362,13 +364,17 @@ const ChatPane = memo(function ChatPane({
   }, [baseUrl])
 
   // Restore draft input on mount / baseUrl change.
+  // Restore draft on mount / baseUrl change (cold-start fallback; skipped if
+  // the parent already provided initialDraft from its in-memory cache).
   useEffect(() => {
+    if (initialDraft != null) return
     AsyncStorage.getItem(draftKey).then(v => { if (v != null) setInput(v) }).catch(() => {})
   }, [draftKey])
 
   // Persist draft on every change.
   useEffect(() => {
     AsyncStorage.setItem(draftKey, input).catch(() => {})
+    onDraftChange?.(input)
   }, [draftKey, input])
 
   // Fetch history on mount and when baseUrl changes.
@@ -545,11 +551,13 @@ const ChatPane = memo(function ChatPane({
 
 // ── ChildChatScreen ───────────────────────────────────────────────────────────
 
-function ChildChatScreen({ child, tunnelPort, tunnelError, onClose }: {
-  child:       ContainerInfo
-  tunnelPort:  number | null
-  tunnelError: string | null
-  onClose:     () => void
+function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange }: {
+  child:          ContainerInfo
+  tunnelPort:     number | null
+  tunnelError:    string | null
+  onClose:        () => void
+  initialDraft?:  string
+  onDraftChange?: (draft: string) => void
 }) {
   const [chatStatus, setChatStatus] = useState<ConnStatus>('connecting')
   const clearRef = useRef<() => void>(() => {})
@@ -586,6 +594,8 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose }: {
             baseUrl={`http://127.0.0.1:${tunnelPort}`}
             onStatusChange={setChatStatus}
             clearRef={clearRef}
+            initialDraft={initialDraft}
+            onDraftChange={onDraftChange}
           />
         ) : (
           <View style={s.setupCenter}>
@@ -643,6 +653,8 @@ function AppInner() {
   const startingContainerIdRef = useRef<string | null>(null)
   const [reconnectKey, setReconnectKey] = useState(0)
   const clearChatRef = useRef<() => void>(() => {})
+  // In-memory draft cache: survives ChatPane unmount/remount without async latency.
+  const draftsRef = useRef<Record<string, string>>({})
 
   // masterBaseUrl is only valid when not viewing a child — fetching containers
   // and sending master messages must always go through the master tunnel.
@@ -831,12 +843,15 @@ function AppInner() {
 
   // ── Child chat screen ───────────────────────────────────────────────────────
   if (activeChild) {
+    const childKey = activeChild.id
     return (
       <ChildChatScreen
         child={activeChild}
         tunnelPort={tunnelPort}
         tunnelError={tunnelError}
         onClose={() => setActiveChild(null)}
+        initialDraft={draftsRef.current[childKey]}
+        onDraftChange={d => { draftsRef.current[childKey] = d }}
       />
     )
   }
@@ -925,6 +940,8 @@ function AppInner() {
             baseUrl={masterBaseUrl}
             onStatusChange={setChatStatus}
             clearRef={clearChatRef}
+            initialDraft={draftsRef.current['master']}
+            onDraftChange={d => { draftsRef.current['master'] = d }}
           />
         )}
 
