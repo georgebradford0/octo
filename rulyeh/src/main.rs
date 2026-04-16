@@ -363,7 +363,7 @@ async fn fetch_pubkey_via_exec(container_name: &str) -> Option<String> {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-const MASTER_SYSTEM_PROMPT: &str = "\
+const RULYEH_SYSTEM_PROMPT: &str = "\
 You are the master control node for a fleet of claudulhu coding assistant containers.\n\n\
 Standard child image: ghcr.io/georgebradford0/claudulhu-rulyeh:latest\n\
   with --entrypoint /usr/local/bin/docker-entrypoint-server.sh\n\n\
@@ -372,6 +372,7 @@ Child containers require:\n\
   NOISE_PORT set to a free port in 9100-9199\n\
   Named volumes for /data and /workspace\n\
   Env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN (required), PUBLIC_HOST\n\n\
+GH_TOKEN is set in this environment and the gh CLI is available — use it for all GitHub operations.\n\n\
 Be concise and direct.";
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -420,7 +421,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         messages:     Arc::new(Mutex::new(messages)),
-        system:       MASTER_SYSTEM_PROMPT.to_string(),
+        system:       RULYEH_SYSTEM_PROMPT.to_string(),
         containers:   Arc::new(Mutex::new(Vec::new())),
         poll_trigger: poll_trigger.clone(),
         pubkey_b32,
