@@ -95,9 +95,11 @@ fn load_messages() -> Vec<ApiMessage> {
 struct HistMsg {
     role: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
 }
 
-fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
+fn messages_to_history(messages: &[ApiMessage], last_cost_usd: Option<f64>) -> Vec<HistMsg> {
     let mut result = Vec::new();
     for m in messages {
         match m.role.as_str() {
@@ -105,16 +107,16 @@ fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
                 let text: String = m.content.iter()
                     .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
                     .collect();
-                if !text.is_empty() { result.push(HistMsg { role: "user".to_string(), text }); }
+                if !text.is_empty() { result.push(HistMsg { role: "user".to_string(), text, cost_usd: None }); }
             }
             "interrupted" => {
-                result.push(HistMsg { role: "interrupted".to_string(), text: "interrupted".to_string() });
+                result.push(HistMsg { role: "interrupted".to_string(), text: "interrupted".to_string(), cost_usd: None });
             }
             "assistant" => {
                 let text: String = m.content.iter()
                     .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
                     .collect();
-                if !text.is_empty() { result.push(HistMsg { role: "assistant".to_string(), text }); }
+                if !text.is_empty() { result.push(HistMsg { role: "assistant".to_string(), text, cost_usd: None }); }
                 for block in &m.content {
                     if let ContentBlock::ToolUse { name, input, .. } = block {
                         let preview = input.as_object()
@@ -133,11 +135,20 @@ fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
                             Some(p) => format!("{name}({p})"),
                             None    => name.clone(),
                         };
-                        result.push(HistMsg { role: "tool".to_string(), text });
+                        result.push(HistMsg { role: "tool".to_string(), text, cost_usd: None });
                     }
                 }
             }
             _ => {}
+        }
+    }
+    // Attach cost to the last assistant message.
+    if let Some(cost) = last_cost_usd {
+        for msg in result.iter_mut().rev() {
+            if msg.role == "assistant" {
+                msg.cost_usd = Some(cost);
+                break;
+            }
         }
     }
     result
@@ -147,6 +158,7 @@ fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
 
 struct AppState {
     messages:     Arc<Mutex<Vec<ApiMessage>>>,
+    last_cost_usd: Mutex<Option<f64>>,
     system:       String,
     containers:   Arc<Mutex<Vec<ContainerInfo>>>,
     poll_trigger: Arc<Notify>,
@@ -163,7 +175,8 @@ async fn info_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
 }
 
 async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let msgs = messages_to_history(&state.messages.lock().unwrap());
+    let cost = *state.last_cost_usd.lock().unwrap();
+    let msgs = messages_to_history(&state.messages.lock().unwrap(), cost);
     Json(serde_json::json!({ "messages": msgs }))
 }
 
@@ -200,6 +213,8 @@ async fn message_handler(
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
             save_messages(&msgs);
+            drop(msgs);
+            *state.last_cost_usd.lock().unwrap() = Some(cost_usd);
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }
         Err(e) => {
@@ -261,8 +276,9 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         .filter(|m| m.role != "interrupted")
         .cloned()
         .collect();
-    let system   = state.system.clone();
-    let msgs_arc = state.messages.clone();
+    let system    = state.system.clone();
+    let msgs_arc  = state.messages.clone();
+    let state_arc = Arc::clone(&state);
 
     let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(256);
     let done_tx = event_tx.clone();
@@ -293,10 +309,12 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                     });
                     *msgs_arc.lock().unwrap() = updated.clone();
                     save_messages(&updated);
+                    *state_arc.last_cost_usd.lock().unwrap() = Some(cost_usd);
                     done_tx.send(ChatEvent::Interrupted { cost_usd }).await.ok();
                 } else {
                     *msgs_arc.lock().unwrap() = updated.clone();
                     save_messages(&updated);
+                    *state_arc.last_cost_usd.lock().unwrap() = Some(cost_usd);
                     done_tx.send(ChatEvent::Result {
                         cost_usd, turns: 0, session_id: String::new(), result: None,
                     }).await.ok();
@@ -554,10 +572,11 @@ async fn main() {
     let poll_trigger = Arc::new(Notify::new());
 
     let state = Arc::new(AppState {
-        messages:     Arc::new(Mutex::new(messages)),
-        system:       RULYEH_SYSTEM_PROMPT.to_string(),
-        containers:   Arc::new(Mutex::new(Vec::new())),
-        poll_trigger: poll_trigger.clone(),
+        messages:      Arc::new(Mutex::new(messages)),
+        last_cost_usd: Mutex::new(None),
+        system:        RULYEH_SYSTEM_PROMPT.to_string(),
+        containers:    Arc::new(Mutex::new(Vec::new())),
+        poll_trigger:  poll_trigger.clone(),
         pubkey_b32,
         public_host,
     });

@@ -328,8 +328,6 @@ const ChatPane = memo(function ChatPane({
   }))
 
   const [messages,      setMessages]      = useState<Message[]>([])
-  // Keep a ref in sync so callbacks can read the latest messages without stale closures.
-  useEffect(() => { messagesRef.current = messages }, [messages])
   const [status,        setStatus]        = useState<ConnStatus>('connecting')
   const [input,         setInput]         = useState(initialDraft ?? '')
   const draftKey = `draft:${baseUrl}`
@@ -343,7 +341,6 @@ const ChatPane = memo(function ChatPane({
   const isAtBottomRef     = useRef(true)
   const contentHeightRef  = useRef(0)
   const listHeightRef     = useRef(0)
-  const messagesRef       = useRef<Message[]>([])
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
