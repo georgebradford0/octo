@@ -21,7 +21,7 @@ use axum::{
 };
 use claudulhu_core::{
     init_shell_env, load_or_generate_keypair, read_config, resolve_api_key, run_noise_proxy,
-    send_message, to_base32, ApiMessage, ChatEvent, ContentBlock,
+    send_message, to_base32, ApiMessage, AnthropicTool, ChatEvent, ContentBlock,
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -208,7 +208,7 @@ async fn message_handler(
         .cloned()
         .collect();
 
-    match send_message(messages, &state.system, &model, &api_key, "/", None, Arc::new(AtomicBool::new(false))).await {
+    match send_message(messages, &state.system, &model, &api_key, "/", None, Arc::new(AtomicBool::new(false)), &rulyeh_extra_tools(), rulyeh_extra_executor()).await {
         Ok((text, cost_usd, updated)) => {
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
@@ -300,7 +300,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     });
 
     tokio::spawn(async move {
-        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx), aborted.clone()).await {
+        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx), aborted.clone(), &rulyeh_extra_tools(), rulyeh_extra_executor()).await {
             Ok((_, cost_usd, mut updated)) => {
                 if aborted.load(Ordering::Relaxed) {
                     updated.push(ApiMessage {
@@ -526,6 +526,74 @@ Child containers require:\n\
   Env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN (required), PUBLIC_HOST\n\n\
 GH_TOKEN is set in this environment and the gh CLI is available — use it for all GitHub operations.\n\n\
 Be concise and direct.";
+
+// ── Child messaging tools ──────────────────────────────────────────────────────
+
+fn message_child_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "message_child".to_string(),
+        description: "Send a message to a child container's agent and wait for its response. \
+                       Use this to delegate tasks or ask questions to a specific child container."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "container_name": {
+                    "type": "string",
+                    "description": "The name of the child container to message."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The message to send to the child agent."
+                }
+            },
+            "required": ["container_name", "text"]
+        }),
+    }
+}
+
+fn rulyeh_extra_tools() -> Vec<AnthropicTool> {
+    vec![message_child_tool()]
+}
+
+fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+    + Send + Sync>>
+{
+    Some(Arc::new(move |name: String, input: serde_json::Value| {
+        Box::pin(async move {
+            if name != "message_child" {
+                return format!("unknown tool: {name}");
+            }
+            let container_name = match input.get("container_name").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => return "error: missing 'container_name' field".to_string(),
+            };
+            let text = match input.get("text").and_then(|v| v.as_str()) {
+                Some(t) => t.to_string(),
+                None => return "error: missing 'text' field".to_string(),
+            };
+            let client = reqwest::Client::new();
+            let url = format!("http://{}:8000/message", container_name);
+            match client
+                .post(&url)
+                .json(&serde_json::json!({ "text": text }))
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => body
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no response text)")
+                        .to_string(),
+                    Err(e) => format!("error parsing child response: {e}"),
+                },
+                Err(e) => format!("error contacting child '{container_name}': {e}"),
+            }
+        })
+    }))
+}
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 

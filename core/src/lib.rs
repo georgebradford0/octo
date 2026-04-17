@@ -408,6 +408,9 @@ pub async fn execute_tool(
     cwd:              &str,
     tx:               &mpsc::Sender<ChatEvent>,
     pending_question: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    extra_executor:   Option<&(dyn Fn(String, serde_json::Value)
+                               -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+                               + Send + Sync)>,
 ) -> String {
     match name {
         "bash" => {
@@ -759,7 +762,10 @@ pub async fn execute_tool(
                 format!("error: unsupported git host in remote URL: {remote_url}")
             }
         }
-        _ => format!("unknown tool: {name}"),
+        _ => match extra_executor {
+            Some(f) => f(name.to_string(), input.clone()).await,
+            None    => format!("unknown tool: {name}"),
+        },
     }
 }
 
@@ -867,14 +873,15 @@ pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMess
 }
 
 pub async fn call_turn(
-    messages:  &[ApiMessage],
-    system:    &str,
-    model:     &str,
-    api_key:   &str,
-    aborted:   &AtomicBool,
-    tx:        &mpsc::Sender<ChatEvent>,
+    messages:    &[ApiMessage],
+    system:      &str,
+    model:       &str,
+    api_key:     &str,
+    aborted:     &AtomicBool,
+    tx:          &mpsc::Sender<ChatEvent>,
+    extra_tools: &[AnthropicTool],
 ) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
-    let mut tools: Vec<serde_json::Value> = tool_definitions()
+    let mut tools: Vec<serde_json::Value> = tool_definitions_with_mcp(extra_tools)
         .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
     if let Some(last) = tools.last_mut() {
         last["cache_control"] = serde_json::json!({"type": "ephemeral"});
@@ -972,13 +979,17 @@ pub async fn call_turn(
 /// If `event_tx` is Some, Text and ToolUse events are forwarded to the caller.
 /// Setting `aborted` to true between turns causes an early return.
 pub async fn send_message(
-    mut messages: Vec<ApiMessage>,
-    system:       &str,
-    model:        &str,
-    api_key:      &str,
-    cwd:          &str,
-    event_tx:     Option<mpsc::Sender<ChatEvent>>,
-    aborted:      Arc<AtomicBool>,
+    mut messages:   Vec<ApiMessage>,
+    system:         &str,
+    model:          &str,
+    api_key:        &str,
+    cwd:            &str,
+    event_tx:       Option<mpsc::Sender<ChatEvent>>,
+    aborted:        Arc<AtomicBool>,
+    extra_tools:    &[AnthropicTool],
+    extra_executor: Option<Arc<dyn Fn(String, serde_json::Value)
+                            -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+                            + Send + Sync>>,
 ) -> Result<(String, f64, Vec<ApiMessage>), String> {
     let mut total_cost = 0.0f64;
     let mut last_text  = String::new();
@@ -998,7 +1009,7 @@ pub async fn send_message(
     });
 
     let tools: Vec<serde_json::Value> = {
-        let mut t: Vec<serde_json::Value> = tool_definitions()
+        let mut t: Vec<serde_json::Value> = tool_definitions_with_mcp(extra_tools)
             .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
         if let Some(last) = t.last_mut() {
             last["cache_control"] = serde_json::json!({"type": "ephemeral"});
@@ -1108,7 +1119,7 @@ pub async fn send_message(
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
             let result = truncate_tool_output(
-                execute_tool(&name, &input, cwd, &tx, pending_question.clone()).await,
+                execute_tool(&name, &input, cwd, &tx, pending_question.clone(), extra_executor.as_deref()).await,
                 tool_output_limit(&name),
             );
             results.push(ContentBlock::ToolResult {
@@ -1124,11 +1135,15 @@ pub async fn send_message(
 // ── Agentic Loop ──────────────────────────────────────────────────────────────
 
 pub async fn run_agentic_loop(
-    session:    Arc<Mutex<Session>>,
-    session_id: String,
-    api_key:    String,
-    model:      String,
-    tx:         mpsc::Sender<ChatEvent>,
+    session:        Arc<Mutex<Session>>,
+    session_id:     String,
+    api_key:        String,
+    model:          String,
+    tx:             mpsc::Sender<ChatEvent>,
+    extra_tools:    Vec<AnthropicTool>,
+    extra_executor: Option<Arc<dyn Fn(String, serde_json::Value)
+                            -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+                            + Send + Sync>>,
 ) {
     let mut turns                        = 0usize;
     let mut total_input                  = 0u64;
@@ -1157,7 +1172,7 @@ pub async fn run_agentic_loop(
             return;
         }
 
-        match call_turn(&messages, &system, &model, &api_key, &aborted, &tx).await {
+        match call_turn(&messages, &system, &model, &api_key, &aborted, &tx, &extra_tools).await {
             Err(e) if e == "__interrupted__" => {
                 let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
                 tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
@@ -1191,7 +1206,7 @@ pub async fn run_agentic_loop(
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         let result = truncate_tool_output(
-                            execute_tool(name, input, &cwd, &tx, pending_question.clone()).await,
+                            execute_tool(name, input, &cwd, &tx, pending_question.clone(), extra_executor.as_deref()).await,
                             tool_output_limit(name),
                         );
                         tx.send(ChatEvent::ToolResult {
@@ -1242,7 +1257,7 @@ pub async fn run_startup_prompt(
     let model_s   = model.to_string();
 
     let handle = tokio::spawn(async move {
-        run_agentic_loop(session_c, "startup".to_string(), api_key_s, model_s, tx).await;
+        run_agentic_loop(session_c, "startup".to_string(), api_key_s, model_s, tx, vec![], None).await;
     });
 
     // Drain events, printing them so they appear in `docker logs`.

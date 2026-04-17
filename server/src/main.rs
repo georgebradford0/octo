@@ -20,7 +20,7 @@ use axum::{
 use claudulhu_core::{
     build_system_prompt, effective_repo, get_branches_for_repo, init_shell_env,
     load_or_generate_keypair, read_config, resolve_api_key, run_noise_proxy, send_message,
-    to_base32, write_config, ApiMessage, ChatEvent, Config, ContentBlock,
+    to_base32, write_config, ApiMessage, AnthropicTool, ChatEvent, Config, ContentBlock,
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -175,7 +175,7 @@ async fn message_handler(
         .cloned()
         .collect();
 
-    match send_message(messages, &state.system, &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false))).await {
+    match send_message(messages, &state.system, &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &make_extra_tools(), make_extra_executor()).await {
         Ok((text, cost_usd, updated)) => {
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
@@ -289,7 +289,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     });
 
     tokio::spawn(async move {
-        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), aborted.clone()).await {
+        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), aborted.clone(), &make_extra_tools(), make_extra_executor()).await {
             Ok((_, cost_usd, mut updated)) => {
                 if aborted.load(Ordering::Relaxed) {
                     updated.push(ApiMessage {
@@ -391,6 +391,77 @@ async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
     if patch.model.is_some()   { cfg.model   = patch.model; }
     write_config(&cfg);
     StatusCode::OK
+}
+
+// ── Parent messaging tools ─────────────────────────────────────────────────────
+
+fn message_parent_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "message_parent".to_string(),
+        description: "Send a message to the parent (rulyeh) container's agent and wait for its \
+                       response. Use this to request secrets, configuration, or other information \
+                       held by the parent. The parent will respond with a text reply."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The message to send to the parent agent."
+                }
+            },
+            "required": ["text"]
+        }),
+    }
+}
+
+fn make_extra_tools() -> Vec<AnthropicTool> {
+    // Only add the tool if RULYEH_URL is configured.
+    if std::env::var("RULYEH_URL").is_ok() {
+        vec![message_parent_tool()]
+    } else {
+        vec![]
+    }
+}
+
+fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+    + Send + Sync>>
+{
+    let rulyeh_url = match std::env::var("RULYEH_URL") {
+        Ok(u) => u,
+        Err(_) => return None,
+    };
+    Some(Arc::new(move |name: String, input: serde_json::Value| {
+        let rulyeh_url = rulyeh_url.clone();
+        Box::pin(async move {
+            if name != "message_parent" {
+                return format!("unknown tool: {name}");
+            }
+            let text = match input.get("text").and_then(|v| v.as_str()) {
+                Some(t) => t.to_string(),
+                None => return "error: missing 'text' field".to_string(),
+            };
+            let client = reqwest::Client::new();
+            let url = format!("{}/message", rulyeh_url.trim_end_matches('/'));
+            match client
+                .post(&url)
+                .json(&serde_json::json!({ "text": text }))
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(body) => body
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no response text)")
+                        .to_string(),
+                    Err(e) => format!("error parsing parent response: {e}"),
+                },
+                Err(e) => format!("error contacting parent: {e}"),
+            }
+        })
+    }))
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
