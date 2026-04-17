@@ -898,35 +898,42 @@ function AppInner() {
               <View style={s.settingsMenuSection}>
                 <Text style={s.settingsMenuSectionTitle}>repos</Text>
               </View>
-              {containers.length === 0 && (
-                <View style={s.containerMenuItem}>
-                  <Text style={s.containerMenuItemStatus}>No containers</Text>
-                </View>
-              )}
-              {containers.map(c => (
-                <TouchableOpacity
-                  key={c.id}
-                  style={s.containerMenuItem}
-                  onPress={() => {
-                    setShowSettingsMenu(false)
-                    if (c.status === 'running') {
-                      setActiveChild(c)
-                    } else {
-                      startContainer(c.id)
-                    }
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <View style={[s.containerDot, {
-                    backgroundColor: c.status === 'running' ? C.green : C.textMuted,
-                  }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.containerMenuItemName}>{containerDisplayName(c.name)}</Text>
-                    {c.git_url ? <Text style={s.containerMenuItemUrl} numberOfLines={1}>{c.git_url}</Text> : null}
+              <ScrollView
+                style={s.containerMenuScroll}
+                bounces={false}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+              >
+                {containers.length === 0 && (
+                  <View style={s.containerMenuItem}>
+                    <Text style={s.containerMenuItemStatus}>No containers</Text>
                   </View>
-                  <Text style={s.containerMenuItemStatus}>{c.status}</Text>
-                </TouchableOpacity>
-              ))}
+                )}
+                {containers.map(c => (
+                  <TouchableOpacity
+                    key={c.id}
+                    style={s.containerMenuItem}
+                    onPress={() => {
+                      setShowSettingsMenu(false)
+                      if (c.status === 'running') {
+                        setActiveChild(c)
+                      } else {
+                        startContainer(c.id)
+                      }
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[s.containerDot, {
+                      backgroundColor: c.status === 'running' ? C.green : C.textMuted,
+                    }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.containerMenuItemName}>{containerDisplayName(c.name)}</Text>
+                      {c.git_url ? <Text style={s.containerMenuItemUrl} numberOfLines={1}>{c.git_url}</Text> : null}
+                    </View>
+                    <Text style={s.containerMenuItemStatus}>{c.status}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
               <View style={s.settingsMenuDivider} />
               <TouchableOpacity style={s.settingsMenuAction} onPress={handleLogout}>
                 <Text style={s.settingsMenuLogoutText}>exit</Text>
@@ -1080,7 +1087,8 @@ const s = StyleSheet.create({
   settingsMenuBtnText:      { fontSize: 18, color: C.textSecondary, letterSpacing: 1, fontFamily: ARIMO },
   containerDot:             { width: 6, height: 6, borderRadius: 3 },
   containerMenuWrap:        { position: 'absolute', top: 44, right: 0, left: 0, bottom: 0, zIndex: 100 },
-  containerMenu:            { position: 'absolute', right: 12, top: 4, minWidth: 240, backgroundColor: C.bg, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 8, overflow: 'hidden' },
+  containerMenu:            { position: 'absolute', right: 12, top: 4, minWidth: 240, maxHeight: '100%', backgroundColor: C.bg, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 8, overflow: 'hidden' },
+  containerMenuScroll:      { flexShrink: 1 },
   settingsMenuSection:      { paddingHorizontal: 14, paddingVertical: 8 },
   settingsMenuSectionTitle: { fontSize: 11, fontWeight: '700', color: C.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, fontFamily: ARIMO },
   settingsMenuDivider:      { height: StyleSheet.hairlineWidth, backgroundColor: C.border },
