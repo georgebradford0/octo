@@ -425,25 +425,44 @@ const ChatPane = memo(function ChatPane({
     AsyncStorage.removeItem(draftKey).catch(() => {})
     updateStatus('streaming')
 
-    fetch(`${baseUrl}/message`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ text }),
-    })
-      .then(r => r.json())
-      .then((data: { text?: string; cost_usd?: number; error?: string }) => {
-        if (data.error) {
-          setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${data.error}` }])
-          updateStatus('ready')
+    const streamingId = uid()
+    let hasAssistantMsg = false
+
+    const handleEvent = (raw: string) => {
+      let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string }
+      try { event = JSON.parse(raw) } catch { return }
+
+      if (event.type === 'text' && event.text) {
+        const chunk = event.text
+        if (!hasAssistantMsg) {
+          hasAssistantMsg = true
+          setMessages(prev => [...prev, { id: streamingId, role: 'assistant' as const, text: chunk }])
         } else {
-          // Reload full history so tool calls are shown in order
-          loadHistory(data.cost_usd)
+          setMessages(prev => prev.map(m => m.id === streamingId ? { ...m, text: m.text + chunk } : m))
         }
-      })
-      .catch(e => {
-        setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${String(e)}` }])
-        updateStatus('error')
-      })
+      } else if (event.type === 'tool_use') {
+        hasAssistantMsg = false
+        const firstVal = event.input && typeof event.input === 'object'
+          ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim().slice(0, 60)
+          : ''
+        const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
+        setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
+      } else if (event.type === 'done') {
+        loadHistory(event.cost_usd)
+      } else if (event.type === 'error') {
+        setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
+        updateStatus('ready')
+      }
+    }
+
+    const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    const ws = new WebSocket(wsUrl)
+    ws.onopen = () => { ws.send(JSON.stringify({ text })) }
+    ws.onmessage = (e) => { handleEvent(e.data) }
+    ws.onerror = () => {
+      setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
+      updateStatus('error')
+    }
   }, [input, status, baseUrl, loadHistory])
 
   sendMessageRef.current = sendMessage

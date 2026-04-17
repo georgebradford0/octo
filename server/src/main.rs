@@ -5,18 +5,23 @@ use std::{
 };
 
 use axum::{
-    extract::{Query, State},
+    extract::{
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
     http::{Method, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use claudulhu_core::{
     build_system_prompt, effective_repo, get_branches_for_repo, init_shell_env,
     load_or_generate_keypair, read_config, resolve_api_key, run_noise_proxy, send_message,
-    to_base32, write_config, ApiMessage, Config, ContentBlock,
+    to_base32, write_config, ApiMessage, ChatEvent, Config, ContentBlock,
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -143,7 +148,7 @@ async fn message_handler(
 
     let messages = state.messages.lock().unwrap().clone();
 
-    match send_message(messages, &state.system, &model, &api_key, &state.cwd).await {
+    match send_message(messages, &state.system, &model, &api_key, &state.cwd, None).await {
         Ok((text, cost_usd, updated)) => {
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
@@ -151,11 +156,99 @@ async fn message_handler(
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }
         Err(e) => {
-            // Roll back the user message so history stays clean on error.
             let mut msgs = state.messages.lock().unwrap();
             msgs.pop();
             save_messages(&msgs);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response()
+        }
+    }
+}
+
+async fn stream_handler(
+    ws:           WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_stream(socket, state))
+}
+
+async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let text = loop {
+        match ws_rx.next().await {
+            Some(Ok(WsMessage::Text(t))) => {
+                match serde_json::from_str::<serde_json::Value>(&t)
+                    .ok()
+                    .and_then(|v| v["text"].as_str().map(str::to_string))
+                {
+                    Some(t) => break t,
+                    None    => return,
+                }
+            }
+            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+            _ => return,
+        }
+    };
+
+    let api_key = match resolve_api_key() {
+        Some(k) => k,
+        None => {
+            ws_tx.send(WsMessage::Text(
+                serde_json::json!({"type":"error","message":"no API key configured"}).to_string()
+            )).await.ok();
+            return;
+        }
+    };
+    let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+    {
+        let mut msgs = state.messages.lock().unwrap();
+        msgs.push(ApiMessage {
+            role:    "user".to_string(),
+            content: vec![ContentBlock::Text { text }],
+        });
+        save_messages(&msgs);
+    }
+
+    let messages = state.messages.lock().unwrap().clone();
+    let system   = state.system.clone();
+    let cwd      = state.cwd.clone();
+    let msgs_arc = state.messages.clone();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(256);
+    let done_tx = event_tx.clone();
+
+    tokio::spawn(async move {
+        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx)).await {
+            Ok((_, cost_usd, updated)) => {
+                *msgs_arc.lock().unwrap() = updated.clone();
+                save_messages(&updated);
+                done_tx.send(ChatEvent::Result {
+                    cost_usd, turns: 0, session_id: String::new(), result: None,
+                }).await.ok();
+            }
+            Err(e) => {
+                msgs_arc.lock().unwrap().pop();
+                save_messages(&msgs_arc.lock().unwrap());
+                done_tx.send(ChatEvent::Error { message: e }).await.ok();
+            }
+        }
+    });
+
+    while let Some(event) = event_rx.recv().await {
+        let json_opt: Option<serde_json::Value> = match event {
+            ChatEvent::Text { text } =>
+                Some(serde_json::json!({"type":"text","text":text})),
+            ChatEvent::ToolUse { tool, input } =>
+                Some(serde_json::json!({"type":"tool_use","tool":tool,"input":input})),
+            ChatEvent::Result { cost_usd, .. } =>
+                Some(serde_json::json!({"type":"done","cost_usd":cost_usd})),
+            ChatEvent::Error { message } =>
+                Some(serde_json::json!({"type":"error","message":message})),
+            _ => None,
+        };
+        if let Some(json) = json_opt {
+            if ws_tx.send(WsMessage::Text(json.to_string())).await.is_err() { break; }
         }
     }
 }
@@ -267,6 +360,7 @@ async fn main() {
         .route("/health",      get(health_handler))
         .route("/history",     get(history_handler))
         .route("/message",     post(message_handler))
+        .route("/stream",      get(stream_handler))
         .route("/clear",       post(clear_handler))
         .route("/branches",    get(get_branches_handler))
         .route("/completions", get(get_completions_handler))

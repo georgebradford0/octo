@@ -7,17 +7,22 @@ use std::{
 };
 
 use axum::{
-    extract::State,
+    extract::{
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::{Method, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use claudulhu_core::{
     init_shell_env, load_or_generate_keypair, read_config, resolve_api_key, run_noise_proxy,
-    send_message, to_base32, ApiMessage, ContentBlock,
+    send_message, to_base32, ApiMessage, ChatEvent, ContentBlock,
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tower_http::cors::{Any, CorsLayer};
@@ -181,7 +186,7 @@ async fn message_handler(
 
     let messages = state.messages.lock().unwrap().clone();
 
-    match send_message(messages, &state.system, &model, &api_key, "/").await {
+    match send_message(messages, &state.system, &model, &api_key, "/", None).await {
         Ok((text, cost_usd, updated)) => {
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
@@ -193,6 +198,94 @@ async fn message_handler(
             msgs.pop();
             save_messages(&msgs);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response()
+        }
+    }
+}
+
+async fn stream_handler(
+    ws:           WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_stream(socket, state))
+}
+
+async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let text = loop {
+        match ws_rx.next().await {
+            Some(Ok(WsMessage::Text(t))) => {
+                match serde_json::from_str::<serde_json::Value>(&t)
+                    .ok()
+                    .and_then(|v| v["text"].as_str().map(str::to_string))
+                {
+                    Some(t) => break t,
+                    None    => return,
+                }
+            }
+            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+            _ => return,
+        }
+    };
+
+    let api_key = match resolve_api_key() {
+        Some(k) => k,
+        None => {
+            ws_tx.send(WsMessage::Text(
+                serde_json::json!({"type":"error","message":"no API key configured"}).to_string()
+            )).await.ok();
+            return;
+        }
+    };
+    let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+    {
+        let mut msgs = state.messages.lock().unwrap();
+        msgs.push(ApiMessage {
+            role:    "user".to_string(),
+            content: vec![ContentBlock::Text { text }],
+        });
+        save_messages(&msgs);
+    }
+
+    let messages = state.messages.lock().unwrap().clone();
+    let system   = state.system.clone();
+    let msgs_arc = state.messages.clone();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(256);
+    let done_tx = event_tx.clone();
+
+    tokio::spawn(async move {
+        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx)).await {
+            Ok((_, cost_usd, updated)) => {
+                *msgs_arc.lock().unwrap() = updated.clone();
+                save_messages(&updated);
+                done_tx.send(ChatEvent::Result {
+                    cost_usd, turns: 0, session_id: String::new(), result: None,
+                }).await.ok();
+            }
+            Err(e) => {
+                msgs_arc.lock().unwrap().pop();
+                save_messages(&msgs_arc.lock().unwrap());
+                done_tx.send(ChatEvent::Error { message: e }).await.ok();
+            }
+        }
+    });
+
+    while let Some(event) = event_rx.recv().await {
+        let json_opt: Option<serde_json::Value> = match event {
+            ChatEvent::Text { text } =>
+                Some(serde_json::json!({"type":"text","text":text})),
+            ChatEvent::ToolUse { tool, input } =>
+                Some(serde_json::json!({"type":"tool_use","tool":tool,"input":input})),
+            ChatEvent::Result { cost_usd, .. } =>
+                Some(serde_json::json!({"type":"done","cost_usd":cost_usd})),
+            ChatEvent::Error { message } =>
+                Some(serde_json::json!({"type":"error","message":message})),
+            _ => None,
+        };
+        if let Some(json) = json_opt {
+            if ws_tx.send(WsMessage::Text(json.to_string())).await.is_err() { break; }
         }
     }
 }
@@ -441,6 +534,7 @@ async fn main() {
         .route("/info",             get(info_handler))
         .route("/history",          get(history_handler))
         .route("/message",          post(message_handler))
+        .route("/stream",           get(stream_handler))
         .route("/clear",            post(clear_handler))
         .route("/containers",       get(containers_handler))
         .route("/containers/start", post(start_container_handler))

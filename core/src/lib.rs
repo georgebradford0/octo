@@ -969,18 +969,19 @@ pub async fn call_turn(
 /// Send a message and run the tool loop until Claude stops with end_turn.
 /// Returns (final_text, total_cost_usd, updated_messages).
 /// MCP is disabled; only built-in tools are available.
+/// If `event_tx` is Some, Text and ToolUse events are forwarded to the caller.
 pub async fn send_message(
     mut messages: Vec<ApiMessage>,
     system:       &str,
     model:        &str,
     api_key:      &str,
     cwd:          &str,
+    event_tx:     Option<mpsc::Sender<ChatEvent>>,
 ) -> Result<(String, f64, Vec<ApiMessage>), String> {
     let mut total_cost = 0.0f64;
 
-    // Dummy event channel and auto-answering pending_question so execute_tool
-    // never blocks waiting for interactive input.
-    let (tx, _rx)      = mpsc::channel::<ChatEvent>(1);
+    let (dummy_tx, _rx) = mpsc::channel::<ChatEvent>(1);
+    let tx = event_tx.unwrap_or(dummy_tx);
     let pending_question = std::sync::Arc::new(tokio::sync::Mutex::new(
         None::<oneshot::Sender<String>>,
     ));
