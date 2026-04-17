@@ -347,10 +347,75 @@ const ChatPane = memo(function ChatPane({
     onStatusChange(s)
   }, [onStatusChange])
 
+  // Shared event handler used by both sendMessage and reattachStream.
+  const handleStreamEvent = useCallback((
+    raw: string,
+    opts: {
+      streamingIdRef: { current: string }
+      hasAssistantMsgRef: { current: boolean }
+      onDone: () => void
+    },
+  ) => {
+    let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string }
+    try { event = JSON.parse(raw) } catch { return }
+
+    if (event.type === 'text' && event.text) {
+      const chunk = event.text
+      if (!opts.hasAssistantMsgRef.current) {
+        opts.hasAssistantMsgRef.current = true
+        setMessages(prev => [...prev, { id: opts.streamingIdRef.current, role: 'assistant' as const, text: chunk }])
+      } else {
+        setMessages(prev => prev.map(m => m.id === opts.streamingIdRef.current ? { ...m, text: m.text + chunk } : m))
+      }
+    } else if (event.type === 'tool_use') {
+      opts.hasAssistantMsgRef.current = false
+      opts.streamingIdRef.current = uid()
+      const firstVal = event.input && typeof event.input === 'object'
+        ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim().slice(0, 60)
+        : ''
+      const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
+      setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
+    } else if (event.type === 'done' || event.type === 'interrupted') {
+      wsRef.current = null
+      opts.onDone()
+    } else if (event.type === 'error') {
+      wsRef.current = null
+      setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
+      updateStatus('ready')
+    }
+  }, [updateStatus])
+
+  // Open a watch-only WebSocket to tail an already-running server loop.
+  const reattachStream = useCallback(() => {
+    if (wsRef.current) return // already connected
+    const streamingIdRef      = { current: uid() }
+    const hasAssistantMsgRef  = { current: false }
+    const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+    updateStatus('streaming')
+    ws.onopen = () => { ws.send(JSON.stringify({ type: 'watch' })) }
+    ws.onmessage = (e) => {
+      handleStreamEvent(e.data, {
+        streamingIdRef,
+        hasAssistantMsgRef,
+        onDone: () => loadHistoryRef.current(),
+      })
+    }
+    ws.onerror = () => {
+      wsRef.current = null
+      updateStatus('error')
+    }
+  }, [baseUrl, handleStreamEvent, updateStatus])
+
+  // Keep a stable ref to loadHistory so reattachStream can call it without
+  // being listed as a dependency (avoids circular dep: loadHistory → reattachStream → loadHistory).
+  const loadHistoryRef = useRef<() => void>(() => {})
+
   const loadHistory = useCallback(() => {
     fetch(`${baseUrl}/history`)
       .then(r => r.json())
-      .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number }> }) => {
+      .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number }>; is_streaming?: boolean }) => {
         const msgs: Message[] = data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
@@ -358,14 +423,21 @@ const ChatPane = memo(function ChatPane({
           ...(m.cost_usd != null ? { cost: m.cost_usd } : {}),
         }))
         setMessages(msgs)
-        updateStatus('ready')
+        if (data.is_streaming) {
+          // A loop is still running on the server — reattach to it live.
+          reattachStream()
+        } else {
+          updateStatus('ready')
+        }
         setTimeout(() => {
           const offset = Math.max(0, contentHeightRef.current - listHeightRef.current)
           listRef.current?.scrollToOffset({ offset, animated: false })
         }, 50)
       })
       .catch(() => updateStatus('error'))
-  }, [baseUrl])
+  }, [baseUrl, reattachStream, updateStatus])
+
+  useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
 
   // Restore draft input on mount / baseUrl change.
   // Restore draft on mount / baseUrl change (cold-start fallback; skipped if
@@ -429,53 +501,26 @@ const ChatPane = memo(function ChatPane({
     AsyncStorage.removeItem(draftKey).catch(() => {})
     updateStatus('streaming')
 
-    let streamingId = uid()
-    let hasAssistantMsg = false
-
-    const handleEvent = (raw: string) => {
-      let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string }
-      try { event = JSON.parse(raw) } catch { return }
-
-      if (event.type === 'text' && event.text) {
-        const chunk = event.text
-        if (!hasAssistantMsg) {
-          hasAssistantMsg = true
-          setMessages(prev => [...prev, { id: streamingId, role: 'assistant' as const, text: chunk }])
-        } else {
-          setMessages(prev => prev.map(m => m.id === streamingId ? { ...m, text: m.text + chunk } : m))
-        }
-      } else if (event.type === 'tool_use') {
-        hasAssistantMsg = false
-        streamingId = uid()
-        const firstVal = event.input && typeof event.input === 'object'
-          ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim().slice(0, 60)
-          : ''
-        const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
-        setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
-      } else if (event.type === 'done') {
-        wsRef.current = null
-        loadHistory()
-      } else if (event.type === 'interrupted') {
-        wsRef.current = null
-        loadHistory()
-      } else if (event.type === 'error') {
-        wsRef.current = null
-        setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
-        updateStatus('ready')
-      }
-    }
+    const streamingIdRef     = { current: uid() }
+    const hasAssistantMsgRef = { current: false }
 
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
     ws.onopen = () => { ws.send(JSON.stringify({ text })) }
-    ws.onmessage = (e) => { handleEvent(e.data) }
+    ws.onmessage = (e) => {
+      handleStreamEvent(e.data, {
+        streamingIdRef,
+        hasAssistantMsgRef,
+        onDone: () => loadHistoryRef.current(),
+      })
+    }
     ws.onerror = () => {
       wsRef.current = null
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
       updateStatus('error')
     }
-  }, [input, status, baseUrl, loadHistory])
+  }, [input, status, baseUrl, handleStreamEvent, updateStatus])
 
   sendMessageRef.current = sendMessage
 

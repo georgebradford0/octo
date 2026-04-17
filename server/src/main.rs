@@ -24,7 +24,7 @@ use claudulhu_core::{
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -130,6 +130,10 @@ struct AppState {
     last_cost_usd: Mutex<Option<f64>>,
     system:        String,
     cwd:           String,
+    /// Broadcast channel for live stream events — watchers subscribe here.
+    stream_tx:     broadcast::Sender<String>,
+    /// True while a /stream loop is running.
+    is_streaming:  AtomicBool,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -139,7 +143,8 @@ async fn health_handler() -> impl IntoResponse { (StatusCode::OK, "ok") }
 async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cost = *state.last_cost_usd.lock().unwrap();
     let msgs = messages_to_history(&state.messages.lock().unwrap(), cost);
-    Json(serde_json::json!({ "messages": msgs }))
+    let is_streaming = state.is_streaming.load(Ordering::Relaxed);
+    Json(serde_json::json!({ "messages": msgs, "is_streaming": is_streaming }))
 }
 
 #[derive(Deserialize)]
@@ -198,14 +203,13 @@ async fn stream_handler(
 async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let text = loop {
+    // Read first frame: either {"text":"..."} to start a new loop,
+    // or {"type":"watch"} to attach to an already-running loop.
+    let first = loop {
         match ws_rx.next().await {
             Some(Ok(WsMessage::Text(t))) => {
-                match serde_json::from_str::<serde_json::Value>(&t)
-                    .ok()
-                    .and_then(|v| v["text"].as_str().map(str::to_string))
-                {
-                    Some(t) => break t,
+                match serde_json::from_str::<serde_json::Value>(&t).ok() {
+                    Some(v) => break v,
                     None    => return,
                 }
             }
@@ -214,12 +218,32 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
+    // ── Watch mode: just subscribe to the broadcast and relay ─────────────────
+    if first.get("type").and_then(|v| v.as_str()) == Some("watch") {
+        let mut rx = state.stream_tx.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(json_str) => {
+                    if ws_tx.send(WsMessage::Text(json_str)).await.is_err() { break; }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            }
+        }
+        return;
+    }
+
+    // ── New loop ──────────────────────────────────────────────────────────────
+    let text = match first.get("text").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None    => return,
+    };
+
     let api_key = match resolve_api_key() {
         Some(k) => k,
         None => {
-            ws_tx.send(WsMessage::Text(
-                serde_json::json!({"type":"error","message":"no API key configured"}).to_string()
-            )).await.ok();
+            let msg = serde_json::json!({"type":"error","message":"no API key configured"}).to_string();
+            ws_tx.send(WsMessage::Text(msg)).await.ok();
             return;
         }
     };
@@ -248,6 +272,8 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
 
     let aborted             = Arc::new(AtomicBool::new(false));
     let aborted_for_listener = aborted.clone();
+
+    state.is_streaming.store(true, Ordering::Relaxed);
 
     tokio::spawn(async move {
         while let Some(Ok(WsMessage::Text(t))) = ws_rx.next().await {
@@ -306,9 +332,13 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
             _ => None,
         };
         if let Some(json) = json_opt {
-            if ws_tx.send(WsMessage::Text(json.to_string())).await.is_err() { break; }
+            let json_str = json.to_string();
+            // Broadcast to any watchers (ignore send errors — no watchers is fine).
+            state.stream_tx.send(json_str.clone()).ok();
+            if ws_tx.send(WsMessage::Text(json_str)).await.is_err() { break; }
         }
     }
+    state.is_streaming.store(false, Ordering::Relaxed);
 }
 
 async fn clear_handler(State(state): State<Arc<AppState>>) -> StatusCode {
@@ -403,11 +433,14 @@ async fn main() {
     let messages = load_messages();
     println!("[claudulhu] loaded {} message(s) from history", messages.len());
 
+    let (stream_tx, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
         messages:      Arc::new(Mutex::new(messages)),
         last_cost_usd: Mutex::new(None),
         system,
         cwd: repo.clone(),
+        stream_tx,
+        is_streaming:  AtomicBool::new(false),
     });
 
     let cors = CorsLayer::new()
