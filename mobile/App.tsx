@@ -347,20 +347,16 @@ const ChatPane = memo(function ChatPane({
     onStatusChange(s)
   }, [onStatusChange])
 
-  const loadHistory = useCallback((costForLast?: number) => {
+  const loadHistory = useCallback(() => {
     fetch(`${baseUrl}/history`)
       .then(r => r.json())
-      .then((data: { messages: Array<{ role: string; text: string }> }) => {
+      .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number }> }) => {
         const msgs: Message[] = data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
           text: m.text,
+          ...(m.cost_usd != null ? { cost: m.cost_usd } : {}),
         }))
-        if (costForLast != null) {
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            if (msgs[i].role === 'assistant') { msgs[i] = { ...msgs[i], cost: costForLast }; break }
-          }
-        }
         setMessages(msgs)
         updateStatus('ready')
         setTimeout(() => {
@@ -392,18 +388,9 @@ const ChatPane = memo(function ChatPane({
   }, [baseUrl])
 
   // Re-fetch history when app foregrounds (tunnel may have reconnected).
-  // Pass through any cost already attached to the last assistant message so it
-  // isn't lost when the history is reloaded (cost only arrives via WS, not /history).
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') {
-        const msgs = messagesRef.current
-        let lastCost: number | undefined
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].role === 'assistant') { lastCost = msgs[i].cost; break }
-        }
-        loadHistory(lastCost)
-      }
+      if (nextState === 'active') loadHistory()
     })
     return () => sub.remove()
   }, [loadHistory])
@@ -467,10 +454,10 @@ const ChatPane = memo(function ChatPane({
         setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
       } else if (event.type === 'done') {
         wsRef.current = null
-        loadHistory(event.cost_usd)
+        loadHistory()
       } else if (event.type === 'interrupted') {
         wsRef.current = null
-        loadHistory(event.cost_usd)
+        loadHistory()
       } else if (event.type === 'error') {
         wsRef.current = null
         setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
