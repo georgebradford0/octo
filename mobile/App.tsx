@@ -328,6 +328,8 @@ const ChatPane = memo(function ChatPane({
   }))
 
   const [messages,      setMessages]      = useState<Message[]>([])
+  // Keep a ref in sync so callbacks can read the latest messages without stale closures.
+  useEffect(() => { messagesRef.current = messages }, [messages])
   const [status,        setStatus]        = useState<ConnStatus>('connecting')
   const [input,         setInput]         = useState(initialDraft ?? '')
   const draftKey = `draft:${baseUrl}`
@@ -341,6 +343,7 @@ const ChatPane = memo(function ChatPane({
   const isAtBottomRef     = useRef(true)
   const contentHeightRef  = useRef(0)
   const listHeightRef     = useRef(0)
+  const messagesRef       = useRef<Message[]>([])
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -392,9 +395,18 @@ const ChatPane = memo(function ChatPane({
   }, [baseUrl])
 
   // Re-fetch history when app foregrounds (tunnel may have reconnected).
+  // Pass through any cost already attached to the last assistant message so it
+  // isn't lost when the history is reloaded (cost only arrives via WS, not /history).
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') loadHistory()
+      if (nextState === 'active') {
+        const msgs = messagesRef.current
+        let lastCost: number | undefined
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'assistant') { lastCost = msgs[i].cost; break }
+        }
+        loadHistory(lastCost)
+      }
     })
     return () => sub.remove()
   }, [loadHistory])
