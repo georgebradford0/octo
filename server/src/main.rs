@@ -172,21 +172,25 @@ async fn stream_handler(
 }
 
 async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
+    println!("[stream] client connected");
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     let text = loop {
         match ws_rx.next().await {
             Some(Ok(WsMessage::Text(t))) => {
+                println!("[stream] received frame: {t}");
                 match serde_json::from_str::<serde_json::Value>(&t)
                     .ok()
                     .and_then(|v| v["text"].as_str().map(str::to_string))
                 {
                     Some(t) => break t,
-                    None    => return,
+                    None    => { println!("[stream] frame missing 'text' field, closing"); return; }
                 }
             }
             Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
-            _ => return,
+            Some(Ok(other)) => { println!("[stream] unexpected frame type: {other:?}"); return; }
+            Some(Err(e))    => { println!("[stream] recv error: {e}"); return; }
+            None            => { println!("[stream] client disconnected before sending message"); return; }
         }
     };
 
@@ -205,7 +209,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         let mut msgs = state.messages.lock().unwrap();
         msgs.push(ApiMessage {
             role:    "user".to_string(),
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text { text: text.clone() }],
         });
         save_messages(&msgs);
     }
@@ -218,39 +222,59 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(256);
     let done_tx = event_tx.clone();
 
+    println!("[stream] starting loop for message: {text:?}");
     tokio::spawn(async move {
+        println!("[stream] background task started");
         match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx)).await {
             Ok((_, cost_usd, updated)) => {
+                println!("[stream] send_message ok, cost=${cost_usd:.4}");
                 *msgs_arc.lock().unwrap() = updated.clone();
                 save_messages(&updated);
                 done_tx.send(ChatEvent::Result {
                     cost_usd, turns: 0, session_id: String::new(), result: None,
                 }).await.ok();
+                println!("[stream] done event sent");
             }
-            Err(e) => {
+            Err(ref e) => {
+                println!("[stream] send_message error: {e}");
                 msgs_arc.lock().unwrap().pop();
                 save_messages(&msgs_arc.lock().unwrap());
-                done_tx.send(ChatEvent::Error { message: e }).await.ok();
+                done_tx.send(ChatEvent::Error { message: e.clone() }).await.ok();
             }
         }
     });
 
+    println!("[stream] entering event forward loop");
     while let Some(event) = event_rx.recv().await {
-        let json_opt: Option<serde_json::Value> = match event {
-            ChatEvent::Text { text } =>
-                Some(serde_json::json!({"type":"text","text":text})),
-            ChatEvent::ToolUse { tool, input } =>
-                Some(serde_json::json!({"type":"tool_use","tool":tool,"input":input})),
-            ChatEvent::Result { cost_usd, .. } =>
-                Some(serde_json::json!({"type":"done","cost_usd":cost_usd})),
-            ChatEvent::Error { message } =>
-                Some(serde_json::json!({"type":"error","message":message})),
-            _ => None,
+        let json_opt: Option<serde_json::Value> = match &event {
+            ChatEvent::Text { text } => {
+                println!("[stream] → text ({} chars)", text.len());
+                Some(serde_json::json!({"type":"text","text":text}))
+            }
+            ChatEvent::ToolUse { tool, .. } => {
+                println!("[stream] → tool_use: {tool}");
+                let ChatEvent::ToolUse { tool, input } = event else { unreachable!() };
+                Some(serde_json::json!({"type":"tool_use","tool":tool,"input":input}))
+            }
+            ChatEvent::Result { cost_usd, .. } => {
+                println!("[stream] → done (cost=${cost_usd:.4})");
+                Some(serde_json::json!({"type":"done","cost_usd":cost_usd}))
+            }
+            ChatEvent::Error { message } => {
+                println!("[stream] → error: {message}");
+                Some(serde_json::json!({"type":"error","message":message}))
+            }
+            other => { println!("[stream] skipping event: {other:?}"); None }
         };
         if let Some(json) = json_opt {
-            if ws_tx.send(WsMessage::Text(json.to_string())).await.is_err() { break; }
+            println!("[stream] sending WS frame");
+            if ws_tx.send(WsMessage::Text(json.to_string())).await.is_err() {
+                println!("[stream] WS send failed, client disconnected");
+                break;
+            }
         }
     }
+    println!("[stream] event loop done, closing");
 }
 
 async fn clear_handler(State(state): State<Arc<AppState>>) -> StatusCode {

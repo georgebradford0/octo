@@ -425,12 +425,14 @@ const ChatPane = memo(function ChatPane({
     AsyncStorage.removeItem(draftKey).catch(() => {})
     updateStatus('streaming')
 
-    const streamingId = uid()
+    let streamingId = uid()
     let hasAssistantMsg = false
 
     const handleEvent = (raw: string) => {
+      console.log('[stream] onmessage raw:', raw.slice(0, 120))
       let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string }
-      try { event = JSON.parse(raw) } catch { return }
+      try { event = JSON.parse(raw) } catch (err) { console.warn('[stream] JSON parse error:', err, raw); return }
+      console.log('[stream] event type:', event.type)
 
       if (event.type === 'text' && event.text) {
         const chunk = event.text
@@ -442,6 +444,7 @@ const ChatPane = memo(function ChatPane({
         }
       } else if (event.type === 'tool_use') {
         hasAssistantMsg = false
+        streamingId = uid()
         const firstVal = event.input && typeof event.input === 'object'
           ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim().slice(0, 60)
           : ''
@@ -456,12 +459,20 @@ const ChatPane = memo(function ChatPane({
     }
 
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    console.log('[stream] connecting to', wsUrl)
     const ws = new WebSocket(wsUrl)
-    ws.onopen = () => { ws.send(JSON.stringify({ text })) }
+    ws.onopen = () => {
+      console.log('[stream] WS open, sending message')
+      ws.send(JSON.stringify({ text }))
+    }
     ws.onmessage = (e) => { handleEvent(e.data) }
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+      console.error('[stream] WS error:', e)
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
       updateStatus('error')
+    }
+    ws.onclose = (e) => {
+      console.log('[stream] WS closed, code:', e.code, 'reason:', e.reason)
     }
   }, [input, status, baseUrl, loadHistory])
 

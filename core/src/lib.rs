@@ -145,7 +145,7 @@ pub enum ContentBlock {
 
 // ── Chat Events ───────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
     Ready              { session_id: String, resumed: bool },
@@ -1070,6 +1070,7 @@ pub async fn send_message(
                     "text" => {
                         let t = block["text"].as_str().unwrap_or("").to_string();
                         if !t.is_empty() {
+                            tx.send(ChatEvent::Text { text: t.clone() }).await.ok();
                             text_buf.push_str(&t);
                             blocks.push(ContentBlock::Text { text: t });
                         }
@@ -1078,6 +1079,7 @@ pub async fn send_message(
                         let id    = block["id"].as_str().unwrap_or("").to_string();
                         let name  = block["name"].as_str().unwrap_or("").to_string();
                         let input = block["input"].clone();
+                        tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
                         tool_uses.push((id.clone(), name.clone(), input.clone()));
                         blocks.push(ContentBlock::ToolUse { id, name, input });
                     }
