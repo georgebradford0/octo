@@ -44,7 +44,7 @@ interface ContainerInfo {
 
 interface Message {
   id:    string
-  role:  'user' | 'assistant' | 'tool' | 'session'
+  role:  'user' | 'assistant' | 'tool' | 'session' | 'interrupted'
   text:  string
   cost?: number
 }
@@ -219,6 +219,13 @@ function containerDisplayName(name: string): string {
 const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
   if (message.role === 'session') {
     return null
+  }
+  if (message.role === 'interrupted') {
+    return (
+      <View style={[s.messageWrap, { marginBottom: 3, paddingLeft: 28 }]}>
+        <Text style={s.interruptedLine}>■ interrupted</Text>
+      </View>
+    )
   }
   if (message.role === 'tool') {
     return (
@@ -449,7 +456,10 @@ const ChatPane = memo(function ChatPane({
           : ''
         const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
         setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
-      } else if (event.type === 'done' || event.type === 'interrupted') {
+      } else if (event.type === 'done') {
+        wsRef.current = null
+        loadHistory(event.cost_usd)
+      } else if (event.type === 'interrupted') {
         wsRef.current = null
         loadHistory(event.cost_usd)
       } else if (event.type === 'error') {
@@ -1110,6 +1120,7 @@ const s = StyleSheet.create({
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
   toolLine:          { fontSize: 12, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginLeft: 2 },
+  interruptedLine:   { fontSize: 18, lineHeight: 26, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
 
   // Input bar
   completionList: { maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },

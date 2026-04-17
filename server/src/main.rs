@@ -75,6 +75,9 @@ fn messages_to_history(messages: &[ApiMessage]) -> Vec<HistMsg> {
                     .collect();
                 if !text.is_empty() { result.push(HistMsg { role: "user".to_string(), text }); }
             }
+            "interrupted" => {
+                result.push(HistMsg { role: "interrupted".to_string(), text: "interrupted".to_string() });
+            }
             "assistant" => {
                 let text: String = m.content.iter()
                     .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
@@ -149,7 +152,10 @@ async fn message_handler(
         save_messages(&msgs);
     }
 
-    let messages = state.messages.lock().unwrap().clone();
+    let messages: Vec<ApiMessage> = state.messages.lock().unwrap().iter()
+        .filter(|m| m.role != "interrupted")
+        .cloned()
+        .collect();
 
     match send_message(messages, &state.system, &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false))).await {
         Ok((text, cost_usd, updated)) => {
@@ -213,7 +219,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         save_messages(&msgs);
     }
 
-    let messages = state.messages.lock().unwrap().clone();
+    let messages: Vec<ApiMessage> = state.messages.lock().unwrap().iter()
+        .filter(|m| m.role != "interrupted")
+        .cloned()
+        .collect();
     let system   = state.system.clone();
     let cwd      = state.cwd.clone();
     let msgs_arc = state.messages.clone();
@@ -239,12 +248,18 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
 
     tokio::spawn(async move {
         match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), aborted.clone()).await {
-            Ok((_, cost_usd, updated)) => {
-                *msgs_arc.lock().unwrap() = updated.clone();
-                save_messages(&updated);
+            Ok((_, cost_usd, mut updated)) => {
                 if aborted.load(Ordering::Relaxed) {
+                    updated.push(ApiMessage {
+                        role:    "interrupted".to_string(),
+                        content: vec![ContentBlock::Text { text: "interrupted".to_string() }],
+                    });
+                    *msgs_arc.lock().unwrap() = updated.clone();
+                    save_messages(&updated);
                     done_tx.send(ChatEvent::Interrupted { cost_usd }).await.ok();
                 } else {
+                    *msgs_arc.lock().unwrap() = updated.clone();
+                    save_messages(&updated);
                     done_tx.send(ChatEvent::Result {
                         cost_usd, turns: 0, session_id: String::new(), result: None,
                     }).await.ok();
