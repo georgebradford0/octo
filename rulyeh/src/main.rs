@@ -450,8 +450,9 @@ async fn poll_containers(state: Arc<AppState>) {
                     *current != new_containers
                 };
                 if changed {
+                    let n = new_containers.len();
                     *state.containers.lock().unwrap() = new_containers;
-                    info!("[containers] state changed: {} container(s)", new_containers.len());
+                    info!("[containers] state changed: {n} container(s)");
                 }
             }
             Err(e) => error!("[containers] poll error: {e}"),
