@@ -359,6 +359,8 @@ const ChatPane = memo(function ChatPane({
     let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string }
     try { event = JSON.parse(raw) } catch { return }
 
+    console.log('[chat] stream event:', event.type, event.type === 'text' ? `(${event.text?.length ?? 0} chars)` : event.type === 'error' ? event.message : event.type === 'tool_use' ? event.tool : '')
+
     if (event.type === 'text' && event.text) {
       const chunk = event.text
       if (!opts.hasAssistantMsgRef.current) {
@@ -391,10 +393,14 @@ const ChatPane = memo(function ChatPane({
     const streamingIdRef      = { current: uid() }
     const hasAssistantMsgRef  = { current: false }
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    console.log('[chat] reattachStream → connecting to', wsUrl)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
     updateStatus('streaming')
-    ws.onopen = () => { ws.send(JSON.stringify({ type: 'watch' })) }
+    ws.onopen = () => {
+      console.log('[chat] reattachStream → open, sending watch')
+      ws.send(JSON.stringify({ type: 'watch' }))
+    }
     ws.onmessage = (e) => {
       handleStreamEvent(e.data, {
         streamingIdRef,
@@ -402,7 +408,8 @@ const ChatPane = memo(function ChatPane({
         onDone: () => loadHistoryRef.current(),
       })
     }
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+      console.log('[chat] reattachStream → error', e)
       wsRef.current = null
       updateStatus('error')
     }
@@ -413,9 +420,11 @@ const ChatPane = memo(function ChatPane({
   const loadHistoryRef = useRef<() => void>(() => {})
 
   const loadHistory = useCallback(() => {
+    console.log('[chat] loadHistory →', `${baseUrl}/history`)
     fetch(`${baseUrl}/history`)
       .then(r => r.json())
       .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number }>; is_streaming?: boolean }) => {
+        console.log('[chat] loadHistory ← ', data.messages.length, 'messages, is_streaming:', data.is_streaming)
         const msgs: Message[] = data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
@@ -434,7 +443,7 @@ const ChatPane = memo(function ChatPane({
           listRef.current?.scrollToOffset({ offset, animated: false })
         }, 50)
       })
-      .catch(() => updateStatus('error'))
+      .catch((e) => { console.log('[chat] loadHistory error:', e); updateStatus('error') })
   }, [baseUrl, reattachStream, updateStatus])
 
   useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
@@ -515,9 +524,13 @@ const ChatPane = memo(function ChatPane({
     const hasAssistantMsgRef = { current: false }
 
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    console.log('[chat] sendMessage → connecting to', wsUrl)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
-    ws.onopen = () => { ws.send(JSON.stringify({ text })) }
+    ws.onopen = () => {
+      console.log('[chat] sendMessage → open, sending message')
+      ws.send(JSON.stringify({ text }))
+    }
     ws.onmessage = (e) => {
       handleStreamEvent(e.data, {
         streamingIdRef,
@@ -525,7 +538,8 @@ const ChatPane = memo(function ChatPane({
         onDone: () => loadHistoryRef.current(),
       })
     }
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+      console.log('[chat] sendMessage → error', e)
       wsRef.current = null
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
       updateStatus('error')

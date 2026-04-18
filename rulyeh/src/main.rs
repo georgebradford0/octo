@@ -579,7 +579,9 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
             };
             let client = reqwest::Client::new();
             let url = format!("http://{}:8000/message", container_name);
-            match client
+            println!("[rulyeh] message_child → POST {url}");
+            let t0 = std::time::Instant::now();
+            let result = match client
                 .post(&url)
                 .json(&serde_json::json!({ "text": text }))
                 .send()
@@ -594,7 +596,11 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
                     Err(e) => format!("error parsing child response: {e}"),
                 },
                 Err(e) => format!("error contacting child '{container_name}': {e}"),
-            }
+            };
+            println!("[rulyeh] message_child ← {container_name} replied in {:.1}s: {}",
+                t0.elapsed().as_secs_f64(),
+                result.chars().take(120).collect::<String>());
+            result
         })
     }))
 }
@@ -679,7 +685,7 @@ async fn main() {
         .with_state(state)
         .layer(cors);
 
-    let addr = format!("127.0.0.1:{http_port}");
+    let addr = format!("0.0.0.0:{http_port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind HTTP port");
     println!("[claudulhu-rulyeh] HTTP on {addr} (Noise proxy on 0.0.0.0:{noise_port})");
 

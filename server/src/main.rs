@@ -161,6 +161,9 @@ async fn message_handler(
     };
     let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
+    println!("[claudulhu] message_handler ← received: {}", body.text.chars().take(80).collect::<String>());
+    let t0 = std::time::Instant::now();
+
     {
         let mut msgs = state.messages.lock().unwrap();
         msgs.push(ApiMessage {
@@ -177,6 +180,7 @@ async fn message_handler(
 
     match send_message(messages, &state.system, &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &make_extra_tools(), make_extra_executor()).await {
         Ok((text, cost_usd, updated)) => {
+            println!("[claudulhu] message_handler → replied in {:.1}s: {}", t0.elapsed().as_secs_f64(), text.chars().take(80).collect::<String>());
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
             save_messages(&msgs);
@@ -185,6 +189,7 @@ async fn message_handler(
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }
         Err(e) => {
+            println!("[claudulhu] message_handler → error after {:.1}s: {e}", t0.elapsed().as_secs_f64());
             let mut msgs = state.messages.lock().unwrap();
             msgs.pop();
             save_messages(&msgs);
