@@ -462,7 +462,17 @@ const ChatPane = memo(function ChatPane({
   // Re-fetch history when app foregrounds (tunnel may have reconnected).
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') loadHistory()
+      if (nextState === 'active') {
+        // Close any stale WS before reloading history so reattachStream always
+        // opens a fresh connection (the old one may still appear open on iOS
+        // after backgrounding, causing reattachStream to bail out early and
+        // leaving the screen blank after setMessages replaces the message list).
+        if (wsRef.current) {
+          wsRef.current.close()
+          wsRef.current = null
+        }
+        loadHistory()
+      }
     })
     return () => sub.remove()
   }, [loadHistory])
