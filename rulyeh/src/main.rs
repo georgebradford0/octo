@@ -6,8 +6,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+use tracing::{error, info, warn};
 
 use axum::{
     extract::{
@@ -187,12 +189,20 @@ async fn message_handler(
     State(state): State<Arc<AppState>>,
     Json(body):   Json<PostMessage>,
 ) -> impl IntoResponse {
+    let preview: String = body.text.chars().take(120).collect();
+    info!("[rulyeh/message_handler] received ({} chars): {preview}", body.text.len());
+    let start = Instant::now();
+
     let api_key = match resolve_api_key() {
         Some(k) => k,
-        None    => return (StatusCode::INTERNAL_SERVER_ERROR,
-                           Json(serde_json::json!({"error": "no API key configured"}))).into_response(),
+        None    => {
+            error!("[rulyeh/message_handler] no API key configured");
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                           Json(serde_json::json!({"error": "no API key configured"}))).into_response();
+        }
     };
     let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    info!("[rulyeh/message_handler] model={model}");
 
     {
         let mut msgs = state.messages.lock().unwrap();
@@ -208,8 +218,11 @@ async fn message_handler(
         .cloned()
         .collect();
 
+    info!("[rulyeh/message_handler] calling send_message with {} messages", messages.len());
     match send_message(messages, &state.system, &model, &api_key, "/", None, Arc::new(AtomicBool::new(false)), &rulyeh_extra_tools(), rulyeh_extra_executor()).await {
         Ok((text, cost_usd, updated)) => {
+            let elapsed = start.elapsed().as_millis();
+            info!("[rulyeh/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
             save_messages(&msgs);
@@ -218,6 +231,8 @@ async fn message_handler(
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }
         Err(e) => {
+            let elapsed = start.elapsed().as_millis();
+            error!("[rulyeh/message_handler] error in {elapsed}ms: {e}");
             let mut msgs = state.messages.lock().unwrap();
             msgs.pop();
             save_messages(&msgs);
@@ -385,7 +400,7 @@ async fn start_container_handler(
 
     match result {
         Ok(out) if out.status.success() => {
-            println!("[containers] started {name}, triggering re-poll");
+            info!("[containers] started {name}, triggering re-poll");
             tokio::time::sleep(Duration::from_secs(3)).await;
             state.poll_trigger.notify_one();
             (StatusCode::OK, Json(serde_json::json!({}))).into_response()
@@ -393,11 +408,11 @@ async fn start_container_handler(
         Ok(out) => {
             let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let msg = if msg.is_empty() { "docker start failed".to_string() } else { msg };
-            eprintln!("[containers] docker start failed: {msg}");
+            error!("[containers] docker start failed: {msg}");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response()
         }
         Err(e) => {
-            eprintln!("[containers] docker start error: {e}");
+            error!("[containers] docker start error: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
         }
     }
@@ -417,13 +432,13 @@ async fn poll_containers(state: Arc<AppState>) {
                     if let Some(pk) = registry.get(&c.id) {
                         c.pubkey = pk.clone();
                     } else if c.status == "running" {
-                        println!("[containers] fetching pubkey for {}", c.name);
+                        info!("[containers] fetching pubkey for {}", c.name);
                         if let Some(pk) = fetch_pubkey_via_exec(&c.name).await {
                             c.pubkey = pk.clone();
                             registry.insert(c.id.clone(), pk);
                             dirty = true;
                         } else {
-                            eprintln!("[containers] pubkey fetch failed for {}", c.name);
+                            error!("[containers] pubkey fetch failed for {}", c.name);
                         }
                     }
                 }
@@ -436,10 +451,10 @@ async fn poll_containers(state: Arc<AppState>) {
                 };
                 if changed {
                     *state.containers.lock().unwrap() = new_containers;
-                    println!("[containers] state changed");
+                    info!("[containers] state changed: {} container(s)", new_containers.len());
                 }
             }
-            Err(e) => eprintln!("[containers] poll error: {e}"),
+            Err(e) => error!("[containers] poll error: {e}"),
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(10)) => {}
@@ -577,23 +592,43 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
                 Some(t) => t.to_string(),
                 None => return "error: missing 'text' field".to_string(),
             };
-            let client = reqwest::Client::new();
+            let preview: String = text.chars().take(120).collect();
             let url = format!("http://{}:8000/message", container_name);
+            info!("[rulyeh/message_child] → POST {url} container={container_name} ({} chars): {preview}", text.len());
+            let start = Instant::now();
+            let client = reqwest::Client::new();
             match client
                 .post(&url)
                 .json(&serde_json::json!({ "text": text }))
                 .send()
                 .await
             {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(body) => body
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("(no response text)")
-                        .to_string(),
-                    Err(e) => format!("error parsing child response: {e}"),
-                },
-                Err(e) => format!("error contacting child '{container_name}': {e}"),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let elapsed = start.elapsed().as_millis();
+                    info!("[rulyeh/message_child] ← HTTP {status} in {elapsed}ms from {container_name}");
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            let result = body
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(no response text)")
+                                .to_string();
+                            let rpreview: String = result.chars().take(120).collect();
+                            info!("[rulyeh/message_child] response ({} chars): {rpreview}", result.len());
+                            result
+                        }
+                        Err(e) => {
+                            error!("[rulyeh/message_child] parse error from {container_name}: {e}");
+                            format!("error parsing child response: {e}")
+                        }
+                    }
+                }
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis();
+                    error!("[rulyeh/message_child] request to {container_name} failed in {elapsed}ms: {e}");
+                    format!("error contacting child '{container_name}': {e}")
+                }
             }
         })
     }))
@@ -603,6 +638,15 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_target(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     init_shell_env();
 
     let args: Vec<String> = std::env::args().collect();
@@ -621,7 +665,7 @@ async fn main() {
     }
 
     let (static_private, static_public) = if is_dev {
-        println!("[claudulhu-rulyeh] !! DEV MODE: using fixed dev keypair");
+        warn!("[rulyeh] DEV MODE: using fixed dev keypair");
         (DEV_STATIC_PRIVATE.to_vec(), DEV_STATIC_PUBLIC.to_vec())
     } else {
         load_or_generate_keypair(&key_file)
@@ -634,27 +678,23 @@ async fn main() {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            // Detect outbound IP by binding a UDP socket — no packet is sent.
             std::net::UdpSocket::bind("0.0.0.0:0")
                 .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
                 .map(|a| a.ip().to_string())
                 .unwrap_or_else(|_| "127.0.0.1".to_string())
         });
-    // RULYEH_NAME lets operators override the intra-Docker DNS name of this container.
-    // Defaults to "rulyeh" (the fixed container_name in docker-compose).
-    // HOSTNAME is intentionally not used — Docker sets it to the container ID, not the name.
     let rulyeh_name = std::env::var("RULYEH_NAME")
         .unwrap_or_else(|_| "rulyeh".to_string());
     let rulyeh_url = format!("http://{}:{}", rulyeh_name, http_port);
 
-    println!("[claudulhu-rulyeh] Noise public key: {pubkey_b32}");
+    info!("[rulyeh] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port} public_host={public_host}");
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
     let dir = data_dir();
     fs::create_dir_all(&dir).ok();
     let messages = load_messages();
-    println!("[claudulhu-rulyeh] loaded {} message(s) from history", messages.len());
+    info!("[rulyeh] loaded {} message(s) from history", messages.len());
 
     let poll_trigger = Arc::new(Notify::new());
 
@@ -689,7 +729,7 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{http_port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind HTTP port");
-    println!("[claudulhu-rulyeh] HTTP on {addr} (Noise proxy on 0.0.0.0:{noise_port})");
+    info!("[rulyeh] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port})");
 
     axum::serve(listener, app).await.unwrap();
 }

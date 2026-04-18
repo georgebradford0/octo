@@ -49,6 +49,13 @@ interface Message {
   cost?: number
 }
 
+// ── Logging ────────────────────────────────────────────────────────────────────
+
+const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
+const log  = (...args: unknown[]) => console.log( `[${ts()}]`, ...args)
+const logE = (...args: unknown[]) => console.error(`[${ts()}] ERROR`, ...args)
+const logW = (...args: unknown[]) => console.warn( `[${ts()}] WARN`, ...args)
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 let _id = 0
@@ -374,11 +381,18 @@ const ChatPane = memo(function ChatPane({
         ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim().slice(0, 60)
         : ''
       const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
+      log(`[chat] tool_use tool=${event.tool} input=${firstVal}`)
       setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
-    } else if (event.type === 'done' || event.type === 'interrupted') {
+    } else if (event.type === 'done') {
+      log(`[chat] stream done cost_usd=${event.cost_usd}`)
+      wsRef.current = null
+      opts.onDone()
+    } else if (event.type === 'interrupted') {
+      log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
       wsRef.current = null
       opts.onDone()
     } else if (event.type === 'error') {
+      logE(`[chat] stream error: ${event.message}`)
       wsRef.current = null
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
       updateStatus('ready')
@@ -387,14 +401,21 @@ const ChatPane = memo(function ChatPane({
 
   // Open a watch-only WebSocket to tail an already-running server loop.
   const reattachStream = useCallback(() => {
-    if (wsRef.current) return // already connected
+    if (wsRef.current) {
+      log('[chat] reattachStream: already have ws, skipping')
+      return
+    }
     const streamingIdRef      = { current: uid() }
     const hasAssistantMsgRef  = { current: false }
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    log(`[chat] reattachStream opening ${wsUrl}`)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
     updateStatus('streaming')
-    ws.onopen = () => { ws.send(JSON.stringify({ type: 'watch' })) }
+    ws.onopen = () => {
+      log('[chat] reattachStream ws open, sending watch')
+      ws.send(JSON.stringify({ type: 'watch' }))
+    }
     ws.onmessage = (e) => {
       handleStreamEvent(e.data, {
         streamingIdRef,
@@ -402,9 +423,13 @@ const ChatPane = memo(function ChatPane({
         onDone: () => loadHistoryRef.current(),
       })
     }
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+      logE(`[chat] reattachStream ws error: ${JSON.stringify(e)}`)
       wsRef.current = null
       updateStatus('error')
+    }
+    ws.onclose = (e) => {
+      log(`[chat] reattachStream ws closed code=${e.code} reason=${e.reason}`)
     }
   }, [baseUrl, handleStreamEvent, updateStatus])
 
@@ -413,9 +438,11 @@ const ChatPane = memo(function ChatPane({
   const loadHistoryRef = useRef<() => void>(() => {})
 
   const loadHistory = useCallback(() => {
+    log(`[chat] loadHistory GET ${baseUrl}/history`)
     fetch(`${baseUrl}/history`)
       .then(r => r.json())
       .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number }>; is_streaming?: boolean }) => {
+        log(`[chat] history loaded ${data.messages.length} messages is_streaming=${data.is_streaming}`)
         const msgs: Message[] = data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
@@ -424,7 +451,6 @@ const ChatPane = memo(function ChatPane({
         }))
         setMessages(msgs)
         if (data.is_streaming) {
-          // A loop is still running on the server — reattach to it live.
           reattachStream()
         } else {
           updateStatus('ready')
@@ -434,7 +460,10 @@ const ChatPane = memo(function ChatPane({
           listRef.current?.scrollToOffset({ offset, animated: false })
         }, 50)
       })
-      .catch(() => updateStatus('error'))
+      .catch(e => {
+        logE(`[chat] loadHistory failed: ${String(e)}`)
+        updateStatus('error')
+      })
   }, [baseUrl, reattachStream, updateStatus])
 
   useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
@@ -505,6 +534,7 @@ const ChatPane = memo(function ChatPane({
     const text = input.trim()
     if (!text || status === 'streaming') return
 
+    log(`[chat] sendMessage (${text.length} chars): ${text.slice(0, 80)}`)
     setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
     isAtBottomRef.current = true
     setInput('')
@@ -515,9 +545,13 @@ const ChatPane = memo(function ChatPane({
     const hasAssistantMsgRef = { current: false }
 
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
+    log(`[chat] opening ws ${wsUrl}`)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
-    ws.onopen = () => { ws.send(JSON.stringify({ text })) }
+    ws.onopen = () => {
+      log('[chat] ws open, sending message')
+      ws.send(JSON.stringify({ text }))
+    }
     ws.onmessage = (e) => {
       handleStreamEvent(e.data, {
         streamingIdRef,
@@ -525,10 +559,14 @@ const ChatPane = memo(function ChatPane({
         onDone: () => loadHistoryRef.current(),
       })
     }
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+      logE(`[chat] ws error: ${JSON.stringify(e)}`)
       wsRef.current = null
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
       updateStatus('error')
+    }
+    ws.onclose = (e) => {
+      log(`[chat] ws closed code=${e.code} reason=${e.reason}`)
     }
   }, [input, status, baseUrl, handleStreamEvent, updateStatus])
 
@@ -791,14 +829,24 @@ function AppInner() {
       : null
 
     if (!target) return
-    if (!NoiseConnection) { setTunnelError('Native Noise module unavailable'); return }
+    if (!NoiseConnection) {
+      logE('[noise] native module unavailable')
+      setTunnelError('Native Noise module unavailable')
+      return
+    }
 
     let live = true
+    log(`[noise] connecting to ${target.host}:${target.port} pk=${target.pk.slice(0, 8)}…`)
     NoiseConnection.disconnect()
     NoiseConnection.connect(target.host, target.port, target.pk)
-      .then(port => { if (live) setTunnelPort(port) })
+      .then(port => {
+        if (!live) return
+        log(`[noise] tunnel ready on local port ${port}`)
+        setTunnelPort(port)
+      })
       .catch(e => {
         if (!live) return
+        logE(`[noise] connect failed: ${e?.message ?? String(e)}`)
         if (activeChild) {
           setActiveChild(null) // fall back to master; re-triggers this effect
         } else {
@@ -806,7 +854,11 @@ function AppInner() {
         }
       })
 
-    return () => { live = false; NoiseConnection?.disconnect() }
+    return () => {
+      live = false
+      log('[noise] disconnecting')
+      NoiseConnection?.disconnect()
+    }
   }, [conn, activeChild, reconnectKey])
 
   // Single AppState listener — bumps reconnectKey to re-run the connection effect.
@@ -823,12 +875,13 @@ function AppInner() {
     fetch(`${masterBaseUrl}/containers`)
       .then(r => r.json())
       .then((data: { containers: ContainerInfo[] }) => {
+        log(`[app] fetchContainers: ${data.containers.length} container(s)`)
         setContainers(data.containers)
-        // If we're waiting for a container to start, check if it's up now.
         const waitingId = startingContainerIdRef.current
         if (waitingId) {
           const started = data.containers.find(c => c.id === waitingId && c.status === 'running' && c.pubkey)
           if (started) {
+            log(`[app] container ${started.name} is now running, connecting`)
             startingContainerIdRef.current = null
             setStartingContainerId(null)
             setStartingError(null)
@@ -836,7 +889,7 @@ function AppInner() {
           }
         }
       })
-      .catch(() => {})
+      .catch(e => logE(`[app] fetchContainers failed: ${String(e)}`))
   }, [masterBaseUrl])
 
   // Fetch containers on connect and periodically while a start is in progress.

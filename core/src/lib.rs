@@ -1240,9 +1240,8 @@ pub async fn run_startup_prompt(
     api_key: &str,
     model:   &str,
 ) {
-    println!("[claudulhu] Running STARTUP_PROMPT...");
+    tracing::info!("[startup] running startup prompt ({} chars)", prompt.len());
 
-    // Inject the user message into the session.
     {
         let mut s = session.lock().unwrap();
         s.messages.push(ApiMessage {
@@ -1260,21 +1259,21 @@ pub async fn run_startup_prompt(
         run_agentic_loop(session_c, "startup".to_string(), api_key_s, model_s, tx, vec![], None).await;
     });
 
-    // Drain events, printing them so they appear in `docker logs`.
     while let Some(event) = rx.recv().await {
         match &event {
             ChatEvent::Text { text } => print!("{text}"),
             ChatEvent::ToolUse { tool, input } => {
-                println!("\n[startup] tool: {tool} {input}");
+                tracing::info!("[startup] tool_use tool={tool} input={input}");
             }
             ChatEvent::ToolResult { content, .. } => {
-                println!("[startup] result: {content}");
+                let preview = content.as_str().map(|s| s.chars().take(120).collect::<String>()).unwrap_or_default();
+                tracing::info!("[startup] tool_result: {preview}");
             }
             ChatEvent::Error { message } => {
-                eprintln!("[startup] error: {message}");
+                tracing::error!("[startup] error: {message}");
             }
             ChatEvent::Result { cost_usd, turns, .. } => {
-                println!("\n[claudulhu] STARTUP_PROMPT complete ({turns} turns, ${cost_usd:.4})");
+                tracing::info!("[startup] complete turns={turns} cost=${cost_usd:.4}");
             }
             _ => {}
         }

@@ -5,7 +5,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
+
+use tracing::{error, info, warn};
 
 use axum::{
     extract::{
@@ -154,12 +157,20 @@ async fn message_handler(
     State(state): State<Arc<AppState>>,
     Json(body):   Json<PostMessage>,
 ) -> impl IntoResponse {
+    let preview: String = body.text.chars().take(120).collect();
+    info!("[server/message_handler] received ({} chars): {preview}", body.text.len());
+    let start = Instant::now();
+
     let api_key = match resolve_api_key() {
         Some(k) => k,
-        None    => return (StatusCode::INTERNAL_SERVER_ERROR,
-                           Json(serde_json::json!({"error": "no API key configured"}))).into_response(),
+        None    => {
+            error!("[server/message_handler] no API key configured");
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                           Json(serde_json::json!({"error": "no API key configured"}))).into_response();
+        }
     };
     let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    info!("[server/message_handler] model={model}");
 
     {
         let mut msgs = state.messages.lock().unwrap();
@@ -175,8 +186,11 @@ async fn message_handler(
         .cloned()
         .collect();
 
+    info!("[server/message_handler] calling send_message with {} messages", messages.len());
     match send_message(messages, &state.system, &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &make_extra_tools(), make_extra_executor()).await {
         Ok((text, cost_usd, updated)) => {
+            let elapsed = start.elapsed().as_millis();
+            info!("[server/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
             let mut msgs = state.messages.lock().unwrap();
             *msgs = updated;
             save_messages(&msgs);
@@ -185,6 +199,8 @@ async fn message_handler(
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }
         Err(e) => {
+            let elapsed = start.elapsed().as_millis();
+            error!("[server/message_handler] error in {elapsed}ms: {e}");
             let mut msgs = state.messages.lock().unwrap();
             msgs.pop();
             save_messages(&msgs);
@@ -442,24 +458,43 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
                 Some(t) => t.to_string(),
                 None => return "error: missing 'text' field".to_string(),
             };
-            let client = reqwest::Client::new();
+            let preview: String = text.chars().take(120).collect();
             let url = format!("{}/message", rulyeh_url.trim_end_matches('/'));
-            println!("[claudulhu] message_parent → POST {url}");
+            info!("[server/message_parent] → POST {url} ({} chars): {preview}", text.len());
+            let start = Instant::now();
+            let client = reqwest::Client::new();
             match client
                 .post(&url)
                 .json(&serde_json::json!({ "text": text }))
                 .send()
                 .await
             {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(body) => body
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("(no response text)")
-                        .to_string(),
-                    Err(e) => format!("error parsing parent response: {e}"),
-                },
-                Err(e) => format!("error contacting parent: {e}"),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let elapsed = start.elapsed().as_millis();
+                    info!("[server/message_parent] ← HTTP {status} in {elapsed}ms");
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            let result = body
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(no response text)")
+                                .to_string();
+                            let rpreview: String = result.chars().take(120).collect();
+                            info!("[server/message_parent] response ({} chars): {rpreview}", result.len());
+                            result
+                        }
+                        Err(e) => {
+                            error!("[server/message_parent] parse error: {e}");
+                            format!("error parsing parent response: {e}")
+                        }
+                    }
+                }
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis();
+                    error!("[server/message_parent] request failed in {elapsed}ms: {e}");
+                    format!("error contacting parent: {e}")
+                }
             }
         })
     }))
@@ -469,6 +504,15 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_target(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     init_shell_env();
 
     let args: Vec<String> = std::env::args().collect();
@@ -487,7 +531,7 @@ async fn main() {
     }
 
     let (static_private, static_public) = if is_dev {
-        println!("[claudulhu] !! DEV MODE: using fixed dev keypair (CLAUDULHU_DEV=1)");
+        warn!("[server] DEV MODE: using fixed dev keypair (CLAUDULHU_DEV=1)");
         (DEV_STATIC_PRIVATE.to_vec(), DEV_STATIC_PUBLIC.to_vec())
     } else {
         load_or_generate_keypair(&key_file)
@@ -495,7 +539,14 @@ async fn main() {
 
     let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
     let http_port:  u16 = 8000;
-    println!("[claudulhu] Noise public key: {}", to_base32(&static_public));
+    let rulyeh_url = std::env::var("RULYEH_URL").unwrap_or_default();
+
+    info!("[server] noise_pubkey={} noise_port={noise_port} http_port={http_port}", to_base32(&static_public));
+    if rulyeh_url.is_empty() {
+        info!("[server] RULYEH_URL not set — message_parent tool disabled");
+    } else {
+        info!("[server] RULYEH_URL={rulyeh_url} — message_parent tool enabled");
+    }
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
@@ -503,7 +554,7 @@ async fn main() {
     let repo     = effective_repo(&cfg);
     let system   = build_system_prompt(&repo, None, None);
     let messages = load_messages();
-    println!("[claudulhu] loaded {} message(s) from history", messages.len());
+    info!("[server] loaded {} message(s) from history, repo={repo}", messages.len());
 
     let (stream_tx, _) = broadcast::channel(256);
     let state = Arc::new(AppState {
@@ -532,9 +583,9 @@ async fn main() {
         .with_state(state)
         .layer(cors);
 
-    let addr = format!("127.0.0.1:{http_port}");
+    let addr = format!("0.0.0.0:{http_port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind HTTP port");
-    println!("[claudulhu] HTTP on {addr} (Noise proxy on 0.0.0.0:{noise_port}, repo: {repo})");
+    info!("[server] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port}, repo: {repo})");
 
     axum::serve(listener, app).await.unwrap();
 }
