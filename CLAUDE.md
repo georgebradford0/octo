@@ -10,14 +10,16 @@ Do **not** commit debug/diagnostic logging (`println!`, `console.log`, etc. adde
 
 ## Docker images
 
-| Component | Image |
-|-----------|-------|
-| `rulyeh/` (parent) | `ghcr.io/georgebradford0/rulyeh` |
-| `server/` (child)  | `ghcr.io/georgebradford0/claudulhu-server` |
+There is one image used for both parent and child containers:
+
+| Image | Used by |
+|-------|---------|
+| `ghcr.io/georgebradford0/rulyeh` | rulyeh (parent) and all child containers |
+
+Children use the same image with `--entrypoint /usr/local/bin/docker-entrypoint-server.sh`.
 
 Build and push from the **repo root** (replace `X.Y.Z` with the new version). Always use `buildx` with `--platform` so both `linux/amd64` and `linux/arm64` are included in the manifest:
 
-**rulyeh:**
 ```sh
 docker buildx build \
   --builder multiplatform \
@@ -26,18 +28,6 @@ docker buildx build \
   -f rulyeh/Dockerfile \
   -t ghcr.io/georgebradford0/rulyeh:X.Y.Z \
   -t ghcr.io/georgebradford0/rulyeh:latest \
-  .
-```
-
-**server:**
-```sh
-docker buildx build \
-  --builder multiplatform \
-  --platform linux/amd64,linux/arm64 \
-  --push \
-  -f server/Dockerfile \
-  -t ghcr.io/georgebradford0/claudulhu-server:X.Y.Z \
-  -t ghcr.io/georgebradford0/claudulhu-server:latest \
   .
 ```
 
@@ -94,7 +84,7 @@ Image: `ghcr.io/georgebradford0/rulyeh`
 
 ### server (child container) runtime tools
 
-The child container image (`ghcr.io/georgebradford0/claudulhu-server`) ships with `gh` pre-installed. When `GH_TOKEN` is set, `gh` is immediately usable inside the container without a separate `gh auth login`.
+The child container image (`ghcr.io/georgebradford0/rulyeh`) ships with `gh` pre-installed. When `GH_TOKEN` is set, `gh` is immediately usable inside the container without a separate `gh auth login`.
 
 ### server (child container) environment variables
 
