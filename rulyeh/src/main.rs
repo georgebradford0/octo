@@ -639,6 +639,7 @@ async fn main() {
     let rulyeh_url = format!("http://{}:{}", rulyeh_name, http_port);
 
     println!("[claudulhu-rulyeh] Noise public key: {pubkey_b32}");
+    println!("[claudulhu-rulyeh] rulyeh_url (injected into child containers): {rulyeh_url}");
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 

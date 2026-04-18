@@ -444,6 +444,7 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
             };
             let client = reqwest::Client::new();
             let url = format!("{}/message", rulyeh_url.trim_end_matches('/'));
+            println!("[claudulhu] message_parent → POST {url}");
             match client
                 .post(&url)
                 .json(&serde_json::json!({ "text": text }))
@@ -495,6 +496,10 @@ async fn main() {
     let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
     let http_port:  u16 = 8000;
     println!("[claudulhu] Noise public key: {}", to_base32(&static_public));
+    match std::env::var("RULYEH_URL") {
+        Ok(u)  => println!("[claudulhu] RULYEH_URL={u}"),
+        Err(_) => println!("[claudulhu] RULYEH_URL not set — message_parent disabled"),
+    }
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
