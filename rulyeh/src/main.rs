@@ -631,11 +631,10 @@ async fn main() {
     let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
     let http_port:  u16 = 8000;
     let public_host = std::env::var("PUBLIC_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    // RULYEH_NAME lets operators set the intra-Docker DNS name of this container.
-    // Defaults to the HOSTNAME env var (set by Docker to the container name/ID),
-    // then falls back to "rulyeh".
+    // RULYEH_NAME lets operators override the intra-Docker DNS name of this container.
+    // Defaults to "rulyeh" (the fixed container_name in docker-compose).
+    // HOSTNAME is intentionally not used — Docker sets it to the container ID, not the name.
     let rulyeh_name = std::env::var("RULYEH_NAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "rulyeh".to_string());
     let rulyeh_url = format!("http://{}:{}", rulyeh_name, http_port);
 
