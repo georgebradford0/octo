@@ -575,11 +575,6 @@ const ChatPane = memo(function ChatPane({
           ListFooterComponent={isPending ? <PendingEllipsis /> : null}
         />
 
-        {status === 'error' && (
-          <View style={s.reconnectBanner}>
-            <Text style={s.reconnectText}>connection error</Text>
-          </View>
-        )}
 
         <View style={s.inputFloat} onLayout={e => setInputAreaH(e.nativeEvent.layout.height)}>
           {completions.length > 0 && (
@@ -640,6 +635,13 @@ const ChatPane = memo(function ChatPane({
             >
               <Text style={s.scrollBtnIcon}>↓</Text>
             </TouchableOpacity>
+          </View>
+        )}
+
+        {(status === 'connecting' || status === 'error') && (
+          <View style={s.reconnectOverlay} pointerEvents="none">
+            <ActivityIndicator color="#fff" size="large" />
+            <Text style={s.reconnectOverlayText}>{status === 'error' ? 'Connection error' : 'Reconnecting'}</Text>
           </View>
         )}
       </View>
@@ -1150,6 +1152,8 @@ const s = StyleSheet.create({
   emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80, fontFamily: ARIMO },
   reconnectBanner:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 7, backgroundColor: '#fffbeb', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#fef3c7' },
   reconnectText:     { color: C.yellow, fontSize: 12, fontWeight: '500', fontFamily: ARIMO },
+  reconnectOverlay:      { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', gap: 14 },
+  reconnectOverlayText:  { color: '#fff', fontSize: 15, fontWeight: '600', fontFamily: ARIMO, letterSpacing: 0.3 },
 
   // Scroll-to-bottom button
   scrollBtnWrap:     { position: 'absolute', left: 0, right: 0, alignItems: 'center', pointerEvents: 'box-none' },

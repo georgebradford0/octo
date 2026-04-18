@@ -514,7 +514,7 @@ async fn fetch_pubkey_via_exec(container_name: &str) -> Option<String> {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-fn build_system_prompt(rulyeh_url: &str) -> String {
+fn build_system_prompt(rulyeh_url: &str, public_host: &str) -> String {
     format!("\
 You are the master control node for a fleet of claudulhu coding assistant containers.\n\n\
 Standard child image: ghcr.io/georgebradford0/rulyeh:latest\n\
@@ -522,9 +522,9 @@ Standard child image: ghcr.io/georgebradford0/rulyeh:latest\n\
 Child containers require:\n\
   --name rulyeh-<repo-name>\n\
   --network claudulhu-net  --label claudulhu.managed=1  --label claudulhu.git_url=<url>\n\
-  NOISE_PORT set to a free port in 9100-9199\n\
+  NOISE_PORT set to a free port in 9100-9199; publish it with -p <port>:<port> so mobile clients can reach it\n\
   Named volumes for /data and /workspace\n\
-  Env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN (required), PUBLIC_HOST, RULYEH_URL={rulyeh_url}\n\n\
+  Env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN (required), PUBLIC_HOST={public_host}, RULYEH_URL={rulyeh_url}\n\n\
 Always pass RULYEH_URL={rulyeh_url} to every child container so it can message you back.\n\n\
 GH_TOKEN is set in this environment and the gh CLI is available — use it for all GitHub operations.\n\n\
 You have a message_child(container_name, text) tool to send a message to a specific child container's agent and receive its response. Use it to delegate coding tasks, query a child's state, or coordinate work across containers.\n\n\
@@ -630,7 +630,16 @@ async fn main() {
     let pubkey_b32   = to_base32(&static_public);
     let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
     let http_port:  u16 = 8000;
-    let public_host = std::env::var("PUBLIC_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let public_host = std::env::var("PUBLIC_HOST")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            // Detect outbound IP by binding a UDP socket — no packet is sent.
+            std::net::UdpSocket::bind("0.0.0.0:0")
+                .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|_| "127.0.0.1".to_string())
+        });
     // RULYEH_NAME lets operators override the intra-Docker DNS name of this container.
     // Defaults to "rulyeh" (the fixed container_name in docker-compose).
     // HOSTNAME is intentionally not used — Docker sets it to the container ID, not the name.
@@ -652,7 +661,7 @@ async fn main() {
     let state = Arc::new(AppState {
         messages:      Arc::new(Mutex::new(messages)),
         last_cost_usd: Mutex::new(None),
-        system:        build_system_prompt(&rulyeh_url),
+        system:        build_system_prompt(&rulyeh_url, &public_host),
         containers:    Arc::new(Mutex::new(Vec::new())),
         poll_trigger:  poll_trigger.clone(),
         pubkey_b32,
