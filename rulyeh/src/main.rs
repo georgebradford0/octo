@@ -579,9 +579,7 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
             };
             let client = reqwest::Client::new();
             let url = format!("http://{}:8000/message", container_name);
-            println!("[rulyeh] message_child → POST {url}");
-            let t0 = std::time::Instant::now();
-            let result = match client
+            match client
                 .post(&url)
                 .json(&serde_json::json!({ "text": text }))
                 .send()
@@ -596,11 +594,7 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
                     Err(e) => format!("error parsing child response: {e}"),
                 },
                 Err(e) => format!("error contacting child '{container_name}': {e}"),
-            };
-            println!("[rulyeh] message_child ← {container_name} replied in {:.1}s: {}",
-                t0.elapsed().as_secs_f64(),
-                result.chars().take(120).collect::<String>());
-            result
+            }
         })
     }))
 }
@@ -645,7 +639,6 @@ async fn main() {
     let rulyeh_url = format!("http://{}:{}", rulyeh_name, http_port);
 
     println!("[claudulhu-rulyeh] Noise public key: {pubkey_b32}");
-    println!("[claudulhu-rulyeh] rulyeh_url (injected into child containers): {rulyeh_url}");
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
