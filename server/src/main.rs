@@ -170,40 +170,23 @@ async fn message_handler(
         }
     };
     let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-    info!("[server/message_handler] model={model}");
 
-    {
-        let mut msgs = state.messages.lock().unwrap();
-        msgs.push(ApiMessage {
-            role:    "user".to_string(),
-            content: vec![ContentBlock::Text { text: body.text }],
-        });
-        save_messages(&msgs);
-    }
+    // Ephemeral loop — does not touch the shared conversation history.
+    let messages = vec![ApiMessage {
+        role:    "user".to_string(),
+        content: vec![ContentBlock::Text { text: body.text }],
+    }];
 
-    let messages: Vec<ApiMessage> = state.messages.lock().unwrap().iter()
-        .filter(|m| m.role != "interrupted")
-        .cloned()
-        .collect();
-
-    info!("[server/message_handler] calling send_message with {} messages", messages.len());
+    info!("[server/message_handler] calling ephemeral send_message");
     match send_message(messages, &state.system, &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &make_extra_tools(), make_extra_executor()).await {
-        Ok((text, cost_usd, updated)) => {
+        Ok((text, cost_usd, _)) => {
             let elapsed = start.elapsed().as_millis();
             info!("[server/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
-            let mut msgs = state.messages.lock().unwrap();
-            *msgs = updated;
-            save_messages(&msgs);
-            drop(msgs);
-            *state.last_cost_usd.lock().unwrap() = Some(cost_usd);
             (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
         }
         Err(e) => {
             let elapsed = start.elapsed().as_millis();
             error!("[server/message_handler] error in {elapsed}ms: {e}");
-            let mut msgs = state.messages.lock().unwrap();
-            msgs.pop();
-            save_messages(&msgs);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response()
         }
     }
