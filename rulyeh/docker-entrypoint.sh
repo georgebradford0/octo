@@ -36,6 +36,8 @@ fi
 # ── Docker network ────────────────────────────────────────────────────────────
 # Create the shared bridge network for master ↔ child container communication.
 docker network create claudulhu-net 2>/dev/null || true
+# Ensure rulyeh is connected to claudulhu-net even if started without compose.
+docker network connect claudulhu-net "$(hostname)" 2>/dev/null || true
 echo "[claudulhu-rulyeh] Docker network claudulhu-net ready"
 
 # ── Noise key ─────────────────────────────────────────────────────────────────

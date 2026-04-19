@@ -166,6 +166,7 @@ struct AppState {
     poll_trigger: Arc<Notify>,
     pubkey_b32:   String,
     public_host:  String,
+    rulyeh_url:   String,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -186,8 +187,8 @@ async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json:
 struct PostMessage { text: String }
 
 async fn message_handler(
-    State(_state): State<Arc<AppState>>,
-    Json(body):    Json<PostMessage>,
+    State(state): State<Arc<AppState>>,
+    Json(body):   Json<PostMessage>,
 ) -> impl IntoResponse {
     let preview: String = body.text.chars().take(120).collect();
     info!("[rulyeh/message_handler] received ({} chars): {preview}", body.text.len());
@@ -210,7 +211,7 @@ async fn message_handler(
     }];
 
     info!("[rulyeh/message_handler] DEBUG ephemeral send_message: {}", serde_json::to_string(&messages).unwrap_or_default());
-    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, "/", None, Arc::new(AtomicBool::new(false)), &rulyeh_extra_tools(), rulyeh_extra_executor()).await {
+    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, "/", None, Arc::new(AtomicBool::new(false)), &rulyeh_extra_tools(), rulyeh_extra_executor(state.clone())).await {
         Ok((text, cost_usd, _)) => {
             let elapsed = start.elapsed().as_millis();
             info!("[rulyeh/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
@@ -298,8 +299,9 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     });
 
     info!("[rulyeh/handle_stream] DEBUG conversation ({} messages): {}", messages.len(), serde_json::to_string(&messages).unwrap_or_default());
+    let executor = rulyeh_extra_executor(Arc::clone(&state));
     tokio::spawn(async move {
-        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx), aborted.clone(), &rulyeh_extra_tools(), rulyeh_extra_executor()).await {
+        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx), aborted.clone(), &rulyeh_extra_tools(), executor).await {
             Ok((_, cost_usd, mut updated)) => {
                 if aborted.load(Ordering::Relaxed) {
                     updated.push(ApiMessage {
@@ -514,21 +516,16 @@ async fn fetch_pubkey_via_exec(container_name: &str) -> Option<String> {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-fn build_system_prompt(rulyeh_url: &str, public_host: &str) -> String {
-    format!("\
+fn build_system_prompt() -> String {
+    "\
 You are the master control node for a fleet of claudulhu coding assistant containers.\n\n\
-Standard child image: ghcr.io/georgebradford0/rulyeh:latest\n\
-  with --entrypoint /usr/local/bin/docker-entrypoint-server.sh\n\n\
-Child containers require:\n\
-  --name rulyeh-<repo-name>\n\
-  --network claudulhu-net  --label claudulhu.managed=1  --label claudulhu.git_url=<url>\n\
-  NOISE_PORT set to a free port in 9100-9199; publish it with -p <port>:<port> so mobile clients can reach it\n\
-  Named volumes for /data and /workspace\n\
-  Env vars: ANTHROPIC_API_KEY, GIT_URL, GH_TOKEN (required), PUBLIC_HOST={public_host}, RULYEH_URL={rulyeh_url}\n\n\
-Always pass RULYEH_URL={rulyeh_url} to every child container so it can message you back.\n\n\
+To create a new child container for a Git repository, use the create_container tool — \
+it handles Docker networking, port assignment, volumes, and environment variables automatically.\n\n\
+To send a message to a running child container's agent, use message_child(container_name, text). \
+Use this to delegate coding tasks or coordinate work across containers.\n\n\
 GH_TOKEN is set in this environment and the gh CLI is available — use it for all GitHub operations.\n\n\
-You have a message_child(container_name, text) tool to send a message to a specific child container's agent and receive its response. Use it to delegate coding tasks, query a child's state, or coordinate work across containers.\n\n\
-Be concise and direct.")
+Be concise and direct."
+        .to_string()
 }
 
 // ── Child messaging tools ──────────────────────────────────────────────────────
@@ -556,11 +553,40 @@ fn message_child_tool() -> AnthropicTool {
     }
 }
 
-fn rulyeh_extra_tools() -> Vec<AnthropicTool> {
-    vec![message_child_tool()]
+fn create_container_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "create_container".to_string(),
+        description: "Create and start a new claudulhu child container for a Git repository. \
+                       Automatically handles Docker networking (claudulhu-net), port assignment \
+                       (9100–9199), named volumes, and all required environment variables. \
+                       Returns the container name and Noise port on success."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "git_url": {
+                    "type": "string",
+                    "description": "The Git repository URL to clone and operate on."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional container name override. Defaults to rulyeh-<repo-name>."
+                },
+                "noise_port": {
+                    "type": "integer",
+                    "description": "Optional Noise port (9100–9199). Auto-assigned if omitted."
+                }
+            },
+            "required": ["git_url"]
+        }),
+    }
 }
 
-fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
+fn rulyeh_extra_tools() -> Vec<AnthropicTool> {
+    vec![message_child_tool(), create_container_tool()]
+}
+
+fn rulyeh_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_json::Value)
     -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
     + Send + Sync>>
 {
@@ -571,54 +597,146 @@ fn rulyeh_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
         .expect("failed to build message_child HTTP client");
     Some(Arc::new(move |name: String, input: serde_json::Value| {
         let client = client.clone();
+        let state  = state.clone();
         Box::pin(async move {
-            if name != "message_child" {
-                return format!("unknown tool: {name}");
-            }
-            let container_name = match input.get("container_name").and_then(|v| v.as_str()) {
-                Some(n) => n.to_string(),
-                None => return "error: missing 'container_name' field".to_string(),
-            };
-            let text = match input.get("text").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
-                None => return "error: missing 'text' field".to_string(),
-            };
-            let preview: String = text.chars().take(120).collect();
-            let url = format!("http://{}:8000/message", container_name);
-            info!("[rulyeh/message_child] → POST {url} container={container_name} ({} chars): {preview}", text.len());
-            let start = Instant::now();
-            match client
-                .post(&url)
-                .json(&serde_json::json!({ "text": text }))
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let elapsed = start.elapsed().as_millis();
-                    info!("[rulyeh/message_child] ← HTTP {status} in {elapsed}ms from {container_name}");
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(body) => {
-                            let result = body
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("(no response text)")
-                                .to_string();
-                            let rpreview: String = result.chars().take(120).collect();
-                            info!("[rulyeh/message_child] response ({} chars): {rpreview}", result.len());
-                            result
+            match name.as_str() {
+                "message_child" => {
+                    let container_name = match input.get("container_name").and_then(|v| v.as_str()) {
+                        Some(n) => n.to_string(),
+                        None => return "error: missing 'container_name' field".to_string(),
+                    };
+                    let text = match input.get("text").and_then(|v| v.as_str()) {
+                        Some(t) => t.to_string(),
+                        None => return "error: missing 'text' field".to_string(),
+                    };
+                    let preview: String = text.chars().take(120).collect();
+                    let url = format!("http://{}:8000/message", container_name);
+                    info!("[rulyeh/message_child] → POST {url} container={container_name} ({} chars): {preview}", text.len());
+                    let start = Instant::now();
+                    match client
+                        .post(&url)
+                        .json(&serde_json::json!({ "text": text }))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            let status  = resp.status();
+                            let elapsed = start.elapsed().as_millis();
+                            info!("[rulyeh/message_child] ← HTTP {status} in {elapsed}ms from {container_name}");
+                            match resp.json::<serde_json::Value>().await {
+                                Ok(body) => {
+                                    let result = body
+                                        .get("text")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("(no response text)")
+                                        .to_string();
+                                    let rpreview: String = result.chars().take(120).collect();
+                                    info!("[rulyeh/message_child] response ({} chars): {rpreview}", result.len());
+                                    result
+                                }
+                                Err(e) => {
+                                    error!("[rulyeh/message_child] parse error from {container_name}: {e}");
+                                    format!("error parsing child response: {e}")
+                                }
+                            }
                         }
                         Err(e) => {
-                            error!("[rulyeh/message_child] parse error from {container_name}: {e}");
-                            format!("error parsing child response: {e}")
+                            let elapsed = start.elapsed().as_millis();
+                            error!("[rulyeh/message_child] request to {container_name} failed in {elapsed}ms: {e}");
+                            format!("error contacting child '{container_name}': {e}")
                         }
                     }
                 }
-                Err(e) => {
-                    let elapsed = start.elapsed().as_millis();
-                    error!("[rulyeh/message_child] request to {container_name} failed in {elapsed}ms: {e}");
-                    format!("error contacting child '{container_name}': {e}")
+                "create_container" => {
+                    let git_url = match input.get("git_url").and_then(|v| v.as_str()) {
+                        Some(u) => u.to_string(),
+                        None => return "error: missing 'git_url' field".to_string(),
+                    };
+                    let repo_slug = git_url.trim_end_matches('/')
+                        .split('/')
+                        .last()
+                        .unwrap_or("repo")
+                        .trim_end_matches(".git")
+                        .to_lowercase();
+                    let container_name = input.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("rulyeh-{repo_slug}"));
+
+                    // Grab free port — release lock before any await.
+                    let noise_port: u16 = {
+                        let used_ports: std::collections::HashSet<u16> = state.containers
+                            .lock().unwrap()
+                            .iter()
+                            .map(|c| c.port)
+                            .collect();
+                        match input.get("noise_port").and_then(|v| v.as_u64()) {
+                            Some(p) => p as u16,
+                            None => match (9100u16..=9199).find(|p| !used_ports.contains(p)) {
+                                Some(p) => p,
+                                None => return "error: no free ports available in range 9100–9199".to_string(),
+                            },
+                        }
+                    };
+
+                    let api_key    = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+                    let gh_token   = std::env::var("GH_TOKEN").unwrap_or_default();
+                    let pub_host   = state.public_host.clone();
+                    let rulyeh_url = state.rulyeh_url.clone();
+
+                    let label_git = format!("claudulhu.git_url={git_url}");
+                    let port_map  = format!("{noise_port}:{noise_port}");
+                    let vol_data  = format!("{container_name}-data:/data");
+                    let vol_ws    = format!("{container_name}-workspace:/workspace");
+                    let env_api   = format!("ANTHROPIC_API_KEY={api_key}");
+                    let env_git   = format!("GIT_URL={git_url}");
+                    let env_port  = format!("NOISE_PORT={noise_port}");
+                    let env_host  = format!("PUBLIC_HOST={pub_host}");
+                    let env_rul   = format!("RULYEH_URL={rulyeh_url}");
+                    let env_gh    = if gh_token.is_empty() { None } else { Some(format!("GH_TOKEN={gh_token}")) };
+
+                    info!("[rulyeh/create_container] creating {container_name} port={noise_port} git={git_url}");
+
+                    let mut cmd = tokio::process::Command::new("docker");
+                    cmd.args(["run", "-d", "--pull", "always"]);
+                    cmd.args(["--name", &container_name]);
+                    cmd.args(["--network", "claudulhu-net"]);
+                    cmd.args(["--label", "claudulhu.managed=1"]);
+                    cmd.args(["--label", &label_git]);
+                    cmd.args(["-p", &port_map]);
+                    cmd.args(["--restart", "unless-stopped"]);
+                    cmd.args(["-v", &vol_data]);
+                    cmd.args(["-v", &vol_ws]);
+                    cmd.args(["-e", &env_api]);
+                    cmd.args(["-e", &env_git]);
+                    if let Some(ref gh) = env_gh { cmd.args(["-e", gh.as_str()]); }
+                    cmd.args(["-e", &env_port]);
+                    cmd.args(["-e", &env_host]);
+                    cmd.args(["-e", &env_rul]);
+                    cmd.args(["--entrypoint", "/usr/local/bin/docker-entrypoint-server.sh"]);
+                    cmd.arg("ghcr.io/georgebradford0/rulyeh:latest");
+
+                    match cmd.output().await {
+                        Ok(out) if out.status.success() => {
+                            let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            let short = &id[..id.len().min(12)];
+                            info!("[rulyeh/create_container] created {container_name} id={short}");
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            state.poll_trigger.notify_one();
+                            format!("Created container '{container_name}' on Noise port {noise_port}. ID: {short}")
+                        }
+                        Ok(out) => {
+                            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                            error!("[rulyeh/create_container] docker run failed: {err}");
+                            format!("error: docker run failed: {err}")
+                        }
+                        Err(e) => {
+                            error!("[rulyeh/create_container] command error: {e}");
+                            format!("error: {e}")
+                        }
+                    }
                 }
+                other => format!("unknown tool: {other}"),
             }
         })
     }))
@@ -691,11 +809,12 @@ async fn main() {
     let state = Arc::new(AppState {
         messages:      Arc::new(Mutex::new(messages)),
         last_cost_usd: Mutex::new(None),
-        system:        build_system_prompt(&rulyeh_url, &public_host),
+        system:        build_system_prompt(),
         containers:    Arc::new(Mutex::new(Vec::new())),
         poll_trigger:  poll_trigger.clone(),
         pubkey_b32,
         public_host,
+        rulyeh_url,
     });
 
     tokio::spawn(poll_containers(state.clone()));
