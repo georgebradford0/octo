@@ -333,6 +333,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    let mut ws_alive = true;
     while let Some(event) = event_rx.recv().await {
         let json_opt: Option<serde_json::Value> = match event {
             ChatEvent::Text { text } =>
@@ -354,7 +355,11 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 ss.buffer.push(json_str.clone());
                 ss.subs.retain(|tx| tx.send(json_str.clone()).is_ok());
             }
-            if ws_tx.send(WsMessage::Text(json_str)).await.is_err() { break; }
+            // If the original WS has closed (e.g. client backgrounded), keep the
+            // loop running so the agentic task completes and watchers can reattach.
+            if ws_alive && ws_tx.send(WsMessage::Text(json_str)).await.is_err() {
+                ws_alive = false;
+            }
         }
     }
     state.is_streaming.store(false, Ordering::Relaxed);
