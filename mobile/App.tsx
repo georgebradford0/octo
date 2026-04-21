@@ -348,6 +348,7 @@ const ChatPane = memo(function ChatPane({
   const isAtBottomRef     = useRef(true)
   const contentHeightRef  = useRef(0)
   const listHeightRef     = useRef(0)
+  const lastToolIdRef     = useRef<string | null>(null)
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -382,17 +383,22 @@ const ChatPane = memo(function ChatPane({
         : ''
       const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
       log(`[chat] tool_use tool=${event.tool} input=${firstVal}`)
-      setMessages(prev => [...prev, { id: uid(), role: 'tool' as const, text: toolText }])
+      const toolId = uid()
+      lastToolIdRef.current = toolId
+      setMessages(prev => [...prev, { id: toolId, role: 'tool' as const, text: toolText }])
     } else if (event.type === 'done') {
       log(`[chat] stream done cost_usd=${event.cost_usd}`)
+      lastToolIdRef.current = null
       wsRef.current = null
       opts.onDone()
     } else if (event.type === 'interrupted') {
       log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
+      lastToolIdRef.current = null
       wsRef.current = null
       opts.onDone()
     } else if (event.type === 'error') {
       logE(`[chat] stream error: ${event.message}`)
+      lastToolIdRef.current = null
       wsRef.current = null
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
       updateStatus('ready')
@@ -635,6 +641,13 @@ const ChatPane = memo(function ChatPane({
                 const ws = wsRef.current
                 if (ws) {
                   ws.send(JSON.stringify({ type: 'interrupt' }))
+                  const toolId = lastToolIdRef.current
+                  if (toolId) {
+                    setMessages(prev => prev.map(m =>
+                      m.id === toolId ? { ...m, role: 'interrupted' as const } : m
+                    ))
+                    lastToolIdRef.current = null
+                  }
                 }
               }}
               activeOpacity={0.7}
