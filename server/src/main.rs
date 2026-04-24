@@ -421,9 +421,9 @@ async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
 
 // ── Parent messaging tools ─────────────────────────────────────────────────────
 
-fn message_parent_tool() -> AnthropicTool {
+fn message_rulyeh_tool() -> AnthropicTool {
     AnthropicTool {
-        name: "message_parent".to_string(),
+        name: "message_rulyeh".to_string(),
         description: "Send a message to the parent (rulyeh) container's agent and wait for its \
                        response. Use this to request secrets, configuration, or other information \
                        held by the parent. The parent will respond with a text reply."
@@ -444,7 +444,7 @@ fn message_parent_tool() -> AnthropicTool {
 fn make_extra_tools() -> Vec<AnthropicTool> {
     // Only add the tool if RULYEH_URL is configured.
     if std::env::var("RULYEH_URL").is_ok() {
-        vec![message_parent_tool()]
+        vec![message_rulyeh_tool()]
     } else {
         vec![]
     }
@@ -462,12 +462,12 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
         .timeout(std::time::Duration::from_secs(300))
         .pool_idle_timeout(std::time::Duration::from_secs(30))
         .build()
-        .expect("failed to build message_parent HTTP client");
+        .expect("failed to build message_rulyeh HTTP client");
     Some(Arc::new(move |name: String, input: serde_json::Value| {
         let rulyeh_url = rulyeh_url.clone();
         let client = client.clone();
         Box::pin(async move {
-            if name != "message_parent" {
+            if name != "message_rulyeh" {
                 return format!("unknown tool: {name}");
             }
             let text = match input.get("text").and_then(|v| v.as_str()) {
@@ -476,7 +476,7 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
             };
             let preview: String = text.chars().take(120).collect();
             let url = format!("{}/message", rulyeh_url.trim_end_matches('/'));
-            info!("[server/message_parent] → POST {url} ({} chars): {preview}", text.len());
+            info!("[server/message_rulyeh] → POST {url} ({} chars): {preview}", text.len());
             let start = Instant::now();
             match client
                 .post(&url)
@@ -487,7 +487,7 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
                 Ok(resp) => {
                     let status = resp.status();
                     let elapsed = start.elapsed().as_millis();
-                    info!("[server/message_parent] ← HTTP {status} in {elapsed}ms");
+                    info!("[server/message_rulyeh] ← HTTP {status} in {elapsed}ms");
                     match resp.json::<serde_json::Value>().await {
                         Ok(body) => {
                             let result = body
@@ -496,18 +496,18 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
                                 .unwrap_or("(no response text)")
                                 .to_string();
                             let rpreview: String = result.chars().take(120).collect();
-                            info!("[server/message_parent] response ({} chars): {rpreview}", result.len());
+                            info!("[server/message_rulyeh] response ({} chars): {rpreview}", result.len());
                             result
                         }
                         Err(e) => {
-                            error!("[server/message_parent] parse error: {e}");
+                            error!("[server/message_rulyeh] parse error: {e}");
                             format!("error parsing parent response: {e}")
                         }
                     }
                 }
                 Err(e) => {
                     let elapsed = start.elapsed().as_millis();
-                    error!("[server/message_parent] request failed in {elapsed}ms: {e}");
+                    error!("[server/message_rulyeh] request failed in {elapsed}ms: {e}");
                     format!("error contacting parent: {e}")
                 }
             }
@@ -558,9 +558,9 @@ async fn main() {
 
     info!("[server] noise_pubkey={} noise_port={noise_port} http_port={http_port}", to_base32(&static_public));
     if rulyeh_url.is_empty() {
-        info!("[server] RULYEH_URL not set — message_parent tool disabled");
+        info!("[server] RULYEH_URL not set — message_rulyeh tool disabled");
     } else {
-        info!("[server] RULYEH_URL={rulyeh_url} — message_parent tool enabled");
+        info!("[server] RULYEH_URL={rulyeh_url} — message_rulyeh tool enabled");
     }
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));

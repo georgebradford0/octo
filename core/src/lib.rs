@@ -1309,7 +1309,7 @@ pub async fn run_startup_prompt(
 
 // ── System Prompt ─────────────────────────────────────────────────────────────
 
-/// System prompt for the ephemeral loop that handles inbound message_parent /
+/// System prompt for the ephemeral loop that handles inbound message_rulyeh /
 /// message_child calls.  The loop runs to completion and its final text is
 /// returned as the HTTP response — so the model MUST always emit a text block
 /// in the last turn.
@@ -1338,7 +1338,7 @@ pub fn build_system_prompt(repo_path: &str, branch: Option<&str>, worktree_path:
         \n- Never pad responses.";
 
     let parent_tool_note = if std::env::var("RULYEH_URL").is_ok() {
-        "\n\nYou have a message_parent(text) tool available. Use it to send a message to the parent \
+        "\n\nYou have a message_rulyeh(text) tool available. Use it to send a message to the parent \
          (rulyeh) container's agent and receive a response — for example to request secrets, \
          configuration, or to hand off a task."
     } else {
