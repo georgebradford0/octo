@@ -56,7 +56,7 @@ kubectl rollout status deployment/rulyeh -n claudulhu --timeout=120s
 # port 9000 rather than the NodePort (30090).
 PID_FILE="/tmp/claudulhu-dev-portforward.pid"
 
-kubectl port-forward -n claudulhu svc/rulyeh-noise 9000:9000 &
+kubectl port-forward -n claudulhu svc/rulyeh-noise 9000:9000 >"/tmp/claudulhu-portforward.log" 2>&1 &
 echo $! > "${PID_FILE}"
 
 echo ""
