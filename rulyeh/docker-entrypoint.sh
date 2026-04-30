@@ -40,7 +40,7 @@ echo "[claudulhu-rulyeh] Noise public key: ${NOISE_PUBKEY}"
 # ── QR code ───────────────────────────────────────────────────────────────────
 # Format v2: "2:<host>:<port>:<pubkey_base32>"
 QR_DATA="2:${PUBLIC_HOST}:${NOISE_PORT}:${NOISE_PUBKEY}"
-SENTINEL="[claudulhu-rulyeh] HTTP on"
+SENTINEL="[rulyeh] HTTP listening on"
 
 PIPE=$(mktemp -t claudulhu-pipe-XXXXXX)
 rm -f "$PIPE"
