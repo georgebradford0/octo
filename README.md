@@ -23,12 +23,14 @@ Install k3s on your server (single node is fine):
 curl -sfL https://get.k3s.io | sh -
 ```
 
-`kubectl` is included. To use it without `sudo`:
+`kubectl` is included. To use it without `sudo` (wait for k3s to finish starting first):
 
 ```sh
+sudo systemctl is-active --wait k3s
 mkdir -p ~/.kube
 sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
 sudo chown $USER ~/.kube/config
+chmod 600 ~/.kube/config
 ```
 
 To manage the cluster from another machine, copy `~/.kube/config` to that machine and replace `127.0.0.1` with your server's IP.
