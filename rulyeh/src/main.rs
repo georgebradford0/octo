@@ -647,10 +647,13 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
 
     if remote {
         let sg  = std::env::var("AWS_SECURITY_GROUP_ID").unwrap_or_default();
-        let sub = std::env::var("AWS_SUBNET_ID").unwrap_or_default();
-        let cp  = std::env::var("K3S_CONTROL_PLANE_URL").unwrap_or_default();
-        if sg.is_empty() || sub.is_empty() || cp.is_empty() {
-            return "error: AWS_SECURITY_GROUP_ID, AWS_SUBNET_ID, and K3S_CONTROL_PLANE_URL must be set for remote provisioning".to_string();
+        let sub = std::env::var("AWS_SUBNET_ID").ok().filter(|s| !s.is_empty());
+        let cp  = std::env::var("K3S_CONTROL_PLANE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("https://{}:6443", state.public_host));
+        if sg.is_empty() {
+            return "error: AWS_SECURITY_GROUP_ID must be set for remote provisioning".to_string();
         }
 
         // Read join token
@@ -674,7 +677,7 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
             ami: &ami,
             instance_type: instance_type.as_deref().unwrap_or("t3.medium"),
             security_group_id: &sg,
-            subnet_id: &sub,
+            subnet_id: sub.as_deref(),
             child_name: &child_name,
             user_data: &user_data,
         };

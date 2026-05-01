@@ -33,7 +33,7 @@ pub struct InstanceSpec<'a> {
     pub ami: &'a str,
     pub instance_type: &'a str,
     pub security_group_id: &'a str,
-    pub subnet_id: &'a str,
+    pub subnet_id: Option<&'a str>,
     pub child_name: &'a str,
     pub user_data: &'a str,
 }
@@ -44,20 +44,23 @@ pub async fn run_instance(spec: &InstanceSpec<'_>) -> anyhow::Result<String> {
         "ResourceType=instance,Tags=[{{Key=claudulhu.managed,Value=1}},{{Key=claudulhu.child-name,Value={}}}]",
         spec.child_name
     );
-    let out = tokio::process::Command::new("aws")
-        .args([
-            "ec2", "run-instances",
-            "--region", &r,
-            "--image-id", spec.ami,
-            "--instance-type", spec.instance_type,
-            "--security-group-ids", spec.security_group_id,
-            "--subnet-id", spec.subnet_id,
-            "--associate-public-ip-address",
-            "--tag-specifications", &tags,
-            "--user-data", spec.user_data,
-            "--query", "Instances[0].InstanceId",
-            "--output", "text",
-        ])
+    let mut cmd = tokio::process::Command::new("aws");
+    cmd.args([
+        "ec2", "run-instances",
+        "--region", &r,
+        "--image-id", spec.ami,
+        "--instance-type", spec.instance_type,
+        "--security-group-ids", spec.security_group_id,
+        "--associate-public-ip-address",
+        "--tag-specifications", &tags,
+        "--user-data", spec.user_data,
+        "--query", "Instances[0].InstanceId",
+        "--output", "text",
+    ]);
+    if let Some(subnet) = spec.subnet_id {
+        cmd.args(["--subnet-id", subnet]);
+    }
+    let out = cmd
         .output()
         .await
         .context("aws run-instances")?;

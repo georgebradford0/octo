@@ -160,8 +160,8 @@ Rulyeh launches the EC2 instance, waits for it to join the cluster (~60s), then 
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | If remote | EC2 provisioning credentials |
 | `AWS_DEFAULT_REGION` | If remote | EC2 region (default: `us-east-1`) |
 | `AWS_SECURITY_GROUP_ID` | If remote | Security group for new EC2 instances |
-| `AWS_SUBNET_ID` | If remote | Subnet for new EC2 instances |
-| `K3S_CONTROL_PLANE_URL` | If remote | e.g. `https://<ip>:6443` — used in EC2 user-data for k3s agent join |
+| `AWS_SUBNET_ID` | No | Subnet for new EC2 instances. Uses the default subnet if unset. |
+| `K3S_CONTROL_PLANE_URL` | No | e.g. `https://<ip>:6443` — used in EC2 user-data for k3s agent join. Defaults to `https://<PUBLIC_HOST>:6443` if unset. |
 
 *`GH_TOKEN` is technically optional but required in practice for any GitHub repo work.
 

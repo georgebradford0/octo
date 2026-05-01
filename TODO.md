@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] setup ssh creation as option for create_container
 - [ ] Setup a more robust system for managing children containers
 - [ ] Change core to give Claude root access to docker container
 - [ ] Make README.md professional for sharing with others
