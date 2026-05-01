@@ -551,6 +551,14 @@ const ChatPane = memo(function ChatPane({
       log(`[chat] stream done cost_usd=${event.cost_usd}`)
       lastToolIdRef.current = null
       wsRef.current = null
+      if (event.cost_usd != null) {
+        setMessages(prev => {
+          const idx = [...prev].reverse().findIndex(m => m.role === 'assistant')
+          if (idx === -1) return prev
+          const realIdx = prev.length - 1 - idx
+          return prev.map((m, i) => i === realIdx ? { ...m, cost: event.cost_usd } : m)
+        })
+      }
       opts.onDone()
     } else if (event.type === 'interrupted') {
       log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
@@ -723,7 +731,7 @@ const ChatPane = memo(function ChatPane({
       handleStreamEvent(e.data, {
         streamingIdRef,
         hasAssistantMsgRef,
-        onDone: () => loadHistoryRef.current(),
+        onDone: () => updateStatus('ready'),
       })
     }
     ws.onerror = (e) => {
