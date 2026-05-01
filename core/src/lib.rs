@@ -1373,6 +1373,7 @@ pub fn build_system_prompt(repo_path: &str, branch: Option<&str>, worktree_path:
         \n- Use write_file only for creating new files.\
         \n- NEVER use a leading '**' glob in any path argument (e.g. **/dir/file). Always anchor paths from a known root.\
         \n- Be concise and precise.\
+        \n- Only run git commit when the user explicitly instructs you to.\
         \n\nResponse style: answers should be concise but informative — get to the point without unnecessary padding, but include all details that are genuinely useful.\
         \n\nVerbosity rules (CRITICAL):\
         \n- Do NOT narrate tool calls. Never say what you are about to do before calling a tool.\
