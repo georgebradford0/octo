@@ -782,20 +782,20 @@ const ChatPane = memo(function ChatPane({
         />
 
 
+        {completions.length > 0 && (
+          <ScrollView
+            style={[s.completionList, { bottom: inputAreaH }]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {completions.map(c => (
+              <TouchableOpacity key={c} style={s.completionItem} onPress={() => applyCompletion(c)}>
+                <Text style={s.completionText}>{c}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
         <View style={s.inputFloat} onLayout={e => setInputAreaH(e.nativeEvent.layout.height)}>
-          {completions.length > 0 && (
-            <ScrollView
-              style={s.completionList}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-            >
-              {completions.map(c => (
-                <TouchableOpacity key={c} style={s.completionItem} onPress={() => applyCompletion(c)}>
-                  <Text style={s.completionText}>{c}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          )}
           {isPending ? (
             <TouchableOpacity
               style={s.inputStopBtn}
@@ -1427,7 +1427,7 @@ const s = StyleSheet.create({
   interruptedLine:   { fontSize: 18, lineHeight: 26, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
 
   // Input bar
-  completionList: { maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg },
+  completionList: { position: 'absolute', left: 0, right: 0, maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg, zIndex: 10, elevation: 10 },
   completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   inputFloat:   { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 12 },
