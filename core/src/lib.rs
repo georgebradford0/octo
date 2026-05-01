@@ -161,6 +161,7 @@ pub enum ChatEvent {
     Ready              { session_id: String, resumed: bool },
     Text               { text: String },
     ToolUse            { tool: String, input: serde_json::Value },
+    ToolOutput         { line: String },
     ToolResult         { tool_use_id: String, content: serde_json::Value },
     Result             { cost_usd: f64, turns: usize, session_id: String, result: Option<String> },
     Error              { message: String },
@@ -424,18 +425,61 @@ pub async fn execute_tool(
 ) -> String {
     match name {
         "bash" => {
+            use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
             let cmd = input["command"].as_str().unwrap_or("");
             match tokio::process::Command::new("bash")
                 .arg("-c").arg(cmd)
                 .current_dir(cwd)
-                .output().await
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
             {
-                Ok(o) => {
-                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                    if stderr.is_empty() { stdout } else { format!("{stdout}\n[stderr]: {stderr}") }
-                }
                 Err(e) => format!("error: {e}"),
+                Ok(mut child) => {
+                    let stdout_pipe = child.stdout.take().expect("stdout piped");
+                    let stderr_pipe = child.stderr.take().expect("stderr piped");
+                    let mut stdout_reader = TokioBufReader::new(stdout_pipe).lines();
+                    let mut stderr_reader = TokioBufReader::new(stderr_pipe).lines();
+                    let mut stdout_buf = String::new();
+                    let mut stderr_buf = String::new();
+                    loop {
+                        tokio::select! {
+                            line = stdout_reader.next_line() => match line {
+                                Ok(Some(l)) => {
+                                    tx.send(ChatEvent::ToolOutput { line: l.clone() }).await.ok();
+                                    stdout_buf.push_str(&l);
+                                    stdout_buf.push('\n');
+                                }
+                                _ => break,
+                            },
+                            line = stderr_reader.next_line() => match line {
+                                Ok(Some(l)) => {
+                                    tx.send(ChatEvent::ToolOutput { line: format!("[stderr] {l}") }).await.ok();
+                                    stderr_buf.push_str(&l);
+                                    stderr_buf.push('\n');
+                                }
+                                _ => break,
+                            },
+                        }
+                    }
+                    // Drain whichever pipe still has data after select exits.
+                    while let Ok(Some(l)) = stdout_reader.next_line().await {
+                        tx.send(ChatEvent::ToolOutput { line: l.clone() }).await.ok();
+                        stdout_buf.push_str(&l);
+                        stdout_buf.push('\n');
+                    }
+                    while let Ok(Some(l)) = stderr_reader.next_line().await {
+                        tx.send(ChatEvent::ToolOutput { line: format!("[stderr] {l}") }).await.ok();
+                        stderr_buf.push_str(&l);
+                        stderr_buf.push('\n');
+                    }
+                    child.wait().await.ok();
+                    if stderr_buf.is_empty() {
+                        stdout_buf
+                    } else {
+                        format!("{stdout_buf}\n[stderr]: {stderr_buf}")
+                    }
+                }
             }
         }
         "read_file" => {

@@ -44,10 +44,12 @@ interface ContainerInfo {
 }
 
 interface Message {
-  id:    string
-  role:  'user' | 'assistant' | 'tool' | 'session' | 'interrupted'
-  text:  string
-  cost?: number
+  id:         string
+  role:       'user' | 'assistant' | 'tool' | 'session' | 'interrupted'
+  text:       string
+  cost?:      number
+  toolUseId?: string
+  output?:    string
 }
 
 // ── Logging ────────────────────────────────────────────────────────────────────
@@ -378,6 +380,11 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
         activeOpacity={0.7}
       >
         <Text style={s.toolLine} selectable numberOfLines={toolExpanded ? undefined : 1} ellipsizeMode="tail">{message.text}</Text>
+        {toolExpanded && message.output != null && (
+          <View style={s.toolOutputBlock}>
+            <Text style={s.toolOutputText} selectable>{message.output}</Text>
+          </View>
+        )}
       </TouchableOpacity>
     )
   }
@@ -504,7 +511,7 @@ const ChatPane = memo(function ChatPane({
       onDone: () => void
     },
   ) => {
-    let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string }
+    let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string; line?: string; tool_use_id?: string; output?: string }
     try { event = JSON.parse(raw) } catch { return }
 
     if (event.type === 'text' && event.text) {
@@ -519,13 +526,27 @@ const ChatPane = memo(function ChatPane({
       opts.hasAssistantMsgRef.current = false
       opts.streamingIdRef.current = uid()
       const firstVal = event.input && typeof event.input === 'object'
-        ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim().slice(0, 60)
+        ? String(Object.values(event.input as Record<string, unknown>)[0] ?? '').trim()
         : ''
       const toolText = firstVal ? `${event.tool}(${firstVal})` : (event.tool ?? '')
-      log(`[chat] tool_use tool=${event.tool} input=${firstVal}`)
+      log(`[chat] tool_use tool=${event.tool}`)
       const toolId = uid()
       lastToolIdRef.current = toolId
-      setMessages(prev => [...prev, { id: toolId, role: 'tool' as const, text: toolText }])
+      setMessages(prev => [...prev, { id: toolId, role: 'tool' as const, text: toolText, toolUseId: event.tool_use_id }])
+    } else if (event.type === 'tool_output' && event.line != null) {
+      const toolId = lastToolIdRef.current
+      if (toolId) {
+        setMessages(prev => prev.map(m =>
+          m.id === toolId ? { ...m, output: (m.output ?? '') + event.line + '\n' } : m
+        ))
+      }
+    } else if (event.type === 'tool_result' && event.output != null) {
+      const toolId = lastToolIdRef.current
+      if (toolId) {
+        setMessages(prev => prev.map(m =>
+          m.id === toolId ? { ...m, output: typeof event.output === 'string' ? event.output : JSON.stringify(event.output) } : m
+        ))
+      }
     } else if (event.type === 'done') {
       log(`[chat] stream done cost_usd=${event.cost_usd}`)
       lastToolIdRef.current = null
@@ -1400,6 +1421,8 @@ const s = StyleSheet.create({
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
   toolLine:          { fontSize: 14, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginLeft: 2 },
+  toolOutputBlock:   { marginTop: 6, marginLeft: 14, borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 10 },
+  toolOutputText:    { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
   interruptedLine:   { fontSize: 18, lineHeight: 26, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
 
   // Input bar

@@ -326,6 +326,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 Some(serde_json::json!({"type":"text","text":text})),
             ChatEvent::ToolUse { tool, input } =>
                 Some(serde_json::json!({"type":"tool_use","tool":tool,"input":input})),
+            ChatEvent::ToolOutput { line } =>
+                Some(serde_json::json!({"type":"tool_output","line":line})),
+            ChatEvent::ToolResult { tool_use_id, content } =>
+                Some(serde_json::json!({"type":"tool_result","tool_use_id":tool_use_id,"output":content})),
             ChatEvent::Result { cost_usd, .. } =>
                 Some(serde_json::json!({"type":"done","cost_usd":cost_usd})),
             ChatEvent::Interrupted { cost_usd } =>
