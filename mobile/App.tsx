@@ -358,6 +358,8 @@ function containerDisplayName(name: string): string {
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
 const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
+  const [toolExpanded, setToolExpanded] = useState(false)
+
   if (message.role === 'session') {
     return null
   }
@@ -370,9 +372,13 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Messag
   }
   if (message.role === 'tool') {
     return (
-      <View style={[s.messageWrap, { marginBottom: 3 }]}>
-        <Text style={s.toolLine} selectable>{message.text}</Text>
-      </View>
+      <TouchableOpacity
+        style={[s.messageWrap, { marginBottom: 3 }]}
+        onPress={() => setToolExpanded(v => !v)}
+        activeOpacity={0.7}
+      >
+        <Text style={s.toolLine} selectable numberOfLines={toolExpanded ? undefined : 1} ellipsizeMode="tail">{message.text}</Text>
+      </TouchableOpacity>
     )
   }
   if (message.role === 'user') {
@@ -1393,7 +1399,7 @@ const s = StyleSheet.create({
   cursor:            { color: C.accent, fontSize: 14, fontFamily: ARIMO },
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
-  toolLine:          { fontSize: 12, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginLeft: 2 },
+  toolLine:          { fontSize: 14, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginLeft: 2 },
   interruptedLine:   { fontSize: 18, lineHeight: 26, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
 
   // Input bar
