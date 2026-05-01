@@ -21,10 +21,11 @@ use axum::{
     Json, Router,
 };
 use claudulhu_core::{
-    build_ephemeral_system_prompt, build_system_prompt, effective_repo, get_branches_for_repo,
-    init_shell_env, load_or_generate_keypair, read_config, resolve_api_key, run_noise_proxy,
-    send_message, to_base32, write_config, ApiMessage, AnthropicTool, ChatEvent, Config,
-    ContentBlock, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
+    build_ephemeral_system_prompt, build_system_prompt, build_tools_with_mcp,
+    chain_executor_with_mcp, effective_repo, get_branches_for_repo,
+    init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config, resolve_api_key,
+    run_noise_proxy, send_message, to_base32, write_config, ApiMessage, AnthropicTool,
+    ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -154,6 +155,7 @@ struct AppState {
     stream_state:  Mutex<StreamState>,
     /// True while a /stream loop is running.
     is_streaming:  AtomicBool,
+    mcp_pool:      McpPool,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -195,7 +197,9 @@ async fn message_handler(
     }];
 
     info!("[server/message_handler] calling ephemeral send_message");
-    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &make_extra_tools(), make_extra_executor()).await {
+    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
+    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor());
+    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &extra_tools, executor).await {
         Ok((text, cost_usd, _)) => {
             let elapsed = start.elapsed().as_millis();
             info!("[server/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
@@ -314,8 +318,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
+    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor());
     tokio::spawn(async move {
-        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), aborted.clone(), &make_extra_tools(), make_extra_executor()).await {
+        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), aborted.clone(), &extra_tools, executor).await {
             Ok((_, cost_usd, mut updated)) => {
                 if aborted.load(Ordering::Relaxed) {
                     updated.push(ApiMessage {
@@ -599,6 +605,8 @@ async fn main() {
     let messages = load_messages();
     info!("[server] loaded {} message(s) from history, repo={repo}", messages.len());
 
+    let mcp_pool = init_mcp_pool().await;
+
     let state = Arc::new(AppState {
         messages:      Arc::new(Mutex::new(messages)),
         last_cost_usd: Mutex::new(None),
@@ -606,6 +614,7 @@ async fn main() {
         cwd: repo.clone(),
         stream_state:  Mutex::new(StreamState { buffer: Vec::new(), subs: Vec::new() }),
         is_streaming:  AtomicBool::new(false),
+        mcp_pool,
     });
 
     let cors = CorsLayer::new()
@@ -650,6 +659,8 @@ async fn main() {
                     .filter(|m| m.role != "interrupted")
                     .cloned()
                     .collect();
+                let extra_tools = build_tools_with_mcp(&state_sp.mcp_pool, &make_extra_tools()).await;
+                let executor    = chain_executor_with_mcp(state_sp.mcp_pool.clone(), make_extra_executor());
                 match send_message(
                     messages,
                     &state_sp.system,
@@ -658,8 +669,8 @@ async fn main() {
                     &state_sp.cwd,
                     None,
                     Arc::new(AtomicBool::new(false)),
-                    &make_extra_tools(),
-                    make_extra_executor(),
+                    &extra_tools,
+                    executor,
                 ).await {
                     Ok((_, cost_usd, updated)) => {
                         *state_sp.messages.lock().unwrap() = updated.clone();

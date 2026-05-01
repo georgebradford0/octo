@@ -11,7 +11,7 @@ use std::{
 use tracing::info;
 
 pub mod mcp;
-pub use mcp::{McpPool, init_mcp_pool};
+pub use mcp::{McpPool, init_mcp_pool, build_tools_with_mcp, chain_executor_with_mcp};
 
 pub mod noise;
 pub use noise::{

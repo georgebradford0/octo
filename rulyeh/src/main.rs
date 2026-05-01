@@ -24,9 +24,10 @@ use axum::{
     Json, Router,
 };
 use claudulhu_core::{
-    build_ephemeral_system_prompt, init_shell_env, load_or_generate_keypair, read_config,
+    build_ephemeral_system_prompt, build_tools_with_mcp, chain_executor_with_mcp,
+    init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config,
     resolve_api_key, run_noise_proxy, send_message, to_base32, ApiMessage, AnthropicTool,
-    ChatEvent, ContentBlock, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
+    ChatEvent, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use hex;
 use futures_util::{SinkExt, StreamExt};
@@ -172,6 +173,7 @@ struct AppState {
     public_host:          String,
     rulyeh_url:           String,
     kube_client:          Client,
+    mcp_pool:             McpPool,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -214,7 +216,9 @@ async fn message_handler(
         content: vec![ContentBlock::Text { text: body.text }],
     }];
 
-    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, "/", None, Arc::new(AtomicBool::new(false)), &rulyeh_extra_tools(), rulyeh_extra_executor(state.clone())).await {
+    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &rulyeh_extra_tools()).await;
+    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), rulyeh_extra_executor(state.clone()));
+    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, "/", None, Arc::new(AtomicBool::new(false)), &extra_tools, executor).await {
         Ok((text, cost_usd, _)) => {
             let elapsed = start.elapsed().as_millis();
             info!("[rulyeh/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
@@ -301,9 +305,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    let executor = rulyeh_extra_executor(Arc::clone(&state));
+    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &rulyeh_extra_tools()).await;
+    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), rulyeh_extra_executor(Arc::clone(&state)));
     tokio::spawn(async move {
-        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx), aborted.clone(), &rulyeh_extra_tools(), executor).await {
+        match send_message(messages, &system, &model, &api_key, "/", Some(event_tx), aborted.clone(), &extra_tools, executor).await {
             Ok((_, cost_usd, mut updated)) => {
                 if aborted.load(Ordering::Relaxed) {
                     updated.push(ApiMessage {
@@ -898,6 +903,7 @@ async fn main() {
     let messages = load_messages();
     info!("[rulyeh] loaded {} message(s) from history", messages.len());
 
+    let mcp_pool     = init_mcp_pool().await;
     let poll_trigger = Arc::new(Notify::new());
 
     let state = Arc::new(AppState {
@@ -911,6 +917,7 @@ async fn main() {
         public_host,
         rulyeh_url,
         kube_client,
+        mcp_pool,
     });
 
     tokio::spawn(poll_containers(state.clone()));

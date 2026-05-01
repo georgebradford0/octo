@@ -382,6 +382,43 @@ pub async fn reload_mcp_pool(pool: &McpPool) -> String {
     parts.join("; ")
 }
 
+// ── Convenience helpers for callers ──────────────────────────────────────────
+
+/// Build the full extra-tools list: caller-supplied extras first, then every
+/// tool advertised by the live MCP pool.  Call once per `send_message` turn so
+/// that tools added via hot-reload are visible immediately.
+pub async fn build_tools_with_mcp(
+    pool:  &McpPool,
+    extra: &[AnthropicTool],
+) -> Vec<AnthropicTool> {
+    let mut tools = extra.to_vec();
+    tools.extend(pool_tool_definitions(pool).await);
+    tools
+}
+
+type Executor = std::sync::Arc<dyn Fn(String, serde_json::Value)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
+    + Send + Sync>;
+
+/// Wrap an existing executor so that any tool name not handled by `inner` is
+/// first tried against the MCP pool before falling back to "unknown tool".
+/// This is the only change needed to add MCP dispatch to an existing server.
+pub fn chain_executor_with_mcp(pool: McpPool, inner: Option<Executor>) -> Option<Executor> {
+    Some(std::sync::Arc::new(move |name: String, input: serde_json::Value| {
+        let pool  = pool.clone();
+        let inner = inner.clone();
+        Box::pin(async move {
+            if let Some(result) = pool_call_tool(&pool, &name, input.clone()).await {
+                return result;
+            }
+            match inner {
+                Some(f) => f(name, input).await,
+                None    => format!("unknown tool: {name}"),
+            }
+        })
+    }))
+}
+
 /// Spawn a background task that polls `mcp.json`'s modification time every
 /// 2 seconds and calls `reload_mcp_pool` when it changes.
 fn start_mcp_watcher(pool: McpPool) {
