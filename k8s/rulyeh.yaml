@@ -61,6 +61,8 @@ spec:
                   optional: true
             - name: AWS_DEFAULT_REGION
               value: "us-west-2"
+            - name: PUBLIC_PORT
+              value: "30090"
           volumeMounts:
             - name: data
               mountPath: /data
