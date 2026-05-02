@@ -104,8 +104,9 @@ async fn install_kubectl() -> Result<()> {
     run_sh(&format!(
         r#"set -e
 VER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-curl -fsSL "https://dl.k8s.io/release/$VER/bin/linux/{arch}/kubectl" -o /usr/local/bin/kubectl
-chmod +x /usr/local/bin/kubectl"#
+curl -fsSL "https://dl.k8s.io/release/$VER/bin/linux/{arch}/kubectl" -o /tmp/kubectl
+sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+rm /tmp/kubectl"#
     ))
     .await?;
     println!("kubectl installed.");

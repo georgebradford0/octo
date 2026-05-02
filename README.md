@@ -16,11 +16,8 @@ Both roles use the same image: `ghcr.io/georgebradford0/rulyeh:latest`
 ## Install the CLI
 
 ```sh
-curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-linux-x86_64 \
-  -o ~/.local/bin/claudulhu && chmod +x ~/.local/bin/claudulhu
+curl -fsSL https://raw.githubusercontent.com/georgebradford0/claudulhu/main/scripts/get-cli.sh | sh
 ```
-
-Replace `linux-x86_64` with your platform: `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
 
 ---
 
@@ -32,7 +29,7 @@ In your cloud provider's firewall / security group, allow **inbound TCP** on:
 
 | Port | Used by |
 |------|---------|
-| 30090 | rulyeh Noise tunnel (mobile connects here) |
+| 30900 | rulyeh Noise tunnel (mobile connects here) |
 | 30100–30199 | Child container Noise tunnels |
 
 ### 2. Bootstrap rulyeh
