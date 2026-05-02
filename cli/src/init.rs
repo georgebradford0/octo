@@ -77,9 +77,11 @@ async fn ensure_socat_proxy(public_port: u16, noise_port: u16) -> Result<()> {
          Restart=always\nRestartSec=3\n\n\
          [Install]\nWantedBy=multi-user.target\n"
     );
-    tokio::fs::write("/etc/systemd/system/noise-proxy.service", unit).await
-        .context("write noise-proxy.service")?;
-    run_sh("systemctl daemon-reload && systemctl enable --now noise-proxy").await?;
+    run_sh(&format!(
+        "echo '{}' | sudo tee /etc/systemd/system/noise-proxy.service > /dev/null",
+        unit.replace('\'', "'\\''")
+    )).await.context("write noise-proxy.service")?;
+    run_sh("sudo systemctl daemon-reload && sudo systemctl enable --now noise-proxy").await?;
     Ok(())
 }
 
