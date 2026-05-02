@@ -5,6 +5,7 @@ import {
   Animated,
   AppState,
   FlatList,
+  Image,
   NativeModules,
   PermissionsAndroid,
   Platform,
@@ -503,6 +504,7 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
       <Camera device={device} isActive codeScanner={codeScanner} style={StyleSheet.absoluteFill} />
       <View style={s.scannerOverlay}>
         <View style={s.scannerTopBar}>
+          <Image source={require('./assets/icon.png')} style={s.scannerIcon} />
           <Text style={s.scannerTitle}>Scan QR code</Text>
         </View>
         <View style={[s.scannerReticle, { width: reticleSize, height: reticleSize }]}>
@@ -1486,6 +1488,7 @@ const s = StyleSheet.create({
   scannerFull:       { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
   scannerOverlay:    { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60 },
   scannerTopBar:     { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
+  scannerIcon:       { width: 64, height: 64, borderRadius: 14, marginBottom: 8 },
   scannerTitle:      { color: '#fff', fontSize: 20, fontWeight: '700', fontFamily: ARIMO },
   scannerSubtitle:   { color: 'rgba(255,255,255,0.6)', fontSize: 14, textAlign: 'center', lineHeight: 20, fontFamily: ARIMO },
   scannerReticle:    { width: 240, height: 240 },

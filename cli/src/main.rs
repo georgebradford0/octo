@@ -48,7 +48,7 @@ enum Command {
     },
 
     /// Delete the entire claudulhu namespace and all data (irreversible)
-    Selfdestruct {
+    Destroy {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
@@ -220,7 +220,7 @@ async fn main() -> Result<()> {
         Command::Init { api_key, gh_token, noise_port, public_port, mcp_config } => {
             init::run(&api_key, gh_token.as_deref(), noise_port, public_port, mcp_config.as_deref()).await?;
         }
-        Command::Selfdestruct { yes } => {
+        Command::Destroy { yes } => {
             if !yes {
                 use std::io::Write;
                 print!("This will delete the entire claudulhu namespace and all PVC data. Type 'yes' to confirm: ");
