@@ -6,15 +6,7 @@ use tokio::process::Command;
 pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Result<()> {
     ensure_kubernetes().await?;
 
-    // Generate a fresh Curve25519 keypair for rulyeh.
-    let builder = snow::Builder::new(
-        "Noise_XX_25519_ChaChaPoly_SHA256".parse().context("parse noise params")?,
-    );
-    let keypair = builder.generate_keypair().context("generate keypair")?;
-    let mut combined = keypair.private.clone();
-    combined.extend_from_slice(&keypair.public);
-    let noise_private_key_hex = hex::encode(&combined);
-    let pubkey_b32 = BASE32_NOPAD.encode(&keypair.public);
+    let (noise_private_key_hex, pubkey_b32) = generate_keypair()?;
 
     let client = k8s::build_client().await?;
 
@@ -30,6 +22,9 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Resu
     k8s::upsert_rulyeh_deployment(&client, noise_port).await?;
     println!("→ services");
     k8s::ensure_rulyeh_services(&client, noise_port).await?;
+    // Restart so the pod loads the new keypair from the secret before we print the QR.
+    println!("→ restarting rulyeh to apply new keypair...");
+    k8s::rollout_restart_deployment(&client, "rulyeh").await?;
     println!("→ waiting for rulyeh to be ready...");
     k8s::wait_for_deployment_ready(&client, "rulyeh", 180).await?;
 
@@ -48,6 +43,17 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Resu
     println!("{image}");
 
     Ok(())
+}
+
+fn generate_keypair() -> Result<(String, String)> {
+    println!("→ generating new Noise keypair");
+    let builder = snow::Builder::new(
+        "Noise_XX_25519_ChaChaPoly_SHA256".parse().context("parse noise params")?,
+    );
+    let keypair = builder.generate_keypair().context("generate keypair")?;
+    let mut combined = keypair.private.clone();
+    combined.extend_from_slice(&keypair.public);
+    Ok((hex::encode(&combined), BASE32_NOPAD.encode(&keypair.public)))
 }
 
 async fn ensure_kubernetes() -> Result<()> {

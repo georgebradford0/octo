@@ -44,6 +44,9 @@ enum Command {
         yes: bool,
     },
 
+    /// Print the CLI version
+    Version,
+
     /// Update the claudulhu CLI to the latest release
     Update,
 
@@ -233,6 +236,7 @@ async fn main() -> Result<()> {
             ContainersAction::Delete { name, yes } => containers::delete(&name, yes).await?,
             ContainersAction::Restart { names } => containers::restart(&names).await?,
         },
+        Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         Command::Update => update().await?,
         Command::Mcp { action } => match action {
             McpAction::List { container } => mcp::list(&container).await?,

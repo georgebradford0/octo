@@ -626,6 +626,32 @@ pub async fn read_secret_value(client: &Client, secret_name: &str, key: &str) ->
     String::from_utf8(bytes).context("secret value is not UTF-8")
 }
 
+/// Trigger a rolling restart of a Deployment (equivalent to `kubectl rollout restart`).
+pub async fn rollout_restart_deployment(client: &Client, name: &str) -> anyhow::Result<()> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let restart_time = format!("{secs}");
+    let patch = json!({
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": restart_time
+                    }
+                }
+            }
+        }
+    });
+    deployments
+        .patch(name, &PatchParams::apply("claudulhu"), &Patch::Merge(&patch))
+        .await
+        .with_context(|| format!("rollout restart deployment/{name}"))?;
+    Ok(())
+}
+
 // ── Pod exec (via kubectl subprocess) ─────────────────────────────────────────
 
 /// Run a command in a pod and return its stdout.
