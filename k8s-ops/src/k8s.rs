@@ -722,6 +722,15 @@ pub async fn exec_in_pod(pod_name: &str, cmd: &[&str]) -> anyhow::Result<String>
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Delete the entire claudulhu namespace, removing all resources and PVC data.
+pub async fn delete_namespace(client: &Client) -> anyhow::Result<()> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    api.delete(NAMESPACE, &DeleteParams::default()).await
+        .with_context(|| format!("delete namespace {NAMESPACE}"))?;
+    info!("[k8s] deleted namespace {NAMESPACE}");
+    Ok(())
+}
+
 /// Write `content` to `path` inside a running pod via `kubectl exec` stdin.
 pub async fn write_pod_file(pod_name: &str, path: &str, content: &str) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;

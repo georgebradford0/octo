@@ -2,6 +2,8 @@ mod containers;
 mod init;
 mod mcp;
 
+use claudulhu_k8s_ops;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -33,6 +35,13 @@ enum Command {
     Containers {
         #[command(subcommand)]
         action: ContainersAction,
+    },
+
+    /// Delete the entire claudulhu namespace and all data (irreversible)
+    Selfdestruct {
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
     },
 
     /// Manage MCP tools in a container
@@ -135,6 +144,22 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init { api_key, gh_token, noise_port } => {
             init::run(&api_key, gh_token.as_deref(), noise_port).await?;
+        }
+        Command::Selfdestruct { yes } => {
+            if !yes {
+                use std::io::Write;
+                print!("This will delete the entire claudulhu namespace and all PVC data. Type 'yes' to confirm: ");
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim() != "yes" {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+            let client = claudulhu_k8s_ops::k8s::build_client().await?;
+            claudulhu_k8s_ops::k8s::delete_namespace(&client).await?;
+            println!("Namespace deleted. All pods and PVC data are gone.");
         }
         Command::Containers { action } => match action {
             ContainersAction::List => containers::list().await?,
