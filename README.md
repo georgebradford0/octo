@@ -13,40 +13,14 @@ Both roles use the same image: `ghcr.io/georgebradford0/rulyeh:latest`
 
 ---
 
-## Prerequisites
-
-### k3s
-
-Install k3s on your server (single node is fine):
+## Install the CLI
 
 ```sh
-curl -sfL https://get.k3s.io | sh -
+curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-linux-x86_64 \
+  -o ~/.local/bin/claudulhu && chmod +x ~/.local/bin/claudulhu
 ```
 
-`kubectl` is included. Wait for k3s to finish starting, then configure access:
-
-```sh
-sudo systemctl is-active --wait k3s
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown $USER ~/.kube/config
-chmod 600 ~/.kube/config
-echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Verify with `kubectl get nodes` — the node should show `Ready`.
-
-To manage the cluster from another machine, copy `~/.kube/config` to that machine and replace `127.0.0.1` with your server's IP.
-
-### k8s/ manifests
-
-Clone this repo (or just download the `k8s/` directory) onto any machine with `kubectl` access:
-
-```sh
-git clone https://github.com/georgebradford0/claudulhu
-cd claudulhu
-```
+Replace `linux-x86_64` with your platform: `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
 
 ---
 
@@ -61,89 +35,71 @@ In your cloud provider's firewall / security group, allow **inbound TCP** on:
 | 30090 | rulyeh Noise tunnel (mobile connects here) |
 | 30100–30199 | Child container Noise tunnels |
 
-### 2. Create the namespace and RBAC
+### 2. Bootstrap rulyeh
 
 ```sh
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/rbac.yaml
+claudulhu init --api-key sk-ant-... --gh-token ghp_...
 ```
 
-### 3. Create secrets
+This single command:
+- Installs k3s if no cluster is reachable (Linux only)
+- Creates the `claudulhu` namespace and RBAC
+- Generates and stores the Noise keypair
+- Deploys rulyeh and waits for it to be ready
+- Prints the QR code to scan with the mobile app
 
-```sh
-kubectl create secret generic claudulhu-secrets \
-  --from-literal=anthropic-api-key="sk-ant-..." \
-  --from-literal=gh-token="ghp_..." \
-  -n claudulhu
-```
+Options:
 
-### 4. Store the k3s join token
-
-Only needed if you want rulyeh to provision remote EC2 worker nodes on demand. Skip if you're running everything on a single node.
-
-```sh
-kubectl create secret generic k3s-join-token \
-  --from-literal=token="$(sudo cat /var/lib/rancher/k3s/server/node-token)" \
-  -n claudulhu
-```
-
-### 5. Deploy rulyeh
-
-```sh
-kubectl apply -f k8s/rulyeh.yaml
-```
-
-### 6. Get the QR code
-
-```sh
-kubectl logs -n claudulhu deploy/rulyeh
-```
-
-Scan the printed QR code with the mobile app. It establishes an encrypted Noise Protocol tunnel (NodePort 30090 by default) and routes all traffic through it.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-key` | `$ANTHROPIC_API_KEY` | Anthropic API key |
+| `--gh-token` | `$GH_TOKEN` | GitHub token (optional) |
+| `--noise-port` | `30900` | NodePort for the Noise tunnel |
 
 ---
 
-## Creating a child container
+## Creating child containers
 
-Once connected in the app, ask rulyeh in chat:
+### Via chat
+
+Once connected in the app, ask rulyeh:
 
 > "Create a container for https://github.com/user/repo"
 
-Rulyeh will create a Kubernetes Deployment, two PVCs (`/data` and `/workspace`), a ClusterIP Service for internal messaging, and a NodePort Service for your Noise connection — all automatically. NodePorts are assigned from the range **30100–30199**.
+Rulyeh creates a Kubernetes Deployment, two PVCs (`/data` and `/workspace`), a ClusterIP Service, and a NodePort Service — NodePorts are assigned from **30100–30199**.
 
-The child's QR code appears in its own pod logs once it starts:
-
-```sh
-kubectl logs -n claudulhu deploy/rulyeh-<repo-name>
-```
-
-### Remote EC2 children
-
-To run a child on a fresh EC2 instance provisioned on demand, some extra setup is required first.
-
-**Add AWS credentials to the secret:**
+### Via CLI
 
 ```sh
-kubectl patch secret claudulhu-secrets -n claudulhu \
-  --patch='{"stringData":{
-    "aws-access-key-id":     "<id>",
-    "aws-secret-access-key": "<secret>"
-  }}'
+claudulhu containers create --git-url https://github.com/user/repo
+claudulhu containers list
+claudulhu containers stop  <name>
+claudulhu containers start <name>
+claudulhu containers delete <name>
 ```
 
-Set `AWS_DEFAULT_REGION` in `k8s/rulyeh.yaml` if you're not using `us-east-1`, then redeploy:
+---
+
+## MCP tools
+
+MCP servers extend what rulyeh and child containers can do. Add them with the CLI:
 
 ```sh
-kubectl apply -f k8s/rulyeh.yaml
+# Add an MCP server to rulyeh
+claudulhu mcp add --name github \
+  --command npx --args @modelcontextprotocol/server-github \
+  --env GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...
+
+# Add to a specific child container
+claudulhu mcp add --container rulyeh-myrepo --name linear \
+  --command npx --args @linear/mcp-server \
+  --env LINEAR_API_KEY=lin_api_...
+
+claudulhu mcp list
+claudulhu mcp remove --name github
 ```
 
-Rulyeh has access to the AWS CLI and can look up or create the necessary resources (security group, subnet, control plane URL) on demand — just ask it in chat.
-
-**Then ask rulyeh:**
-
-> "Create a container for https://github.com/user/repo on a t3.medium"
-
-Rulyeh launches the EC2 instance, waits for it to join the cluster (~60s), then schedules the child pod on it. Total time is roughly 2–3 minutes. When you're done, asking rulyeh to terminate the container also terminates the EC2 instance.
+The server config is stored in `/data/mcp.json` inside the container and hot-reloaded within a few seconds.
 
 ---
 
@@ -154,16 +110,11 @@ Rulyeh launches the EC2 instance, waits for it to join the cluster (~60s), then 
 | Variable | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
-| `GH_TOKEN` | Yes* | GitHub token — passed to every child |
+| `GH_TOKEN` | No* | GitHub token — passed to every child |
 | `PUBLIC_HOST` | No | Public IP/hostname for the QR code. Auto-detected if not set. |
 | `NOISE_PORT` | No | Noise endpoint port (default: `9000`) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | If remote | EC2 provisioning credentials |
-| `AWS_DEFAULT_REGION` | If remote | EC2 region (default: `us-east-1`) |
-| `AWS_SECURITY_GROUP_ID` | If remote | Security group for new EC2 instances |
-| `AWS_SUBNET_ID` | No | Subnet for new EC2 instances. Uses the default subnet if unset. |
-| `K3S_CONTROL_PLANE_URL` | No | e.g. `https://<ip>:6443` — used in EC2 user-data for k3s agent join. Defaults to `https://<PUBLIC_HOST>:6443` if unset. |
 
-*`GH_TOKEN` is technically optional but required in practice for any GitHub repo work.
+*Required in practice for any GitHub repo work.
 
 ### Child containers
 

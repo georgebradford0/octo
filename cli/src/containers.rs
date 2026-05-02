@@ -54,9 +54,6 @@ pub async fn create(git_url: Option<&str>, name: Option<&str>, noise_port: Optio
         rulyeh_url:        "",
         startup_script:    None,
         startup_prompt:    None,
-        node_selector:     None,
-        remote:            false,
-        instance_id:       None,
         noise_private_key: &noise_key,
     };
 
@@ -92,7 +89,7 @@ pub async fn delete(name: &str, yes: bool) -> Result<()> {
         }
     }
     let client = k8s::build_client().await?;
-    k8s::delete_child_resources(&client, name, None, None).await?;
+    k8s::delete_child_resources(&client, name).await?;
     println!("Deleted '{name}'.");
     Ok(())
 }
