@@ -554,6 +554,9 @@ const ChatPane = memo(function ChatPane({
   const listHeightRef     = useRef(0)
   const lastToolIdRef     = useRef<string | null>(null)
   const historyAbortRef   = useRef<AbortController | null>(null)
+  const messagesRef       = useRef<Message[]>([])
+
+  useEffect(() => { messagesRef.current = messages }, [messages])
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -688,7 +691,12 @@ const ChatPane = memo(function ChatPane({
           ...(m.cost_usd != null ? { cost: m.cost_usd } : {}),
           ...(m.output    != null ? { output: m.output } : {}),
         }))
-        setMessages(msgs)
+        const prev = messagesRef.current
+        const unchanged = prev.length === msgs.length && msgs.every((m, i) =>
+          m.role === prev[i].role && m.text === prev[i].text &&
+          m.cost === prev[i].cost && m.output === prev[i].output
+        )
+        if (!unchanged) setMessages(msgs)
         if (data.is_streaming) {
           reattachStream()
         } else {
