@@ -318,6 +318,21 @@ function renderText(text: string, baseStyle: object) {
 
 
 
+// ── BlinkingCursor ────────────────────────────────────────────────────────────
+
+function BlinkingCursor() {
+  const opacity = useRef(new Animated.Value(1)).current
+  useEffect(() => {
+    const anim = Animated.loop(Animated.sequence([
+      Animated.timing(opacity, { toValue: 0, duration: 500, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 500, useNativeDriver: true }),
+    ]))
+    anim.start()
+    return () => anim.stop()
+  }, [])
+  return <Animated.Text style={[s.streamCursor, { opacity }]}>▍</Animated.Text>
+}
+
 // ── PendingEllipsis ───────────────────────────────────────────────────────────
 
 function PendingEllipsis() {
@@ -336,7 +351,7 @@ function PendingEllipsis() {
   }, [])
   return (
     <View style={s.messageWrap}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+      <View style={s.pendingPill}>
         {dots.map((dot, i) => (
           <Animated.Text key={i} style={[s.cursor, { opacity: dot }]}>●</Animated.Text>
         ))}
@@ -366,55 +381,83 @@ function containerDisplayName(name: string): string {
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
-const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
+const MessageBubble = memo(function MessageBubble({
+  message, prevRole, isLive,
+}: {
+  message:   Message
+  prevRole?: Message['role']
+  isLive?:   boolean
+}) {
   const [toolExpanded, setToolExpanded] = useState(false)
-  const renderedText = useMemo(() => renderText(message.text, s.textBlock), [message.text])
+  const fadeAnim = useRef(new Animated.Value(0)).current
+  const baseTextStyle = message.role === 'user' ? s.textBlock : s.assistantTextBlock
+  const renderedText = useMemo(() => renderText(message.text, baseTextStyle), [message.text, message.role])
 
-  if (message.role === 'session') {
-    return null
-  }
+  useEffect(() => {
+    Animated.timing(fadeAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start()
+  }, [])
+
+  if (message.role === 'session') return null
+
+  // Add extra breathing room at turn boundaries (user↔assistant).
+  const visiblePrev = prevRole === 'session' ? undefined : prevRole
+  const turnBoundary = visiblePrev !== undefined &&
+    (message.role === 'user') !== (visiblePrev === 'user')
+  const extraTopMargin = turnBoundary ? 12 : 0
+
   if (message.role === 'interrupted') {
     return (
-      <View style={[s.messageWrap, { marginBottom: 3, paddingLeft: 28 }]}>
-        <Text style={s.interruptedLine} selectable>■ interrupted</Text>
-      </View>
+      <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
+        <View style={[s.messageWrap, { marginBottom: 3, paddingLeft: 28 }]}>
+          <Text style={s.interruptedLine} selectable>■ interrupted</Text>
+        </View>
+      </Animated.View>
     )
   }
   if (message.role === 'tool') {
     return (
-      <TouchableOpacity
-        style={[s.messageWrap, { marginBottom: 3 }]}
-        onPress={() => setToolExpanded(v => !v)}
-        activeOpacity={0.7}
-      >
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Text style={[s.toolLine, { flex: 1 }]} selectable numberOfLines={toolExpanded ? undefined : 1} ellipsizeMode="tail">{message.text}</Text>
-          <Text style={[s.toolChevron, { transform: [{ rotate: toolExpanded ? '90deg' : '0deg' }] }]}>›</Text>
-        </View>
-        {toolExpanded && message.output != null && (
-          <View style={s.toolOutputBlock}>
-            <Text style={s.toolOutputText} selectable>{message.output}</Text>
+      <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
+        <TouchableOpacity
+          style={[s.messageWrap, { marginBottom: 3 }]}
+          onPress={() => setToolExpanded(v => !v)}
+          activeOpacity={0.7}
+        >
+          <View style={s.toolAccent}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={[s.toolLine, { flex: 1 }]} selectable numberOfLines={toolExpanded ? undefined : 1} ellipsizeMode="tail">{message.text}</Text>
+              <Text style={[s.toolChevron, { transform: [{ rotate: toolExpanded ? '90deg' : '0deg' }] }]}>›</Text>
+            </View>
+            {toolExpanded && message.output != null && (
+              <View style={s.toolOutputBlock}>
+                <Text style={s.toolOutputText} selectable>{message.output}</Text>
+              </View>
+            )}
           </View>
-        )}
-      </TouchableOpacity>
+        </TouchableOpacity>
+      </Animated.View>
     )
   }
   if (message.role === 'user') {
     return (
-      <View style={[s.messageWrap, s.messageWrapRight]}>
-        <View style={s.userBubble}>
-          {renderedText}
+      <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
+        <View style={[s.messageWrap, s.messageWrapRight]}>
+          <View style={s.userBubble}>
+            {renderedText}
+          </View>
         </View>
-      </View>
+      </Animated.View>
     )
   }
   return (
-    <View style={s.messageWrap}>
-      {renderedText}
-      {message.cost != null && (
-        <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
-      )}
-    </View>
+    <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
+      <View style={s.messageWrap}>
+        {renderedText}
+        {isLive && <BlinkingCursor />}
+        {message.cost != null && (
+          <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
+        )}
+      </View>
+    </Animated.View>
   )
 })
 
@@ -494,13 +537,14 @@ const ChatPane = memo(function ChatPane({
     height: Math.max(insets.bottom, -keyboardHeight.value),
   }))
 
-  const [messages,      setMessages]      = useState<Message[]>([])
-  const [status,        setStatus]        = useState<ConnStatus>('connecting')
-  const [input,         setInput]         = useState(initialDraft ?? '')
+  const [messages,       setMessages]       = useState<Message[]>([])
+  const [status,         setStatus]         = useState<ConnStatus>('connecting')
+  const [input,          setInput]          = useState(initialDraft ?? '')
   const draftKey = `draft:${baseUrl}`
-  const [completions,   setCompletions]   = useState<string[]>([])
-  const [showScrollBtn, setShowScrollBtn] = useState(false)
-  const [inputAreaH,    setInputAreaH]    = useState(0)
+  const [completions,    setCompletions]    = useState<string[]>([])
+  const [showScrollBtn,  setShowScrollBtn]  = useState(false)
+  const [inputAreaH,     setInputAreaH]     = useState(0)
+  const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null)
 
   const sendMessageRef    = useRef<() => void>(() => {})
   const wsRef             = useRef<WebSocket | null>(null)
@@ -520,9 +564,11 @@ const ChatPane = memo(function ChatPane({
   const handleStreamEvent = useCallback((
     raw: string,
     opts: {
-      streamingIdRef: { current: string }
+      streamingIdRef:    { current: string }
       hasAssistantMsgRef: { current: boolean }
-      onDone: () => void
+      onDone:            () => void
+      onFirstChunk?:     (id: string) => void
+      onStreamEnd?:      () => void
     },
   ) => {
     let event: { type: string; text?: string; tool?: string; input?: unknown; cost_usd?: number; message?: string; line?: string; tool_use_id?: string; output?: string }
@@ -532,6 +578,7 @@ const ChatPane = memo(function ChatPane({
       const chunk = event.text
       if (!opts.hasAssistantMsgRef.current) {
         opts.hasAssistantMsgRef.current = true
+        opts.onFirstChunk?.(opts.streamingIdRef.current)
         setMessages(prev => [...prev, { id: opts.streamingIdRef.current, role: 'assistant' as const, text: chunk }])
       } else {
         setMessages(prev => prev.map(m => m.id === opts.streamingIdRef.current ? { ...m, text: m.text + chunk } : m))
@@ -565,16 +612,19 @@ const ChatPane = memo(function ChatPane({
       log(`[chat] stream done cost_usd=${event.cost_usd}`)
       lastToolIdRef.current = null
       wsRef.current = null
+      opts.onStreamEnd?.()
       opts.onDone()
     } else if (event.type === 'interrupted') {
       log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
       lastToolIdRef.current = null
       wsRef.current = null
+      opts.onStreamEnd?.()
       opts.onDone()
     } else if (event.type === 'error') {
       logE(`[chat] stream error: ${event.message}`)
       lastToolIdRef.current = null
       wsRef.current = null
+      opts.onStreamEnd?.()
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
       updateStatus('ready')
     }
@@ -602,12 +652,15 @@ const ChatPane = memo(function ChatPane({
       handleStreamEvent(e.data, {
         streamingIdRef,
         hasAssistantMsgRef,
-        onDone: () => loadHistoryRef.current(),
+        onDone:       () => loadHistoryRef.current(),
+        onFirstChunk: (id) => setStreamingMsgId(id),
+        onStreamEnd:  () => setStreamingMsgId(null),
       })
     }
     ws.onerror = (e) => {
       logE(`[chat] reattachStream ws error after ${Date.now() - wsStart}ms: ${JSON.stringify(e)}`)
       wsRef.current = null
+      setStreamingMsgId(null)
       updateStatus('error')
     }
     ws.onclose = (e) => {
@@ -747,12 +800,15 @@ const ChatPane = memo(function ChatPane({
       handleStreamEvent(e.data, {
         streamingIdRef,
         hasAssistantMsgRef,
-        onDone: () => loadHistoryRef.current(),
+        onDone:       () => loadHistoryRef.current(),
+        onFirstChunk: (id) => setStreamingMsgId(id),
+        onStreamEnd:  () => setStreamingMsgId(null),
       })
     }
     ws.onerror = (e) => {
       logE(`[chat] ws error after ${Date.now() - wsSendStart}ms: ${JSON.stringify(e)}`)
       wsRef.current = null
+      setStreamingMsgId(null)
       setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
       updateStatus('error')
     }
@@ -779,7 +835,13 @@ const ChatPane = memo(function ChatPane({
           ref={listRef}
           data={messages}
           keyExtractor={m => m.id}
-          renderItem={({ item }) => <MessageBubble message={item} />}
+          renderItem={({ item, index }) => (
+            <MessageBubble
+              message={item}
+              prevRole={index > 0 ? messages[index - 1].role : undefined}
+              isLive={item.id === streamingMsgId}
+            />
+          )}
           contentContainerStyle={[s.messageListContent, { paddingBottom: inputAreaH + 8 }]}
           style={s.messageList}
           ListEmptyComponent={
@@ -1443,19 +1505,23 @@ const s = StyleSheet.create({
   // Messages
   messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
   messageWrapRight: { alignItems: 'flex-end' },
-  userBubble:       { backgroundColor: C.surface, borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '80%' },
-  textBlock:        { color: C.textPrimary, fontSize: 18, lineHeight: 26, fontWeight: '400', fontFamily: ARIMO },
+  userBubble:          { backgroundColor: C.surface, borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '80%' },
+  textBlock:           { color: C.textPrimary, fontSize: 18, lineHeight: 26, fontWeight: '400', fontFamily: ARIMO },
+  assistantTextBlock:  { color: C.textPrimary, fontSize: 16, lineHeight: 24, fontWeight: '400', fontFamily: ARIMO },
   inlineCode:        { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, color: C.textPrimary, backgroundColor: C.surface, paddingHorizontal: 3, borderRadius: 3 },
   codeBlock:         { backgroundColor: C.surface, borderRadius: 6, padding: 10, marginVertical: 4 },
   codeBlockText:     { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 12, color: C.textPrimary, lineHeight: 18 },
   cursor:            { color: C.accent, fontSize: 14, fontFamily: ARIMO },
+  streamCursor:      { color: C.accent, fontSize: 16, marginTop: 2 },
+  pendingPill:       { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.surface, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' },
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
-  toolLine:          { fontSize: 14, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginLeft: 2 },
+  toolAccent:        { borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 8 },
+  toolLine:          { fontSize: 14, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   toolChevron:       { fontSize: 16, color: C.textMuted, marginLeft: 6, fontWeight: '300' },
-  toolOutputBlock:   { marginTop: 6, marginLeft: 14, borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 10 },
+  toolOutputBlock:   { marginTop: 6, borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 10 },
   toolOutputText:    { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
-  interruptedLine:   { fontSize: 18, lineHeight: 26, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
+  interruptedLine:   { fontSize: 16, lineHeight: 24, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
 
   // Input bar
   completionList: { position: 'absolute', left: 0, right: 0, maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg, zIndex: 10, elevation: 10 },
