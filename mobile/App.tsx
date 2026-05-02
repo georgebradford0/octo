@@ -916,17 +916,25 @@ const ChatPane = memo(function ChatPane({
               <Text style={s.stopBtnText}>■  stop</Text>
             </TouchableOpacity>
           ) : (
-            <TextInput
-              style={s.input}
-              value={input}
-              onChangeText={setInput}
-              onSubmitEditing={() => sendMessageRef.current()}
-              placeholder="message…"
-              placeholderTextColor={C.textMuted}
-              multiline
-              returnKeyType="send"
-              blurOnSubmit={false}
-            />
+            <View style={s.inputRow}>
+              <TextInput
+                style={s.input}
+                value={input}
+                onChangeText={setInput}
+                placeholder="message…"
+                placeholderTextColor={C.textMuted}
+                multiline
+                blurOnSubmit={false}
+              />
+              <TouchableOpacity
+                style={[s.sendBtn, !input.trim() && s.sendBtnDisabled]}
+                onPress={() => sendMessageRef.current()}
+                disabled={!input.trim()}
+                activeOpacity={0.75}
+              >
+                <Text style={s.sendBtnIcon}>↑</Text>
+              </TouchableOpacity>
+            </View>
           )}
         </View>
 
@@ -1537,7 +1545,11 @@ const s = StyleSheet.create({
   completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   inputFloat:   { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 12 },
-  input:        { backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, color: C.textPrimary, fontSize: 18, lineHeight: 26, minHeight: 48, maxHeight: 140, fontFamily: ARIMO, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  inputRow:     { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, color: C.textPrimary, fontSize: 18, lineHeight: 26, minHeight: 56, maxHeight: 140, fontFamily: ARIMO, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  sendBtn:      { width: 48, height: 48, borderRadius: 24, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center', marginBottom: 4, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  sendBtnDisabled: { backgroundColor: C.inputBorder },
+  sendBtnIcon:  { fontSize: 22, color: '#fff', fontWeight: '700', lineHeight: 26 },
   inputStopBtn: { backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, minHeight: 56, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
   stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600', fontFamily: ARIMO },
 
