@@ -159,17 +159,41 @@ async fn main() -> Result<()> {
             }
             use std::io::Write;
             use std::time::Instant;
-            let client = claudulhu_k8s_ops::k8s::build_client().await?;
-            println!("Deleting namespace '{}'...", claudulhu_k8s_ops::k8s::NAMESPACE);
-            claudulhu_k8s_ops::k8s::delete_namespace(&client).await?;
+            use claudulhu_k8s_ops::{aws, k8s};
+            let client = k8s::build_client().await?;
+
+            // Collect EC2 instance IDs from remote children before the namespace is gone.
+            let instance_ids: Vec<String> = k8s::list_managed_deployments(&client).await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|c| c.instance_id)
+                .collect();
+
+            println!("Deleting namespace '{}'...", k8s::NAMESPACE);
+            k8s::delete_namespace(&client).await?;
             println!("Waiting for all pods and PVCs to terminate...");
             let start = Instant::now();
-            while claudulhu_k8s_ops::k8s::namespace_exists(&client).await {
+            while k8s::namespace_exists(&client).await {
                 print!("\r  Still terminating... {}s", start.elapsed().as_secs());
                 std::io::stdout().flush()?;
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            println!("\rDone. All resources removed.                    ");
+            println!("\rNamespace removed.                              ");
+
+            // Terminate any EC2 worker nodes.
+            if instance_ids.is_empty() {
+                println!("No remote EC2 instances to terminate.");
+            } else {
+                for id in &instance_ids {
+                    print!("Terminating EC2 instance {id}...");
+                    std::io::stdout().flush()?;
+                    match aws::terminate_instance(id).await {
+                        Ok(_) => println!(" done."),
+                        Err(e) => println!(" error: {e}"),
+                    }
+                }
+            }
+            println!("Done. All resources removed.");
         }
         Command::Containers { action } => match action {
             ContainersAction::List => containers::list().await?,
