@@ -33,7 +33,7 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Resu
     println!("→ waiting for rulyeh to be ready...");
     k8s::wait_for_deployment_ready(&client, "rulyeh", 180).await?;
 
-    let ip = k8s::get_node_external_ip(&client).await?;
+    let ip = public_ip().await?;
     let qr_data = format!("2:{ip}:{noise_port}:{pubkey_b32}");
 
     println!("\nrulyeh is live at {ip}:{noise_port}");
@@ -48,6 +48,18 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Resu
     println!("{image}");
 
     Ok(())
+}
+
+async fn public_ip() -> Result<String> {
+    let ip = Command::new("curl")
+        .args(["-fsSL", "--max-time", "5", "https://api.ipify.org"])
+        .output()
+        .await
+        .context("curl api.ipify.org")?;
+    if !ip.status.success() {
+        anyhow::bail!("failed to determine public IP");
+    }
+    Ok(String::from_utf8(ip.stdout)?.trim().to_string())
 }
 
 async fn ensure_kubernetes() -> Result<()> {
