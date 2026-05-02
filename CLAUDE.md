@@ -31,10 +31,6 @@ docker buildx build \
   .
 ```
 
-## GitHub CLI
-
-`gh` (v2.89.0) is installed and available in `$PATH`. Use it for GitHub operations (triggering workflows, creating PRs, etc.) in preference to raw `curl` API calls. `GH_TOKEN` is set in the environment so no separate `gh auth login` is needed.
-
 ---
 
 ## Architecture overview
@@ -81,10 +77,6 @@ Image: `ghcr.io/georgebradford0/rulyeh`
 | `GH_TOKEN` | yes | Passed to child containers on creation |
 | `PUBLIC_HOST` | no | Advertised host in QR (auto-detected if unset) |
 | `NOISE_PORT` | no | Listening port (default: 9000) |
-
-### server (child container) runtime tools
-
-The child container image (`ghcr.io/georgebradford0/rulyeh`) ships with `gh` pre-installed. When `GH_TOKEN` is set, `gh` is immediately usable inside the container without a separate `gh auth login`.
 
 ### server (child container) environment variables
 
