@@ -157,9 +157,19 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             }
+            use std::io::Write;
+            use std::time::Instant;
             let client = claudulhu_k8s_ops::k8s::build_client().await?;
+            println!("Deleting namespace '{}'...", claudulhu_k8s_ops::k8s::NAMESPACE);
             claudulhu_k8s_ops::k8s::delete_namespace(&client).await?;
-            println!("Namespace deleted. All pods and PVC data are gone.");
+            println!("Waiting for all pods and PVCs to terminate...");
+            let start = Instant::now();
+            while claudulhu_k8s_ops::k8s::namespace_exists(&client).await {
+                print!("\r  Still terminating... {}s", start.elapsed().as_secs());
+                std::io::stdout().flush()?;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            println!("\rDone. All resources removed.                    ");
         }
         Command::Containers { action } => match action {
             ContainersAction::List => containers::list().await?,

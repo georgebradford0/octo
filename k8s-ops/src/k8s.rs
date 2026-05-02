@@ -731,6 +731,12 @@ pub async fn delete_namespace(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns true if the claudulhu namespace still exists.
+pub async fn namespace_exists(client: &Client) -> bool {
+    let api: Api<Namespace> = Api::all(client.clone());
+    api.get(NAMESPACE).await.is_ok()
+}
+
 /// Write `content` to `path` inside a running pod via `kubectl exec` stdin.
 pub async fn write_pod_file(pod_name: &str, path: &str, content: &str) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;

@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use claudulhu_k8s_ops::k8s;
 use data_encoding::BASE32_NOPAD;
+use tokio::process::Command;
 
 pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Result<()> {
+    ensure_kubernetes().await?;
+
     // Generate a fresh Curve25519 keypair for rulyeh.
     let builder = snow::Builder::new(
         "Noise_XX_25519_ChaChaPoly_SHA256".parse().context("parse noise params")?,
@@ -45,4 +48,102 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16) -> Resu
     println!("{image}");
 
     Ok(())
+}
+
+async fn ensure_kubernetes() -> Result<()> {
+    if !kubectl_available().await {
+        install_kubectl().await?;
+    }
+    if !cluster_reachable().await {
+        install_k3s().await?;
+    }
+    Ok(())
+}
+
+async fn kubectl_available() -> bool {
+    Command::new("kubectl")
+        .args(["version", "--client", "--output=json"])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+async fn cluster_reachable() -> bool {
+    Command::new("kubectl")
+        .arg("cluster-info")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+async fn run_sh(cmd: &str) -> Result<()> {
+    let status = Command::new("sh")
+        .args(["-c", cmd])
+        .status()
+        .await
+        .context("sh")?;
+    if !status.success() {
+        anyhow::bail!("command failed: {cmd}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn install_kubectl() -> Result<()> {
+    println!("kubectl not found, installing...");
+    let arch = if cfg!(target_arch = "x86_64") { "amd64" } else { "arm64" };
+    run_sh(&format!(
+        r#"set -e
+VER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+curl -fsSL "https://dl.k8s.io/release/$VER/bin/linux/{arch}/kubectl" -o /usr/local/bin/kubectl
+chmod +x /usr/local/bin/kubectl"#
+    ))
+    .await?;
+    println!("kubectl installed.");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn install_kubectl() -> Result<()> {
+    anyhow::bail!(
+        "kubectl not found.\n  macOS:  brew install kubectl\n  Other:  https://kubernetes.io/docs/tasks/tools/"
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn install_k3s() -> Result<()> {
+    println!("No Kubernetes cluster found, installing k3s...");
+    run_sh("curl -sfL https://get.k3s.io | sh -").await?;
+
+    // k3s writes its kubeconfig to /etc/rancher/k3s/k3s.yaml
+    let kubeconfig = "/etc/rancher/k3s/k3s.yaml";
+    std::env::set_var("KUBECONFIG", kubeconfig);
+
+    println!("Waiting for k3s to be ready...");
+    for i in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if cluster_reachable().await {
+            println!("k3s is ready.");
+            println!("  Add to your shell: export KUBECONFIG={kubeconfig}");
+            return Ok(());
+        }
+        if i > 0 && i % 5 == 0 {
+            println!("  Still waiting... ({}s)", (i + 1) * 3);
+        }
+    }
+    anyhow::bail!("k3s installed but cluster did not become reachable within 90s")
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn install_k3s() -> Result<()> {
+    anyhow::bail!(
+        "No Kubernetes cluster reachable.\n\
+         Options:\n\
+         • Docker Desktop: enable Kubernetes in settings\n\
+         • k3d:      brew install k3d && k3d cluster create\n\
+         • minikube: brew install minikube && minikube start"
+    )
 }
