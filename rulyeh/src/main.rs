@@ -799,6 +799,17 @@ async fn main() {
     let messages = load_messages();
     info!("[rulyeh] loaded {} message(s) from history", messages.len());
 
+    let mcp_json_path = dir.join("mcp.json");
+    if !mcp_json_path.exists() {
+        if let Ok(json) = std::env::var("MCP_CONFIG_JSON") {
+            if let Err(e) = fs::write(&mcp_json_path, &json) {
+                warn!("[rulyeh] failed to seed mcp.json: {e}");
+            } else {
+                info!("[rulyeh] seeded mcp.json from MCP_CONFIG_JSON secret");
+            }
+        }
+    }
+
     let mcp_pool     = init_mcp_pool().await;
     let poll_trigger = Arc::new(Notify::new());
 

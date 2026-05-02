@@ -35,6 +35,10 @@ enum Command {
         /// the NodePort. Set to the same value as --noise-port to skip the proxy.
         #[arg(long, default_value_t = 8443)]
         public_port: u16,
+
+        /// Path to an mcp.json file to seed rulyeh's MCP tool list on first startup
+        #[arg(long)]
+        mcp_config: Option<std::path::PathBuf>,
     },
 
     /// Manage child containers
@@ -213,8 +217,8 @@ async fn update() -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { api_key, gh_token, noise_port, public_port } => {
-            init::run(&api_key, gh_token.as_deref(), noise_port, public_port).await?;
+        Command::Init { api_key, gh_token, noise_port, public_port, mcp_config } => {
+            init::run(&api_key, gh_token.as_deref(), noise_port, public_port, mcp_config.as_deref()).await?;
         }
         Command::Selfdestruct { yes } => {
             if !yes {

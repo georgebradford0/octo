@@ -3,10 +3,22 @@ use claudulhu_k8s_ops::k8s;
 use data_encoding::BASE32_NOPAD;
 use tokio::process::Command;
 
-pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_port: u16) -> Result<()> {
+pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_port: u16, mcp_config: Option<&std::path::Path>) -> Result<()> {
     ensure_kubernetes().await?;
 
     let (noise_private_key_hex, pubkey_b32) = generate_keypair()?;
+
+    let mcp_config_json: Option<String> = match mcp_config {
+        None => None,
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("read mcp config {}", path.display()))?;
+            // Validate it parses as a JSON array before storing.
+            serde_json::from_str::<serde_json::Value>(&text)
+                .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
+            Some(text)
+        }
+    };
 
     let client = k8s::build_client().await?;
 
@@ -15,7 +27,7 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
     println!("→ RBAC");
     k8s::ensure_rbac(&client).await?;
     println!("→ secrets");
-    k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex).await?;
+    k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex, mcp_config_json.as_deref()).await?;
     println!("→ PVC");
     k8s::ensure_rulyeh_pvc(&client).await?;
     println!("→ deployment");

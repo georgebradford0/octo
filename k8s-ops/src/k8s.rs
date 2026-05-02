@@ -499,11 +499,14 @@ pub async fn ensure_rbac(client: &Client) -> anyhow::Result<()> {
 
 /// Create or update the rulyeh-secrets Secret.
 /// `noise_private_key_hex` is the hex-encoded 64-byte (private ++ public) keypair.
+/// `mcp_config_json`, if provided, is stored as `MCP_CONFIG_JSON` and written to
+/// `/data/mcp.json` by rulyeh on first startup (skipped if the file already exists).
 pub async fn upsert_secret(
     client: &Client,
     api_key: &str,
     gh_token: Option<&str>,
     noise_private_key_hex: &str,
+    mcp_config_json: Option<&str>,
 ) -> anyhow::Result<()> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
     let mut string_data = serde_json::json!({
@@ -512,6 +515,9 @@ pub async fn upsert_secret(
     });
     if let Some(gh) = gh_token {
         string_data["GH_TOKEN"] = serde_json::json!(gh);
+    }
+    if let Some(mcp) = mcp_config_json {
+        string_data["MCP_CONFIG_JSON"] = serde_json::json!(mcp);
     }
     let secret: Secret = serde_json::from_value(json!({
         "apiVersion": "v1",
