@@ -764,9 +764,9 @@ const ChatPane = memo(function ChatPane({
   sendMessageRef.current = sendMessage
 
   const clearConversation = useCallback(() => {
-    fetch(`${baseUrl}/clear`, { method: 'POST' }).catch(() => {})
-    setMessages([])
-    updateStatus('ready')
+    fetch(`${baseUrl}/clear`, { method: 'POST' })
+      .then(() => { setMessages([]); updateStatus('ready') })
+      .catch(() => loadHistoryRef.current())
   }, [baseUrl])
   clearRef.current = clearConversation
 
@@ -782,7 +782,12 @@ const ChatPane = memo(function ChatPane({
           renderItem={({ item }) => <MessageBubble message={item} />}
           contentContainerStyle={[s.messageListContent, { paddingBottom: inputAreaH + 8 }]}
           style={s.messageList}
-          ListEmptyComponent={<Text style={s.emptyState}>say something</Text>}
+          ListEmptyComponent={
+            <View style={s.emptyStateWrap}>
+              <Text style={s.emptyStateName}>claudulhu</Text>
+              <Text style={s.emptyState}>say something</Text>
+            </View>
+          }
           onContentSizeChange={(_, h) => {
             contentHeightRef.current = h
             if (isAtBottomRef.current) {
@@ -1424,7 +1429,9 @@ const s = StyleSheet.create({
   pane:              { flex: 1, backgroundColor: C.bg },
   messageList:       { flex: 1 },
   messageListContent: { paddingVertical: 16 },
-  emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, marginTop: 80, fontFamily: ARIMO },
+  emptyStateWrap:    { alignItems: 'center', marginTop: 80, gap: 6 },
+  emptyStateName:    { fontSize: 22, fontWeight: '700', color: C.textMuted, letterSpacing: 2, fontFamily: ARIMO },
+  emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, fontFamily: ARIMO },
   reconnectBanner:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, zIndex: 10 },
   reconnectText:     { fontSize: 12, fontWeight: '600', fontFamily: ARIMO },
 
@@ -1472,7 +1479,7 @@ const s = StyleSheet.create({
   settingsMenuDivider:      { height: StyleSheet.hairlineWidth, backgroundColor: C.border },
   settingsMenuAction:       { paddingHorizontal: 14, paddingVertical: 13 },
   settingsMenuActionText:   { fontSize: 14, color: C.textSecondary, fontFamily: ARIMO },
-  settingsMenuLogoutText:   { fontSize: 20, color: C.red, fontFamily: ARIMO },
+  settingsMenuLogoutText:   { fontSize: 15, color: C.red, fontFamily: ARIMO },
   containerMenuItem:        { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   containerMenuItemName:    { fontSize: 20, fontWeight: '600', color: C.textPrimary, fontFamily: ARIMO },
   containerMenuItemUrl:     { fontSize: 16, color: C.textMuted, fontFamily: ARIMO, marginTop: 1 },
