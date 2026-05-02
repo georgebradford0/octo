@@ -1,4 +1,4 @@
-use claudulhu_k8s_ops::{aws, k8s};
+use claudulhu_k8s_ops::k8s;
 
 use std::{
     fs,
@@ -61,9 +61,6 @@ struct ContainerInfo {
     host:    String,
     port:    u16,
     pubkey:  String,
-    remote:  bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instance_id: Option<String>,
 }
 
 // ── Session persistence ───────────────────────────────────────────────────────
@@ -420,8 +417,6 @@ async fn poll_containers(state: Arc<AppState>) {
                         host:        state.public_host.clone(),
                         port:        c.noise_port,
                         pubkey:      state.pubkey_b32.clone(),
-                        remote:      c.remote,
-                        instance_id: c.instance_id.clone(),
                     })
                     .collect();
 
@@ -451,8 +446,7 @@ fn build_system_prompt() -> String {
 You are the master control node for a fleet of claudulhu coding assistant containers running on Kubernetes.\n\n\
 To create a new child for a Git repository, use the create_container tool — \
 it handles Kubernetes resources (Deployments, Services, PVCs), port assignment (NodePorts 30100–30199), \
-and all required environment variables automatically. \
-Pass remote=true and instance_type to provision an EC2 worker node first.\n\n\
+and all required environment variables automatically.\n\n\
 To send a message to a running child's agent, use message_child(container_name, text). \
 Use this to delegate coding tasks or coordinate work across children.\n\n\
 To permanently remove a child and all its resources, use terminate_container(name).\n\n\
@@ -490,8 +484,7 @@ fn create_container_tool() -> AnthropicTool {
     AnthropicTool {
         name: "create_container".to_string(),
         description: "Create and start a new claudulhu child for a Git repository on Kubernetes. \
-                       Handles port assignment (NodePorts 30100–30199), PVCs, Deployment, and Services. \
-                       Set remote=true to provision an EC2 worker node first; requires instance_type in that case."
+                       Handles port assignment (NodePorts 30100–30199), PVCs, Deployment, and Services."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -502,7 +495,7 @@ fn create_container_tool() -> AnthropicTool {
                 },
                 "name": {
                     "type": "string",
-                    "description": "Optional name override. Defaults to rulyeh-<repo-name>, or rulyeh-workload-<port> if no git_url."
+                    "description": "Optional name override. Defaults to rulyeh-<repo-name>, or rulyeh-workload if no git_url."
                 },
                 "noise_port": {
                     "type": "integer",
@@ -515,14 +508,6 @@ fn create_container_tool() -> AnthropicTool {
                 "startup_prompt": {
                     "type": "string",
                     "description": "Optional initial prompt sent to the child's agentic loop once ready."
-                },
-                "remote": {
-                    "type": "boolean",
-                    "description": "If true, provision an EC2 worker node before scheduling the child."
-                },
-                "instance_type": {
-                    "type": "string",
-                    "description": "EC2 instance type (e.g. t3.medium). Required when remote=true."
                 }
             },
             "required": []
@@ -534,8 +519,7 @@ fn terminate_container_tool() -> AnthropicTool {
     AnthropicTool {
         name: "terminate_container".to_string(),
         description: "Permanently terminate a child and delete all its Kubernetes resources \
-                       (Deployment, Services, PVCs). For remote children, also terminates the EC2 \
-                       instance and removes the K8s node. Irreversible — all PVC data is lost."
+                       (Deployment, Services, PVCs). Irreversible — all PVC data is lost."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -653,13 +637,6 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
             }
         });
 
-    let remote       = input.get("remote").and_then(|v| v.as_bool()).unwrap_or(false);
-    let instance_type = input.get("instance_type").and_then(|v| v.as_str()).map(str::to_string);
-
-    if remote && instance_type.is_none() {
-        return "error: instance_type is required when remote=true".to_string();
-    }
-
     let api_key             = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     let gh_token            = std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty());
     let pub_host            = state.public_host.clone();
@@ -677,78 +654,7 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
         },
     };
 
-    let mut node_selector: Option<std::collections::HashMap<String, String>> = None;
-    let mut ec2_instance_id: Option<String> = None;
-
-    if remote {
-        let sg  = std::env::var("AWS_SECURITY_GROUP_ID").unwrap_or_default();
-        let sub = std::env::var("AWS_SUBNET_ID").ok().filter(|s| !s.is_empty());
-        let cp  = std::env::var("K3S_CONTROL_PLANE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("https://{}:6443", state.public_host));
-        if sg.is_empty() {
-            return "error: AWS_SECURITY_GROUP_ID must be set for remote provisioning".to_string();
-        }
-
-        // Read join token
-        let join_token = match k8s::read_join_token(&state.kube_client).await {
-            Ok(t) => t,
-            Err(e) => return format!("error reading k3s join token: {e}"),
-        };
-
-        // Select latest Ubuntu 24.04 AMI
-        let ami = match aws::describe_latest_ubuntu_ami().await {
-            Ok(a) => a,
-            Err(e) => return format!("error selecting AMI: {e}"),
-        };
-        info!("[rulyeh/create_container] remote ami={ami} instance_type={}", instance_type.as_deref().unwrap_or(""));
-
-        let user_data = format!(
-            "#!/bin/bash\nset -e\ncurl -sfL https://get.k3s.io | K3S_URL={cp} K3S_TOKEN={join_token} K3S_NODE_LABEL=\"claudulhu.child-name={child_name}\" sh -\n"
-        );
-
-        let spec = aws::InstanceSpec {
-            ami: &ami,
-            instance_type: instance_type.as_deref().unwrap_or("t3.medium"),
-            security_group_id: &sg,
-            subnet_id: sub.as_deref(),
-            child_name: &child_name,
-            user_data: &user_data,
-        };
-
-        let instance_id = match aws::run_instance(&spec).await {
-            Ok(id) => id,
-            Err(e) => return format!("error launching EC2 instance: {e}"),
-        };
-        info!("[rulyeh/create_container] launched EC2 {instance_id}");
-
-        // Poll for running state
-        if let Err(e) = aws::wait_for_instance_running(&instance_id).await {
-            return format!("error waiting for EC2 instance: {e}");
-        }
-
-        // Wait for node to join and be Ready
-        let node_name = match k8s::wait_for_node_ready(&state.kube_client, &child_name, 180).await {
-            Ok(n) => n,
-            Err(e) => return format!("error waiting for K8s node: {e}"),
-        };
-
-        // Label the node
-        let mut labels = std::collections::HashMap::new();
-        labels.insert("claudulhu.ec2-instance-id".to_string(), instance_id.clone());
-        labels.insert("claudulhu.child-name".to_string(), child_name.clone());
-        if let Err(e) = k8s::label_node(&state.kube_client, &node_name, &labels).await {
-            error!("[rulyeh/create_container] label node failed: {e}");
-        }
-
-        let mut ns = std::collections::HashMap::new();
-        ns.insert("claudulhu.child-name".to_string(), child_name.clone());
-        node_selector = Some(ns);
-        ec2_instance_id = Some(instance_id);
-    }
-
-    info!("[rulyeh/create_container] creating {child_name} port={noise_port} git={} remote={remote}", git_url.as_deref().unwrap_or("(none)"));
+    info!("[rulyeh/create_container] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
 
     let params = k8s::CreateChildParams {
         name:              &child_name,
@@ -760,9 +666,6 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
         rulyeh_url:        &rulyeh_url,
         startup_script:    startup_script.as_deref(),
         startup_prompt:    startup_prompt.as_deref(),
-        node_selector,
-        remote,
-        instance_id:       ec2_instance_id.as_deref(),
         noise_private_key: &noise_private_key,
     };
 
@@ -786,26 +689,7 @@ async fn exec_terminate_container(state: Arc<AppState>, input: serde_json::Value
         None => return "error: missing 'name' field".to_string(),
     };
 
-    let (remote, instance_id) = {
-        let containers = state.containers.lock().unwrap();
-        containers.iter()
-            .find(|c| c.name == name)
-            .map(|c| (c.remote, c.instance_id.clone()))
-            .unwrap_or((false, None))
-    };
-
-    let node_name = if remote {
-        k8s::find_node_for_child(&state.kube_client, &name).await
-    } else {
-        None
-    };
-
-    match k8s::delete_child_resources(
-        &state.kube_client,
-        &name,
-        node_name.as_deref(),
-        instance_id.as_deref(),
-    ).await {
+    match k8s::delete_child_resources(&state.kube_client, &name).await {
         Ok(_) => {
             state.poll_trigger.notify_one();
             format!("Terminated '{name}' and deleted all resources.")

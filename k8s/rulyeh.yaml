@@ -46,21 +46,6 @@ spec:
                   name: claudulhu-secrets
                   key: gh-token
                   optional: true
-            # Optional: AWS credentials for remote EC2 provisioning
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: claudulhu-secrets
-                  key: aws-access-key-id
-                  optional: true
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: claudulhu-secrets
-                  key: aws-secret-access-key
-                  optional: true
-            - name: AWS_DEFAULT_REGION
-              value: "us-west-2"
             - name: PUBLIC_PORT
               value: "30090"
           volumeMounts:

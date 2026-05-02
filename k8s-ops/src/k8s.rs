@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -26,12 +25,10 @@ const RULYEH_NAME:   &str = "rulyeh";
 // ── Existing child-management types and functions ─────────────────────────────
 
 pub struct ChildInfo {
-    pub name:        String,
-    pub git_url:     String,
-    pub status:      String,
-    pub noise_port:  u16,
-    pub remote:      bool,
-    pub instance_id: Option<String>,
+    pub name:       String,
+    pub git_url:    String,
+    pub status:     String,
+    pub noise_port: u16,
 }
 
 pub async fn build_client() -> anyhow::Result<Client> {
@@ -50,11 +47,8 @@ pub async fn list_managed_deployments(client: &Client) -> anyhow::Result<Vec<Chi
 
     for d in list {
         let name        = d.metadata.name.unwrap_or_default();
-        let labels      = d.metadata.labels.unwrap_or_default();
         let annotations = d.metadata.annotations.unwrap_or_default();
         let git_url     = annotations.get("claudulhu.git_url").cloned().unwrap_or_default();
-        let remote      = labels.get("claudulhu.remote").map(|v| v == "1").unwrap_or(false);
-        let instance_id = labels.get("claudulhu.ec2-instance-id").cloned();
 
         let status = {
             let st        = d.status.as_ref();
@@ -75,7 +69,7 @@ pub async fn list_managed_deployments(client: &Client) -> anyhow::Result<Vec<Chi
             Err(_) => NODEPORT_MIN,
         };
 
-        results.push(ChildInfo { name, git_url, status, noise_port, remote, instance_id });
+        results.push(ChildInfo { name, git_url, status, noise_port });
     }
 
     Ok(results)
@@ -123,9 +117,6 @@ pub struct CreateChildParams<'a> {
     pub rulyeh_url:        &'a str,
     pub startup_script:    Option<&'a str>,
     pub startup_prompt:    Option<&'a str>,
-    pub node_selector:     Option<HashMap<String, String>>,
-    pub remote:            bool,
-    pub instance_id:       Option<&'a str>,
     /// Hex-encoded 64-byte keypair (32 private + 32 public) to inject into the child.
     pub noise_private_key: &'a str,
 }
@@ -165,16 +156,10 @@ async fn create_pvcs(client: &Client, name: &str) -> anyhow::Result<()> {
 async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow::Result<()> {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
 
-    let mut meta_labels = json!({
+    let meta_labels = json!({
         "claudulhu.managed": "1",
         "app": p.name,
     });
-    if p.remote {
-        meta_labels["claudulhu.remote"] = json!("1");
-    }
-    if let Some(iid) = p.instance_id {
-        meta_labels["claudulhu.ec2-instance-id"] = json!(iid);
-    }
 
     let mut meta_annotations = json!({});
     if let Some(url) = p.git_url {
@@ -214,7 +199,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     let data_pvc      = format!("{}-data",      p.name);
     let workspace_pvc = format!("{}-workspace", p.name);
 
-    let mut pod_spec = json!({
+    let pod_spec = json!({
         "containers": [{
             "name": "claudulhu",
             "image": IMAGE,
@@ -235,10 +220,6 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
             {"name": "workspace", "persistentVolumeClaim": {"claimName": workspace_pvc}}
         ]
     });
-    if let Some(ns) = &p.node_selector {
-        pod_spec["nodeSelector"] = serde_json::to_value(ns)?;
-    }
-
     let deployment: Deployment = serde_json::from_value(json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -372,12 +353,7 @@ pub async fn scale_deployment(client: &Client, name: &str, replicas: i32) -> any
     Ok(())
 }
 
-pub async fn delete_child_resources(
-    client: &Client,
-    name: &str,
-    node_name: Option<&str>,
-    instance_id: Option<&str>,
-) -> anyhow::Result<()> {
+pub async fn delete_child_resources(client: &Client, name: &str) -> anyhow::Result<()> {
     if let Err(e) = scale_deployment(client, name, 0).await {
         error!("[k8s] scale-to-0 {name}: {e}");
     }
@@ -398,61 +374,6 @@ pub async fn delete_child_resources(
     pvcs.delete(&format!("{name}-workspace"), &dp).await.ok();
     info!("[k8s] deleted PVCs for {name}");
 
-    if let Some(iid) = instance_id {
-        if let Err(e) = crate::aws::terminate_instance(iid).await {
-            error!("[k8s] terminate EC2 {iid}: {e}");
-        }
-    }
-
-    if let Some(node) = node_name {
-        let nodes: Api<Node> = Api::all(client.clone());
-        nodes.delete(node, &dp).await.ok();
-        info!("[k8s] deleted Node {node}");
-    }
-
-    Ok(())
-}
-
-pub async fn find_node_for_child(client: &Client, child_name: &str) -> Option<String> {
-    let nodes: Api<Node> = Api::all(client.clone());
-    nodes.list(&ListParams::default().labels(&format!("claudulhu.child-name={child_name}")))
-        .await.ok()?
-        .into_iter().next()
-        .and_then(|n| n.metadata.name)
-}
-
-pub async fn wait_for_node_ready(client: &Client, child_name: &str, timeout_secs: u64) -> anyhow::Result<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            anyhow::bail!("timeout waiting for node with label claudulhu.child-name={child_name}");
-        }
-        let nodes: Api<Node> = Api::all(client.clone());
-        let list = nodes.list(&ListParams::default().labels(&format!("claudulhu.child-name={child_name}"))).await?;
-        for node in &list {
-            let ready = node.status.as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
-                .map(|c| c.status == "True")
-                .unwrap_or(false);
-            if ready {
-                let node_name = node.metadata.name.clone().unwrap_or_default();
-                info!("[k8s] node {node_name} is Ready (child={child_name})");
-                return Ok(node_name);
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-}
-
-pub async fn label_node(client: &Client, node_name: &str, labels: &HashMap<String, String>) -> anyhow::Result<()> {
-    let nodes: Api<Node> = Api::all(client.clone());
-    nodes.patch(
-        node_name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({"metadata": {"labels": labels}})),
-    ).await.with_context(|| format!("label node {node_name}"))?;
-    info!("[k8s] labeled node {node_name}");
     Ok(())
 }
 

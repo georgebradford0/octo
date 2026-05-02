@@ -418,7 +418,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claudulhu"
-version = "0.1.0"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "claudulhu-rulyeh"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "axum",
