@@ -50,6 +50,9 @@ enum Command {
         yes: bool,
     },
 
+    /// Update image to latest and restart all pods (rulyeh + all child containers)
+    Restart,
+
     /// Print the CLI version
     Version,
 
@@ -242,6 +245,16 @@ async fn main() -> Result<()> {
             ContainersAction::Delete { name, yes } => containers::delete(&name, yes).await?,
             ContainersAction::Restart { names } => containers::restart(&names).await?,
         },
+        Command::Restart => {
+            use claudulhu_k8s_ops::k8s;
+            let client = k8s::build_client().await?;
+            let updated = k8s::update_and_restart_all(&client).await?;
+            if updated.is_empty() {
+                println!("Nothing restarted.");
+            } else {
+                println!("Updated and restarted: {}", updated.join(", "));
+            }
+        }
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         Command::Update => update().await?,
         Command::Mcp { action } => match action {

@@ -342,6 +342,66 @@ pub async fn restart_deployments(client: &Client, names: &[&str]) -> anyhow::Res
     Ok(restarted)
 }
 
+/// Patch the image to `IMAGE` and bump `restartedAt` on every managed deployment
+/// plus rulyeh itself.  Since `imagePullPolicy: Always` is set on all pods, this
+/// forces each one to pull the latest image on the next start.
+/// Returns the names of deployments that were successfully patched.
+pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<String>> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
+
+    let now = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let s = secs % 60;
+        let m = (secs / 60) % 60;
+        let h = (secs / 3600) % 24;
+        let mut remaining_days = secs / 86400;
+        let mut year = 1970u32;
+        loop {
+            let days_in_year: u64 = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+            if remaining_days < days_in_year { break; }
+            remaining_days -= days_in_year;
+            year += 1;
+        }
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut month = 1u32;
+        for &md in &month_days {
+            if remaining_days < md { break; }
+            remaining_days -= md;
+            month += 1;
+        }
+        let day = remaining_days + 1;
+        format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+    };
+
+    // Collect: all managed children + rulyeh.
+    let mut targets: Vec<(String, &str)> = deployments
+        .list(&ListParams::default().labels("claudulhu.managed=1"))
+        .await
+        .context("list managed deployments")?
+        .iter()
+        .filter_map(|d| d.metadata.name.clone())
+        .map(|n| (n, "claudulhu"))
+        .collect();
+    targets.push((RULYEH_NAME.to_string(), RULYEH_NAME));
+
+    let mut updated = Vec::new();
+    for (name, container_name) in &targets {
+        let patch = json!({
+            "spec": { "template": {
+                "metadata": { "annotations": { "kubectl.kubernetes.io/restartedAt": now } },
+                "spec": { "containers": [{ "name": container_name, "image": IMAGE }] }
+            }}
+        });
+        match deployments.patch(name, &PatchParams::default(), &Patch::Merge(patch)).await {
+            Ok(_)  => { info!("[k8s] updated+restarted Deployment {name}"); updated.push(name.clone()); }
+            Err(e) => { error!("[k8s] update+restart Deployment {name} failed: {e}"); }
+        }
+    }
+    Ok(updated)
+}
+
 pub async fn scale_deployment(client: &Client, name: &str, replicas: i32) -> anyhow::Result<()> {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
     deployments.patch(
