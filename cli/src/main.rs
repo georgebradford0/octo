@@ -143,8 +143,8 @@ enum McpAction {
         #[arg(long)]
         command: String,
 
-        /// Arguments for the command
-        #[arg(long)]
+        /// Arguments for the command (pass after --)
+        #[arg(last = true)]
         args: Vec<String>,
 
         /// Environment variables in KEY=VALUE format

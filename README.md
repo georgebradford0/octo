@@ -70,33 +70,63 @@ Rulyeh creates a Kubernetes Deployment, two PVCs (`/data` and `/workspace`), a C
 ```sh
 claudulhu containers create --git-url https://github.com/user/repo
 claudulhu containers list
-claudulhu containers stop  <name>
-claudulhu containers start <name>
+claudulhu containers stop   <name>
+claudulhu containers start  <name>
 claudulhu containers delete <name>
+```
+
+---
+
+## Operations
+
+### Restart and update
+
+Pull the latest image and restart all pods (rulyeh + all child containers):
+
+```sh
+claudulhu restart
+```
+
+### Logs
+
+```sh
+claudulhu logs            # all pods
+claudulhu logs rulyeh     # rulyeh only
+claudulhu logs -f rulyeh  # follow
 ```
 
 ---
 
 ## MCP tools
 
-MCP servers extend what rulyeh and child containers can do. Add them with the CLI:
+MCP servers extend what rulyeh and child containers can do. Both `npx` and `uvx` are pre-installed in the image. Add servers with the CLI — arguments for the command go after `--`:
 
 ```sh
-# Add an MCP server to rulyeh
-claudulhu mcp add --name github \
-  --command npx --args @modelcontextprotocol/server-github \
-  --env GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...
+# npx-based server
+claudulhu mcp add --name github --command npx \
+  --env GITHUB_PERSONAL_ACCESS_TOKEN=ghp_... \
+  -- -y @modelcontextprotocol/server-github
 
-# Add to a specific child container
-claudulhu mcp add --container rulyeh-myrepo --name linear \
-  --command npx --args @linear/mcp-server \
-  --env LINEAR_API_KEY=lin_api_...
+# uvx-based server
+claudulhu mcp add --name aws-ec2 --command uvx \
+  --env AWS_ACCESS_KEY_ID=... --env AWS_SECRET_ACCESS_KEY=... --env AWS_REGION=us-east-1 \
+  -- awslabs.amazon-ec2-mcp-server
+
+# uv run (for packages without a script entry point)
+claudulhu mcp add --name prime-intellect --command uv \
+  --env PRIME_API_KEY=... \
+  -- run --with prime-mcp-server python -m prime_mcp.mcp
+
+# Add to a specific child container (default is rulyeh)
+claudulhu mcp add --container rulyeh-myrepo --name linear --command npx \
+  --env LINEAR_API_KEY=lin_api_... \
+  -- -y @linear/mcp-server
 
 claudulhu mcp list
 claudulhu mcp remove --name github
 ```
 
-The server config is stored in `/data/mcp.json` inside the container and hot-reloaded within a few seconds.
+`mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. The server config is stored in `/data/mcp.json` inside the container and hot-reloaded within a few seconds — you can also ask rulyeh to add MCP servers directly from chat.
 
 ---
 
