@@ -3,7 +3,7 @@ set -e
 
 REPO="georgebradford0/claudulhu"
 BIN="claudulhu"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="$HOME/.local/bin"
 
 OS=$(uname -s)
 ARCH=$(uname -m)
@@ -28,15 +28,18 @@ esac
 
 URL="https://github.com/${REPO}/releases/latest/download/${ARTIFACT}"
 
-echo "Downloading $ARTIFACT..."
-curl -fsSL "$URL" -o "/tmp/$BIN"
-chmod +x "/tmp/$BIN"
+mkdir -p "$INSTALL_DIR"
 
-if [ -w "$INSTALL_DIR" ]; then
-  mv "/tmp/$BIN" "$INSTALL_DIR/$BIN"
-else
-  sudo mv "/tmp/$BIN" "$INSTALL_DIR/$BIN"
-fi
+echo "Downloading $ARTIFACT..."
+curl -fsSL "$URL" -o "$INSTALL_DIR/$BIN"
+chmod +x "$INSTALL_DIR/$BIN"
 
 echo "Installed to $INSTALL_DIR/$BIN"
-claudulhu --help
+
+# Warn if ~/.local/bin is not in PATH.
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *) echo "Add to your shell: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+esac
+
+"$INSTALL_DIR/$BIN" --help
