@@ -1,5 +1,4 @@
-mod k8s;
-mod aws;
+use claudulhu_k8s_ops::{aws, k8s};
 
 use std::{
     fs,
@@ -31,7 +30,7 @@ use claudulhu_core::{
 };
 use hex;
 use futures_util::{SinkExt, StreamExt};
-use kube::Client;
+use claudulhu_k8s_ops::Client;
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;

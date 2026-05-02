@@ -60,10 +60,7 @@ pub async fn run_instance(spec: &InstanceSpec<'_>) -> anyhow::Result<String> {
     if let Some(subnet) = spec.subnet_id {
         cmd.args(["--subnet-id", subnet]);
     }
-    let out = cmd
-        .output()
-        .await
-        .context("aws run-instances")?;
+    let out = cmd.output().await.context("aws run-instances")?;
     if !out.status.success() {
         anyhow::bail!("aws run-instances: {}", String::from_utf8_lossy(&out.stderr));
     }

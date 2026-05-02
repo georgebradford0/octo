@@ -3,5 +3,7 @@ members = [
     "core",
     "server",
     "rulyeh",
+    "k8s-ops",
+    "cli",
 ]
 resolver = "2"

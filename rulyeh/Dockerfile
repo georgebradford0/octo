@@ -8,24 +8,27 @@ ENV OPENSSL_NO_VENDOR=1
 WORKDIR /build
 
 # Workspace manifest includes all three crates so both binaries are built here.
-RUN printf '[workspace]\nmembers = ["core", "rulyeh", "server"]\nresolver = "2"\n' > Cargo.toml
+RUN printf '[workspace]\nmembers = ["core", "rulyeh", "server", "k8s-ops"]\nresolver = "2"\n' > Cargo.toml
 
 COPY Cargo.lock ./
-COPY core/Cargo.toml   core/
-COPY rulyeh/Cargo.toml rulyeh/
-COPY server/Cargo.toml server/
+COPY core/Cargo.toml    core/
+COPY rulyeh/Cargo.toml  rulyeh/
+COPY server/Cargo.toml  server/
+COPY k8s-ops/Cargo.toml k8s-ops/
 
 # Stub sources for dep-caching layer.
-RUN mkdir -p core/src rulyeh/src server/src && \
+RUN mkdir -p core/src rulyeh/src server/src k8s-ops/src && \
     echo '' > core/src/lib.rs && \
     echo 'fn main() {}' > rulyeh/src/main.rs && \
-    echo 'fn main() {}' > server/src/main.rs
+    echo 'fn main() {}' > server/src/main.rs && \
+    echo '' > k8s-ops/src/lib.rs
 
 RUN cargo fetch
 
-COPY core/src   core/src
-COPY rulyeh/src rulyeh/src
-COPY server/src server/src
+COPY core/src    core/src
+COPY rulyeh/src  rulyeh/src
+COPY server/src  server/src
+COPY k8s-ops/src k8s-ops/src
 
 RUN cargo build --release -p claudulhu-rulyeh -p claudulhu-server
 
