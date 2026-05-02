@@ -1,0 +1,115 @@
+name: CLI Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: claudulhu-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: claudulhu-linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: claudulhu-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: claudulhu-macos-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation toolchain (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release -p claudulhu --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/claudulhu ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts/
+
+      - name: Create GitHub release
+        run: |
+          gh release create "cli-v${{ steps.version.outputs.value }}" \
+            --title "claudulhu CLI v${{ steps.version.outputs.value }}" \
+            --notes "claudulhu cluster management CLI
+
+          ## Installation
+
+          Download the binary for your platform, make it executable, and move it to your PATH:
+
+          \`\`\`sh
+          # macOS (Apple Silicon)
+          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-macos-aarch64 -o claudulhu
+          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+
+          # macOS (Intel)
+          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-macos-x86_64 -o claudulhu
+          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+
+          # Linux (x86_64)
+          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-linux-x86_64 -o claudulhu
+          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+
+          # Linux (aarch64)
+          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-linux-aarch64 -o claudulhu
+          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+          \`\`\`" \
+            artifacts/claudulhu-linux-x86_64/claudulhu-linux-x86_64 \
+            artifacts/claudulhu-linux-aarch64/claudulhu-linux-aarch64 \
+            artifacts/claudulhu-macos-x86_64/claudulhu-macos-x86_64 \
+            artifacts/claudulhu-macos-aarch64/claudulhu-macos-aarch64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
