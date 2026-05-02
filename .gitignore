@@ -11,3 +11,4 @@ deploy/update_remote.sh
 down.sh
 scripts/restart-all.sh
 scripts/restart_rulyeh.sh
+.claude/

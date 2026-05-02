@@ -394,7 +394,7 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
                 "spec": { "containers": [{ "name": container_name, "image": IMAGE }] }
             }}
         });
-        match deployments.patch(name, &PatchParams::default(), &Patch::Merge(patch)).await {
+        match deployments.patch(name, &PatchParams::default(), &Patch::Strategic(patch)).await {
             Ok(_)  => { info!("[k8s] updated+restarted Deployment {name}"); updated.push(name.clone()); }
             Err(e) => { error!("[k8s] update+restart Deployment {name} failed: {e}"); }
         }
