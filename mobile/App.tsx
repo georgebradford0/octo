@@ -533,13 +533,14 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
 const ChatPane = memo(function ChatPane({
-  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange,
+  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange, silentReconnect,
 }: {
-  baseUrl:        string
-  onStatusChange: (s: ConnStatus) => void
-  clearRef:       React.MutableRefObject<() => void>
-  initialDraft?:  string
-  onDraftChange?: (draft: string) => void
+  baseUrl:           string
+  onStatusChange:    (s: ConnStatus) => void
+  clearRef:          React.MutableRefObject<() => void>
+  initialDraft?:     string
+  onDraftChange?:    (draft: string) => void
+  silentReconnect?:  React.MutableRefObject<boolean>
 }) {
   const insets                     = useSafeAreaInsets()
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
@@ -703,11 +704,18 @@ const ChatPane = memo(function ChatPane({
           ...(m.output    != null ? { output: m.output } : {}),
         }))
         const prev = messagesRef.current
-        const unchanged = prev.length === msgs.length && msgs.every((m, i) =>
-          m.role === prev[i].role && m.text === prev[i].text &&
-          m.cost === prev[i].cost && m.output === prev[i].output
-        )
-        if (!unchanged) setMessages(msgs)
+        const eq = (a: Message, b: Message) =>
+          a.role === b.role && a.text === b.text && a.cost === b.cost && a.output === b.output
+        const prefixMatch = prev.length <= msgs.length && prev.every((m, i) => eq(m, msgs[i]))
+        if (!prefixMatch) {
+          // History diverged (clear/edit) — full replace
+          setMessages(msgs)
+        } else if (msgs.length > prev.length) {
+          // Server added messages — append only, preserving existing ids
+          const tail = msgs.slice(prev.length)
+          setMessages(cur => [...cur, ...tail])
+        }
+        // else identical — no update
         if (data.is_streaming) {
           reattachStream()
         } else {
@@ -742,29 +750,27 @@ const ChatPane = memo(function ChatPane({
   }, [draftKey, input])
 
   // Fetch history on mount and when baseUrl changes.
+  // For silent reconnects (same server, new local port) skip the 'connecting' flash.
   useEffect(() => {
-    updateStatus('connecting')
+    const silent = silentReconnect?.current ?? false
+    if (silentReconnect) silentReconnect.current = false  // consume
+    if (!silent) updateStatus('connecting')
     loadHistory()
     return () => { historyAbortRef.current?.abort() }
   }, [baseUrl])
 
-  // Re-fetch history when app foregrounds (tunnel may have reconnected).
+  // Close stale WebSocket when app foregrounds. History reload is handled by
+  // the connection effect in AppInner: it reconnects and sets a new tunnelPort,
+  // which changes baseUrl and triggers loadHistory() above.
   useEffect(() => {
     const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active') {
-        // Close any stale WS before reloading history so reattachStream always
-        // opens a fresh connection (the old one may still appear open on iOS
-        // after backgrounding, causing reattachStream to bail out early and
-        // leaving the screen blank after setMessages replaces the message list).
-        if (wsRef.current) {
-          wsRef.current.close()
-          wsRef.current = null
-        }
-        loadHistory()
+      if (nextState === 'active' && wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
       }
     })
     return () => sub.remove()
-  }, [loadHistory])
+  }, [])
 
   // @ completions
   useEffect(() => {
@@ -990,13 +996,14 @@ const ChatPane = memo(function ChatPane({
 
 // ── ChildChatScreen ───────────────────────────────────────────────────────────
 
-function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange }: {
-  child:          ContainerInfo
-  tunnelPort:     number | null
-  tunnelError:    string | null
-  onClose:        () => void
-  initialDraft?:  string
-  onDraftChange?: (draft: string) => void
+function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange, silentReconnect }: {
+  child:             ContainerInfo
+  tunnelPort:        number | null
+  tunnelError:       string | null
+  onClose:           () => void
+  initialDraft?:     string
+  onDraftChange?:    (draft: string) => void
+  silentReconnect?:  React.MutableRefObject<boolean>
 }) {
   const [chatStatus, setChatStatus] = useState<ConnStatus>('connecting')
   const clearRef = useRef<() => void>(() => {})
@@ -1035,6 +1042,7 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
             clearRef={clearRef}
             initialDraft={initialDraft}
             onDraftChange={onDraftChange}
+            silentReconnect={silentReconnect}
           />
         ) : (
           <View style={s.setupCenter}>
@@ -1091,7 +1099,9 @@ function AppInner() {
   const [startingError,       setStartingError]       = useState<string | null>(null)
   const startingContainerIdRef = useRef<string | null>(null)
   const [reconnectKey, setReconnectKey] = useState(0)
-  const clearChatRef = useRef<() => void>(() => {})
+  const clearChatRef        = useRef<() => void>(() => {})
+  const prevTargetKeyRef    = useRef<string | null>(null)
+  const silentReconnectRef  = useRef<boolean>(false)
   // In-memory draft cache: survives ChatPane unmount/remount without async latency.
   const draftsRef = useRef<Record<string, string>>({})
 
@@ -1118,8 +1128,12 @@ function AppInner() {
   // Connects to whichever target is currently active: child if one is open,
   // master otherwise. On failure from a child, clears activeChild so the
   // effect re-runs immediately and falls back to the master connection.
+  //
+  // Silent reconnect: when the target server hasn't changed (same host/port/pk),
+  // we keep the existing tunnelPort visible so the chat stays on screen while
+  // the native layer reconnects in the background. The connecting banner and full
+  // message reload are suppressed; only new messages are appended.
   useEffect(() => {
-    setTunnelPort(null)
     setTunnelError(null)
 
     const target = activeChild
@@ -1128,24 +1142,35 @@ function AppInner() {
       ? { host: conn.host,        port: conn.port,        pk: conn.pk }
       : null
 
-    if (!target) { log('[noise] no target, skipping connect'); return }
+    if (!target) {
+      log('[noise] no target, skipping connect')
+      setTunnelPort(null)
+      prevTargetKeyRef.current = null
+      silentReconnectRef.current = false
+      return
+    }
+
+    const targetKey = `${target.host}:${target.port}:${target.pk}`
+    const isSilent  = targetKey === prevTargetKeyRef.current
+    prevTargetKeyRef.current   = targetKey
+    silentReconnectRef.current = isSilent
+
+    if (!isSilent) {
+      // Switching to a different server — clear port to show connecting screen.
+      setTunnelPort(null)
+    }
+    // For silent reconnects, keep existing tunnelPort so the UI stays visible.
+
     if (!NoiseConnection) {
       logE('[noise] native module unavailable')
       setTunnelError('Native Noise module unavailable')
       return
     }
 
-    if (activeChild) {
-      log(`[noise] connecting to child "${activeChild.name}" host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}… status=${activeChild.status}`)
-    } else {
-      log(`[noise] connecting to master host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}…`)
-    }
+    log(`[noise] ${isSilent ? 'silent-reconnect' : 'connect'} host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}…`)
 
     let live = true
-    log(`[noise] full pk=${target.pk}`)
-    log(`[noise] calling disconnect() before connect`)
     NoiseConnection.disconnect()
-    log(`[noise] calling connect() host=${target.host} port=${target.port}`)
     const connectStart = Date.now()
     NoiseConnection.connect(target.host, target.port, target.pk)
       .then(port => {
@@ -1159,6 +1184,8 @@ function AppInner() {
         if (activeChild) {
           setActiveChild(null)
         } else {
+          // On silent reconnect failure, clear the port so the error is visible.
+          if (isSilent) setTunnelPort(null)
           setTunnelError(e?.message ?? String(e))
         }
       })
@@ -1324,6 +1351,7 @@ function AppInner() {
         onClose={() => setActiveChild(null)}
         initialDraft={draftsRef.current[childKey]}
         onDraftChange={d => { draftsRef.current[childKey] = d }}
+        silentReconnect={silentReconnectRef}
       />
     )
   }
@@ -1422,6 +1450,7 @@ function AppInner() {
             clearRef={clearChatRef}
             initialDraft={draftsRef.current['master']}
             onDraftChange={d => { draftsRef.current['master'] = d }}
+            silentReconnect={silentReconnectRef}
           />
         )}
 
