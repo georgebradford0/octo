@@ -50,18 +50,25 @@ case "$DETECTED_SHELL" in
     mkdir -p "$COMP_DIR"
     "$INSTALL_DIR/$BIN" completions zsh > "$COMP_DIR/_claudulhu"
     echo "Zsh completions installed to $COMP_DIR/_claudulhu"
-    # Check if fpath line is already present; if not, advise the user.
-    if ! grep -q 'fpath.*\.zfunc' "$HOME/.zshrc" 2>/dev/null; then
-      echo "Add to ~/.zshrc if not already present:"
-      echo "  fpath+=~/.zfunc"
-      echo "  autoload -Uz compinit && compinit"
+    ZSHRC="$HOME/.zshrc"
+    if ! grep -q 'fpath.*\.zfunc' "$ZSHRC" 2>/dev/null; then
+      printf '\nfpath+=~/.zfunc\nautoload -Uz compinit && compinit\n' >> "$ZSHRC"
+      echo "Added fpath and compinit to $ZSHRC"
     fi
     ;;
   bash)
-    COMP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
-    mkdir -p "$COMP_DIR"
-    "$INSTALL_DIR/$BIN" completions bash > "$COMP_DIR/claudulhu"
-    echo "Bash completions installed to $COMP_DIR/claudulhu"
+    COMP_FILE="$HOME/.local/share/bash-completion/completions/claudulhu"
+    mkdir -p "$(dirname "$COMP_FILE")"
+    "$INSTALL_DIR/$BIN" completions bash > "$COMP_FILE"
+    echo "Bash completions installed to $COMP_FILE"
+    # Source the file directly from ~/.bashrc so it works even without the
+    # bash-completion package (which is required for the XDG directory to be
+    # picked up automatically).
+    BASHRC="$HOME/.bashrc"
+    if ! grep -q "claudulhu" "$BASHRC" 2>/dev/null; then
+      printf '\n. %s\n' "$COMP_FILE" >> "$BASHRC"
+      echo "Added completion source to $BASHRC"
+    fi
     ;;
   fish)
     COMP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
