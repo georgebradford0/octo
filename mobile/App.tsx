@@ -759,19 +759,6 @@ const ChatPane = memo(function ChatPane({
     return () => { historyAbortRef.current?.abort() }
   }, [baseUrl])
 
-  // Close stale WebSocket when app foregrounds. History reload is handled by
-  // the connection effect in AppInner: it reconnects and sets a new tunnelPort,
-  // which changes baseUrl and triggers loadHistory() above.
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', nextState => {
-      if (nextState === 'active' && wsRef.current) {
-        wsRef.current.close()
-        wsRef.current = null
-      }
-    })
-    return () => sub.remove()
-  }, [])
-
   // @ completions
   useEffect(() => {
     const parsed = parseAtQuery(input)
