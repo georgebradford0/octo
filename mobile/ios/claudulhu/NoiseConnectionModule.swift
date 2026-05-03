@@ -318,6 +318,12 @@ final class NoiseConnection: NSObject {
     private var listenFd: Int32 = -1
     private let stateLock  = NSLock()
     private var active     = false
+    // Monotonically incremented by disconnect(). Each connect() captures its
+    // value at call time; any in-flight probe or setup that sees a stale
+    // generation aborts without touching shared state. This prevents a slow
+    // probe from a superseded connect() call from clobbering the listen socket
+    // that a subsequent connect() already installed.
+    private var connectGeneration: Int = 0
 
     // Tracks all fds held by active proxyConnection threads so disconnect()
     // can close them immediately, preventing fd recycling races.
@@ -341,6 +347,13 @@ final class NoiseConnection: NSObject {
         resolve: @escaping (Any?) -> Void,
         reject:  @escaping (String?, String?, Error?) -> Void
     ) {
+        // Snapshot generation before going async. A disconnect() that fires while
+        // the probe is in flight will increment connectGeneration, causing the
+        // stale connect() to abort at each checkpoint below.
+        stateLock.lock()
+        let myGen = connectGeneration
+        stateLock.unlock()
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
@@ -363,10 +376,30 @@ final class NoiseConnection: NSObject {
                 Darwin.close(probeFd)
                 print("[noise-proxy] probe OK, host is reachable")
 
+                // Generation check after probe: a disconnect() may have fired while
+                // we were blocked in connectSocket(). Abort rather than installing a
+                // listen socket that would clobber the one a newer connect() already set.
+                self.stateLock.lock()
+                guard self.connectGeneration == myGen else {
+                    self.stateLock.unlock()
+                    print("[noise-proxy] connect() cancelled after probe — superseded by disconnect()")
+                    reject("NOISE_CONNECT_ERROR", "Connection superseded", nil)
+                    return
+                }
+                self.stateLock.unlock()
+
                 let (fd, localPort) = makeServerSocket()
                 guard fd >= 0, localPort > 0 else { throw NoiseError.ioError }
 
+                // Final generation check under lock before installing the listen socket.
                 self.stateLock.lock()
+                guard self.connectGeneration == myGen else {
+                    self.stateLock.unlock()
+                    Darwin.close(fd)
+                    print("[noise-proxy] connect() cancelled before install — superseded by disconnect()")
+                    reject("NOISE_CONNECT_ERROR", "Connection superseded", nil)
+                    return
+                }
                 let oldFd = self.listenFd
                 self.listenFd = fd
                 self.active   = true
@@ -375,7 +408,9 @@ final class NoiseConnection: NSObject {
                 // Close the old listen socket (if any) after installing the new one.
                 if oldFd >= 0 { Darwin.close(oldFd) }
 
-                DispatchQueue.global(qos: .utility).async { [weak self] in self?.acceptLoop(fd: fd, host: host, port: Int(port), serverPub: pk) }
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    self?.acceptLoop(fd: fd, host: host, port: Int(port), serverPub: pk, generation: myGen)
+                }
 
                 resolve(localPort)
             } catch {
@@ -387,6 +422,7 @@ final class NoiseConnection: NSObject {
     @objc func disconnect() {
         stateLock.lock()
         active = false
+        connectGeneration += 1   // invalidates any in-flight connect() calls
         let fd = listenFd; listenFd = -1
         stateLock.unlock()
         if fd >= 0 { Darwin.close(fd) }
@@ -400,28 +436,50 @@ final class NoiseConnection: NSObject {
         fds.forEach { Darwin.close($0) }
     }
 
-    private func acceptLoop(fd: Int32, host: String, port: Int, serverPub: Data) {
+    private func acceptLoop(fd: Int32, host: String, port: Int, serverPub: Data, generation: Int) {
         while true {
-            stateLock.lock(); let alive = active; stateLock.unlock()
+            stateLock.lock()
+            let alive = active && connectGeneration == generation
+            stateLock.unlock()
             guard alive else { break }
             let clientFd = Darwin.accept(fd, nil, nil)
             if clientFd < 0 { break }
             DispatchQueue.global(qos: .utility).async {
-                self.proxyConnection(localFd: clientFd, host: host, port: port, serverPub: serverPub)
+                self.proxyConnection(localFd: clientFd, host: host, port: port, serverPub: serverPub, generation: generation)
             }
         }
     }
 
-    private func proxyConnection(localFd: Int32, host: String, port: Int, serverPub: Data) {
+    private func proxyConnection(localFd: Int32, host: String, port: Int, serverPub: Data, generation: Int) {
+        // Register localFd immediately so disconnect() can close it even while we
+        // are blocked inside connectSocket(). Without this, a disconnect() that fires
+        // between accept() and the insert below would leave localFd open and let this
+        // closure run against a stale session.
+        proxyFdsLock.lock(); proxyFds.insert(localFd); proxyFdsLock.unlock()
+
         print("[noise-proxy] local client accepted; connecting to \(host):\(port)…")
         let remoteFd = connectSocket(host: host, port: port)
         guard remoteFd >= 0 else {
             print("[noise-proxy] connectSocket to \(host):\(port) FAILED (errno=\(errno))")
-            Darwin.close(localFd)
+            proxyFdsLock.lock()
+            let owned = proxyFds.remove(localFd) != nil
+            proxyFdsLock.unlock()
+            if owned { Darwin.close(localFd) }
             return
         }
 
-        proxyFdsLock.lock(); proxyFds.insert(localFd); proxyFds.insert(remoteFd); proxyFdsLock.unlock()
+        // Check generation after connectSocket — disconnect() may have closed localFd
+        // while we were blocked. Abort without touching any new-session state.
+        stateLock.lock()
+        let stillCurrent = connectGeneration == generation
+        stateLock.unlock()
+        guard stillCurrent else {
+            Darwin.close(remoteFd)   // remoteFd was never in proxyFds; close it directly
+            print("[noise-proxy] proxyConnection cancelled after connectSocket — stale generation")
+            return
+        }
+
+        proxyFdsLock.lock(); proxyFds.insert(remoteFd); proxyFdsLock.unlock()
 
         // Close both fds, but only if disconnect() hasn't already done so.
         // disconnect() removes fds from proxyFds before closing them, so if
