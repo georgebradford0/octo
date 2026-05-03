@@ -5,7 +5,8 @@ mod mcp;
 use claudulhu_k8s_ops;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 
 #[derive(Parser)]
 #[command(name = "claudulhu", about = "claudulhu cluster management CLI")]
@@ -72,6 +73,12 @@ enum Command {
 
     /// Update the claudulhu CLI to the latest release
     Update,
+
+    /// Generate shell tab-completion script
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
 
     /// Manage MCP tools in a container
     Mcp {
@@ -308,6 +315,9 @@ async fn main() -> Result<()> {
         }
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         Command::Update => update().await?,
+        Command::Completions { shell } => {
+            generate(shell, &mut Cli::command(), "claudulhu", &mut std::io::stdout());
+        }
         Command::Mcp { action } => match action {
             McpAction::List { container } => mcp::list(&container).await?,
             McpAction::Add { container, name, command, args, env } => {
