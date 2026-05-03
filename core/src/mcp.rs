@@ -291,6 +291,16 @@ pub async fn init_mcp_pool() -> McpPool {
             inner.push(std::sync::Arc::new(Mutex::new(client)));
         }
     }
+    if !configs.is_empty() {
+        let connected = inner.len();
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        eprintln!(
+            "[mcp] initialised {}/{} server(s) from config: {}",
+            connected,
+            configs.len(),
+            names.join(", ")
+        );
+    }
     let pool = std::sync::Arc::new(RwLock::new(inner));
     start_mcp_watcher(pool.clone());
     pool
