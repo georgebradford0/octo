@@ -22,28 +22,28 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
 
     let client = k8s::build_client().await?;
 
-    println!("→ namespace");
+    println!("Ensuring claudulhu namespace...");
     k8s::ensure_namespace(&client).await?;
-    println!("→ RBAC");
+    println!("Configuring RBAC...");
     k8s::ensure_rbac(&client).await?;
-    println!("→ secrets");
+    println!("Storing API keys and keypair in cluster secret...");
     k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex, mcp_config_json.as_deref()).await?;
-    println!("→ PVC");
+    println!("Provisioning rulyeh data volume...");
     k8s::ensure_rulyeh_pvc(&client).await?;
-    println!("→ deployment");
+    println!("Applying rulyeh Deployment...");
     k8s::upsert_rulyeh_deployment(&client, noise_port).await?;
-    println!("→ services");
+    println!("Configuring ClusterIP and NodePort services...");
     k8s::ensure_rulyeh_services(&client, noise_port).await?;
 
     if public_port != noise_port {
-        println!("→ socat proxy ({public_port} → {noise_port})");
+        println!("Setting up socat proxy ({public_port} -> {noise_port})...");
         ensure_socat_proxy(public_port, noise_port).await?;
     }
 
     // Restart so the pod loads the new keypair from the secret before we print the QR.
-    println!("→ restarting rulyeh to apply new keypair...");
+    println!("Restarting rulyeh to load new keypair...");
     k8s::rollout_restart_deployment(&client, "rulyeh").await?;
-    println!("→ waiting for rulyeh to be ready...");
+    println!("Waiting for rulyeh to be ready...");
     k8s::wait_for_deployment_ready(&client, "rulyeh", 180).await?;
 
     let ip = k8s::get_public_ip_via_pod(&client, "rulyeh").await?;
@@ -64,7 +64,7 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
 }
 
 fn generate_keypair() -> Result<(String, String)> {
-    println!("→ generating new Noise keypair");
+    println!("Generating Noise_XX_25519 keypair...");
     let builder = snow::Builder::new(
         "Noise_XX_25519_ChaChaPoly_SHA256".parse().context("parse noise params")?,
     );
