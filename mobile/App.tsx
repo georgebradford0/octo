@@ -52,6 +52,7 @@ interface Message {
   cost?:      number
   toolUseId?: string
   output?:    string
+  prevRole?:  Message['role']
 }
 
 // ── Logging ────────────────────────────────────────────────────────────────────
@@ -64,6 +65,16 @@ const logE = (...args: unknown[]) => console.error(`[${ts()}] ERROR`, ...args)
 
 let _id = 0
 const uid = () => `m${Date.now()}_${++_id}`
+
+/** Stamp prevRole on every message so renderItem never needs to close over the full array. */
+const withPrevRoles = (msgs: Message[]): Message[] =>
+  msgs.map((m, i) => ({ ...m, prevRole: i > 0 ? msgs[i - 1].role : undefined }))
+
+/** Append one message to an existing array and re-stamp only the new entry's prevRole. */
+const appendMsg = (prev: Message[], msg: Message): Message[] => {
+  const stamped = { ...msg, prevRole: prev.length > 0 ? prev[prev.length - 1].role : undefined }
+  return [...prev, stamped]
+}
 
 const formatCost = (usd: number) =>
   usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`
@@ -609,7 +620,7 @@ const ChatPane = memo(function ChatPane({
       if (!opts.hasAssistantMsgRef.current) {
         opts.hasAssistantMsgRef.current = true
         opts.onFirstChunk?.(opts.streamingIdRef.current)
-        setMessages(prev => [...prev, { id: opts.streamingIdRef.current, role: 'assistant' as const, text: chunk }])
+        setMessages(prev => appendMsg(prev, { id: opts.streamingIdRef.current, role: 'assistant' as const, text: chunk }))
       } else {
         setMessages(prev => prev.map(m => m.id === opts.streamingIdRef.current ? { ...m, text: m.text + chunk } : m))
       }
@@ -623,7 +634,7 @@ const ChatPane = memo(function ChatPane({
       log(`[chat] tool_use tool=${event.tool}`)
       const toolId = uid()
       lastToolIdRef.current = toolId
-      setMessages(prev => [...prev, { id: toolId, role: 'tool' as const, text: toolText, toolUseId: event.tool_use_id }])
+      setMessages(prev => appendMsg(prev, { id: toolId, role: 'tool' as const, text: toolText, toolUseId: event.tool_use_id }))
     } else if (event.type === 'tool_output' && event.line != null) {
       const toolId = lastToolIdRef.current
       if (toolId) {
@@ -661,7 +672,7 @@ const ChatPane = memo(function ChatPane({
       lastToolIdRef.current = null
       wsRef.current = null
       opts.onStreamEnd?.()
-      setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }])
+      setMessages(prev => appendMsg(prev, { id: uid(), role: 'assistant' as const, text: `\u2717 ${event.message ?? 'error'}` }))
       updateStatus('ready')
     }
   }, [updateStatus])
@@ -719,13 +730,13 @@ const ChatPane = memo(function ChatPane({
       .then(r => { log(`[chat] loadHistory HTTP ${r.status}`); return r.json() })
       .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number; output?: string }>; is_streaming?: boolean }) => {
         log(`[chat] history loaded ${data.messages.length} messages is_streaming=${data.is_streaming}`)
-        const msgs: Message[] = data.messages.map((m, i) => ({
+        const msgs: Message[] = withPrevRoles(data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
           text: m.text,
           ...(m.cost_usd != null ? { cost: m.cost_usd } : {}),
           ...(m.output    != null ? { output: m.output } : {}),
-        }))
+        })))
         const prev = messagesRef.current
         const eq = (a: Message, b: Message) =>
           a.role === b.role && a.text === b.text && a.cost === b.cost && a.output === b.output
@@ -736,7 +747,7 @@ const ChatPane = memo(function ChatPane({
         } else if (msgs.length > prev.length) {
           // Server added messages — append only, preserving existing ids
           const tail = msgs.slice(prev.length)
-          setMessages(cur => [...cur, ...tail])
+          setMessages(cur => [...cur, ...tail.map((m, j) => ({ ...m, prevRole: j === 0 ? (cur.length > 0 ? cur[cur.length - 1].role : undefined) : tail[j - 1].role }))])
         }
         // else identical — no update
         if (data.is_streaming) {
@@ -814,7 +825,7 @@ const ChatPane = memo(function ChatPane({
     if (!text || status === 'streaming') return
 
     log(`[chat] sendMessage (${text.length} chars): ${text.slice(0, 80)}`)
-    setMessages(prev => [...prev, { id: uid(), role: 'user' as const, text }])
+    setMessages(prev => appendMsg(prev, { id: uid(), role: 'user' as const, text }))
     isAtBottomRef.current = true
     setInput('')
     AsyncStorage.removeItem(draftKey).catch(() => {})
@@ -846,7 +857,7 @@ const ChatPane = memo(function ChatPane({
       wsRef.current = null
       setStreamingMsgId(null)
       if (!closingRef.current) {
-        setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
+        setMessages(prev => appendMsg(prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }))
         updateStatus('error')
       }
       closingRef.current = false
@@ -877,13 +888,13 @@ const ChatPane = memo(function ChatPane({
     }
   }, [isPending])
 
-  const renderMessageItem = useCallback(({ item, index }: { item: Message; index: number }) => (
+  const renderMessageItem = useCallback(({ item }: { item: Message }) => (
     <MessageBubble
       message={item}
-      prevRole={index > 0 ? messages[index - 1].role : undefined}
+      prevRole={item.prevRole}
       isLive={item.id === streamingMsgId}
     />
-  ), [messages, streamingMsgId])
+  ), [streamingMsgId])
 
   return (
     <View style={s.pane}>
@@ -957,9 +968,9 @@ const ChatPane = memo(function ChatPane({
                   }, 3000)
                   const toolId = lastToolIdRef.current
                   if (toolId) {
-                    setMessages(prev => prev.map(m =>
+                    setMessages(prev => withPrevRoles(prev.map(m =>
                       m.id === toolId ? { ...m, role: 'interrupted' as const } : m
-                    ))
+                    )))
                     lastToolIdRef.current = null
                   }
                 }
