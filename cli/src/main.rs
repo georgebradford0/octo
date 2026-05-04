@@ -55,7 +55,7 @@ enum Command {
         yes: bool,
     },
 
-    /// Update image to latest and restart all pods (rulyeh + all child containers)
+    /// Update image to latest and restart rulyeh
     Reload,
 
     /// Show logs for a container (all containers if no name given)
@@ -349,11 +349,11 @@ async fn main() -> Result<()> {
         Command::Reload => {
             use claudulhu_k8s_ops::k8s;
             let client = k8s::build_client().await?;
-            let updated = k8s::update_and_restart_all(&client).await?;
+            let updated = k8s::restart_deployments(&client, &["rulyeh"]).await?;
             if updated.is_empty() {
                 println!("Nothing restarted.");
             } else {
-                println!("Updated and restarted: {}", updated.join(", "));
+                println!("Restarted: {}", updated.join(", "));
             }
         }
         Command::Logs { name, follow } => {
