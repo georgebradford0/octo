@@ -56,7 +56,7 @@ enum Command {
     },
 
     /// Update image to latest and restart all pods (rulyeh + all child containers)
-    Restart,
+    Reload,
 
     /// Show logs for a container (all containers if no name given)
     Logs {
@@ -133,7 +133,7 @@ enum ContainersAction {
     },
 
     /// Rollout-restart one or more containers (all managed containers if none specified)
-    Restart {
+    Reload {
         names: Vec<String>,
     },
 }
@@ -344,9 +344,9 @@ async fn main() -> Result<()> {
             ContainersAction::Start { name } => containers::start(&name).await?,
             ContainersAction::Stop  { name } => containers::stop(&name).await?,
             ContainersAction::Delete { name, yes } => containers::delete(&name, yes).await?,
-            ContainersAction::Restart { names } => containers::restart(&names).await?,
+            ContainersAction::Reload { names } => containers::restart(&names).await?,
         },
-        Command::Restart => {
+        Command::Reload => {
             use claudulhu_k8s_ops::k8s;
             let client = k8s::build_client().await?;
             let updated = k8s::update_and_restart_all(&client).await?;
