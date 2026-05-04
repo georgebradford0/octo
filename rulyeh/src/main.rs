@@ -444,12 +444,12 @@ async fn poll_containers(state: Arc<AppState>) {
 fn build_system_prompt() -> String {
     "\
 You are the master control node for a fleet of claudulhu coding assistant containers running on Kubernetes.\n\n\
-To create a new child for a Git repository, use the create_container tool — \
+To create a new child for a Git repository, use the create_pod tool — \
 it handles Kubernetes resources (Deployments, Services, PVCs), port assignment (NodePorts 30100–30199), \
 and all required environment variables automatically.\n\n\
 To send a message to a running child's agent, use message_child(container_name, text). \
 Use this to delegate coding tasks or coordinate work across children.\n\n\
-To permanently remove a child and all its resources, use terminate_container(name).\n\n\
+To permanently remove a child and all its resources, use terminate_pod(name).\n\n\
 Be concise and direct."
         .to_string()
 }
@@ -479,9 +479,9 @@ fn message_child_tool() -> AnthropicTool {
     }
 }
 
-fn create_container_tool() -> AnthropicTool {
+fn create_pod_tool() -> AnthropicTool {
     AnthropicTool {
-        name: "create_container".to_string(),
+        name: "create_pod".to_string(),
         description: "Create and start a new claudulhu child for a Git repository on Kubernetes. \
                        Handles port assignment (NodePorts 30100–30199), PVCs, Deployment, and Services."
             .to_string(),
@@ -514,9 +514,9 @@ fn create_container_tool() -> AnthropicTool {
     }
 }
 
-fn terminate_container_tool() -> AnthropicTool {
+fn terminate_pod_tool() -> AnthropicTool {
     AnthropicTool {
-        name: "terminate_container".to_string(),
+        name: "terminate_pod".to_string(),
         description: "Permanently terminate a child and delete all its Kubernetes resources \
                        (Deployment, Services, PVCs). Irreversible — all PVC data is lost."
             .to_string(),
@@ -549,7 +549,7 @@ fn restart_all_containers_tool() -> AnthropicTool {
 }
 
 fn rulyeh_extra_tools() -> Vec<AnthropicTool> {
-    vec![message_child_tool(), create_container_tool(), terminate_container_tool(), restart_all_containers_tool()]
+    vec![message_child_tool(), create_pod_tool(), terminate_pod_tool(), restart_all_containers_tool()]
 }
 
 fn rulyeh_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_json::Value)
@@ -567,8 +567,8 @@ fn rulyeh_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serd
         Box::pin(async move {
             match name.as_str() {
                 "message_child" => exec_message_child(client, input).await,
-                "create_container" => exec_create_container(state, input).await,
-                "terminate_container" => exec_terminate_container(state, input).await,
+                "create_pod" => exec_create_pod(state, input).await,
+                "terminate_pod" => exec_terminate_pod(state, input).await,
                 "restart_all_containers" => exec_restart_all_containers(state).await,
                 other => format!("unknown tool: {other}"),
             }
@@ -616,7 +616,7 @@ async fn exec_message_child(client: reqwest::Client, input: serde_json::Value) -
     }
 }
 
-async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -> String {
+async fn exec_create_pod(state: Arc<AppState>, input: serde_json::Value) -> String {
     let git_url = input.get("git_url").and_then(|v| v.as_str()).map(str::to_string);
 
     let child_name = input.get("name").and_then(|v| v.as_str())
@@ -653,7 +653,7 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
         },
     };
 
-    info!("[rulyeh/create_container] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
+    info!("[rulyeh/create_pod] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
 
     let params = k8s::CreateChildParams {
         name:              &child_name,
@@ -670,19 +670,19 @@ async fn exec_create_container(state: Arc<AppState>, input: serde_json::Value) -
 
     match k8s::create_child_resources(&state.kube_client, &params).await {
         Ok(_) => {
-            info!("[rulyeh/create_container] created {child_name}");
+            info!("[rulyeh/create_pod] created {child_name}");
             tokio::time::sleep(Duration::from_secs(3)).await;
             state.poll_trigger.notify_one();
             format!("Created child '{child_name}' on NodePort {noise_port}.")
         }
         Err(e) => {
-            error!("[rulyeh/create_container] failed: {e:#}");
+            error!("[rulyeh/create_pod] failed: {e:#}");
             format!("error: {e:#}")
         }
     }
 }
 
-async fn exec_terminate_container(state: Arc<AppState>, input: serde_json::Value) -> String {
+async fn exec_terminate_pod(state: Arc<AppState>, input: serde_json::Value) -> String {
     let name = match input.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return "error: missing 'name' field".to_string(),
