@@ -140,21 +140,21 @@ const statusColor = (st: ConnStatus): string => {
 
 // ── Text rendering ─────────────────────────────────────────────────────────────
 
-// Render inline markdown spans: **bold**, *italic*, _italic_, ~~strike~~, `code`
+// Render inline markdown spans: **bold**, *italic*, ~~strike~~, `code`
 // within a single line of text (fenced code blocks already stripped before this).
+// Note: _italic_ is intentionally not supported to avoid false matches on snake_case identifiers.
 function renderInlineSpans(text: string, baseStyle: object, key: React.Key): React.ReactNode {
   // Tokenise into bold / italic / strikethrough / inline-code / plain segments.
   const tokens: Array<{ kind: 'bold' | 'italic' | 'strike' | 'code' | 'plain'; value: string }> = []
-  const re = /\*\*(.+?)\*\*|__(.+?)__|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!_)(.+?)(?<!_)_(?!_)|~~(.+?)~~|`([^`]+)`/gs
+  const re = /\*\*(.+?)\*\*|__(.+?)__|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|~~(.+?)~~|`([^`]+)`/gs
   let last = 0, m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) tokens.push({ kind: 'plain', value: text.slice(last, m.index) })
     if      (m[1] != null) tokens.push({ kind: 'bold',   value: m[1] })
     else if (m[2] != null) tokens.push({ kind: 'bold',   value: m[2] })
     else if (m[3] != null) tokens.push({ kind: 'italic', value: m[3] })
-    else if (m[4] != null) tokens.push({ kind: 'italic', value: m[4] })
-    else if (m[5] != null) tokens.push({ kind: 'strike', value: m[5] })
-    else if (m[6] != null) tokens.push({ kind: 'code',   value: m[6] })
+    else if (m[4] != null) tokens.push({ kind: 'strike', value: m[4] })
+    else if (m[5] != null) tokens.push({ kind: 'code',   value: m[5] })
     last = m.index + m[0].length
   }
   if (last < text.length) tokens.push({ kind: 'plain', value: text.slice(last) })
@@ -533,7 +533,7 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
 const ChatPane = memo(function ChatPane({
-  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange, silentReconnect,
+  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange, silentReconnect, reloadRef, closeWsRef,
 }: {
   baseUrl:           string
   onStatusChange:    (s: ConnStatus) => void
@@ -541,6 +541,8 @@ const ChatPane = memo(function ChatPane({
   initialDraft?:     string
   onDraftChange?:    (draft: string) => void
   silentReconnect?:  React.MutableRefObject<boolean>
+  reloadRef?:        React.MutableRefObject<() => void>
+  closeWsRef?:       React.MutableRefObject<() => void>
 }) {
   const insets                     = useSafeAreaInsets()
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
@@ -560,6 +562,7 @@ const ChatPane = memo(function ChatPane({
 
   const sendMessageRef    = useRef<() => void>(() => {})
   const wsRef             = useRef<WebSocket | null>(null)
+  const closingRef        = useRef(false)
   const listRef           = useRef<FlatList<Message>>(null)
   const isAtBottomRef     = useRef(true)
   const contentHeightRef  = useRef(0)
@@ -569,6 +572,17 @@ const ChatPane = memo(function ChatPane({
   const messagesRef       = useRef<Message[]>([])
 
   useEffect(() => { messagesRef.current = messages }, [messages])
+
+  // Expose imperative handles to the parent.
+  useEffect(() => {
+    if (closeWsRef) closeWsRef.current = () => {
+      if (wsRef.current) {
+        closingRef.current = true
+        wsRef.current.close()
+        wsRef.current = null
+      }
+    }
+  }, [closeWsRef])
 
   const updateStatus = useCallback((s: ConnStatus) => {
     setStatus(s)
@@ -676,10 +690,12 @@ const ChatPane = memo(function ChatPane({
       logE(`[chat] reattachStream ws error after ${Date.now() - wsStart}ms: ${JSON.stringify(e)}`)
       wsRef.current = null
       setStreamingMsgId(null)
-      updateStatus('error')
+      if (!closingRef.current) updateStatus('error')
+      closingRef.current = false
     }
     ws.onclose = (e) => {
       log(`[chat] reattachStream ws closed after ${Date.now() - wsStart}ms code=${e.code} reason=${e.reason}`)
+      closingRef.current = false
     }
   }, [baseUrl, handleStreamEvent, updateStatus])
 
@@ -734,6 +750,7 @@ const ChatPane = memo(function ChatPane({
   }, [baseUrl, reattachStream, updateStatus])
 
   useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
+  useEffect(() => { if (reloadRef) reloadRef.current = loadHistory }, [loadHistory, reloadRef])
 
   // Restore draft input on mount / baseUrl change.
   // Restore draft on mount / baseUrl change (cold-start fallback; skipped if
@@ -821,11 +838,15 @@ const ChatPane = memo(function ChatPane({
       logE(`[chat] ws error after ${Date.now() - wsSendStart}ms: ${JSON.stringify(e)}`)
       wsRef.current = null
       setStreamingMsgId(null)
-      setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
-      updateStatus('error')
+      if (!closingRef.current) {
+        setMessages(prev => [...prev, { id: uid(), role: 'assistant' as const, text: '\u2717 network error' }])
+        updateStatus('error')
+      }
+      closingRef.current = false
     }
     ws.onclose = (e) => {
       log(`[chat] ws closed after ${Date.now() - wsSendStart}ms code=${e.code} reason=${e.reason}`)
+      closingRef.current = false
     }
   }, [input, status, baseUrl, handleStreamEvent, updateStatus])
 
@@ -980,7 +1001,7 @@ const ChatPane = memo(function ChatPane({
 
 // ── ChildChatScreen ───────────────────────────────────────────────────────────
 
-function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange, silentReconnect }: {
+function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange, silentReconnect, reloadRef, closeWsRef }: {
   child:             ContainerInfo
   tunnelPort:        number | null
   tunnelError:       string | null
@@ -988,6 +1009,8 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
   initialDraft?:     string
   onDraftChange?:    (draft: string) => void
   silentReconnect?:  React.MutableRefObject<boolean>
+  reloadRef?:        React.MutableRefObject<() => void>
+  closeWsRef?:       React.MutableRefObject<() => void>
 }) {
   const [chatStatus, setChatStatus] = useState<ConnStatus>('connecting')
   const clearRef = useRef<() => void>(() => {})
@@ -1027,6 +1050,8 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
             initialDraft={initialDraft}
             onDraftChange={onDraftChange}
             silentReconnect={silentReconnect}
+            reloadRef={reloadRef}
+            closeWsRef={closeWsRef}
           />
         ) : tunnelError ? (
           <View style={s.setupCenter}>
@@ -1084,6 +1109,8 @@ function AppInner() {
   const clearChatRef        = useRef<() => void>(() => {})
   const prevTargetKeyRef    = useRef<string | null>(null)
   const silentReconnectRef  = useRef<boolean>(false)
+  const reloadRef           = useRef<() => void>(() => {})
+  const closeWsRef          = useRef<() => void>(() => {})
   // In-memory draft cache: survives ChatPane unmount/remount without async latency.
   const draftsRef = useRef<Record<string, string>>({})
 
@@ -1159,6 +1186,10 @@ function AppInner() {
         log(`[noise] connect() resolved in ${Date.now() - connectStart}ms → local port ${port}`)
         if (!live) { log('[noise] connect resolved but effect already cleaned up — discarding'); return }
         setTunnelPort(port)
+        if (isSilent) {
+          // Tunnel re-established — now reload history.
+          reloadRef.current()
+        }
       })
       .catch(e => {
         logE(`[noise] connect() rejected in ${Date.now() - connectStart}ms: ${e?.message ?? String(e)}`)
@@ -1182,7 +1213,10 @@ function AppInner() {
   // Single AppState listener — bumps reconnectKey to re-run the connection effect.
   useEffect(() => {
     const sub = AppState.addEventListener('change', state => {
-      if (state === 'active') setReconnectKey(k => k + 1)
+      if (state === 'active') {
+        closeWsRef.current()   // close existing WS cleanly before tunnel drops
+        setReconnectKey(k => k + 1)
+      }
     })
     return () => sub.remove()
   }, [])
@@ -1344,6 +1378,8 @@ function AppInner() {
         initialDraft={draftsRef.current[childKey]}
         onDraftChange={d => { draftsRef.current[childKey] = d }}
         silentReconnect={silentReconnectRef}
+        reloadRef={reloadRef}
+        closeWsRef={closeWsRef}
       />
     )
   }
@@ -1383,6 +1419,8 @@ function AppInner() {
             initialDraft={draftsRef.current['master']}
             onDraftChange={d => { draftsRef.current['master'] = d }}
             silentReconnect={silentReconnectRef}
+            reloadRef={reloadRef}
+            closeWsRef={closeWsRef}
           />
         )}
 
