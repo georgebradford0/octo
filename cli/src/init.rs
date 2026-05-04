@@ -13,10 +13,26 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("read mcp config {}", path.display()))?;
-            // Validate it parses as a JSON array before storing.
-            serde_json::from_str::<serde_json::Value>(&text)
+            let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
                 .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
-            Some(text)
+            // Expand ${VAR} references in env values using the local environment,
+            // since the pod won't have access to the user's shell environment.
+            for server in &mut servers {
+                if let Some(env) = server.get_mut("env").and_then(|e| e.as_object_mut()) {
+                    for (_, val) in env.iter_mut() {
+                        if let Some(s) = val.as_str() {
+                            if s.starts_with("${") && s.ends_with('}') {
+                                let var = &s[2..s.len() - 1];
+                                match std::env::var(var) {
+                                    Ok(resolved) => *val = serde_json::Value::String(resolved),
+                                    Err(_) => eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded"),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some(serde_json::to_string(&servers)?)
         }
     };
 
