@@ -150,7 +150,21 @@ pub async fn import_from_file(container: &str, path: &std::path::Path) -> Result
     let mut failed = 0usize;
     for entry in &entries {
         let env_pairs: Vec<String> = entry.env.iter()
-            .map(|(k, v)| format!("{k}={v}"))
+            .map(|(k, v)| {
+                let resolved = if v.starts_with("${") && v.ends_with('}') {
+                    let var = &v[2..v.len() - 1];
+                    match std::env::var(var) {
+                        Ok(val) => val,
+                        Err(_) => {
+                            eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded");
+                            v.clone()
+                        }
+                    }
+                } else {
+                    v.clone()
+                };
+                format!("{k}={resolved}")
+            })
             .collect();
         if let Err(e) = add(container, &entry.name, &entry.command, &entry.args, &env_pairs).await {
             eprintln!("✗ '{}': {e}", entry.name);
