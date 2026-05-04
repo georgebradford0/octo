@@ -55,8 +55,15 @@ enum Command {
         yes: bool,
     },
 
-    /// Update image to latest and restart rulyeh
-    Reload,
+    /// Reload containers (default: rulyeh only)
+    Reload {
+        /// Specific child containers to reload (by name)
+        #[arg(long, value_name = "NAME", num_args = 1..)]
+        containers: Vec<String>,
+        /// Reload all containers (rulyeh + all managed children)
+        #[arg(long, conflicts_with = "containers")]
+        all: bool,
+    },
 
     /// Show logs for a container (all containers if no name given)
     Logs {
@@ -130,11 +137,6 @@ enum ContainersAction {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
-    },
-
-    /// Rollout-restart one or more containers (all managed containers if none specified)
-    Reload {
-        names: Vec<String>,
     },
 }
 
@@ -344,12 +346,18 @@ async fn main() -> Result<()> {
             ContainersAction::Start { name } => containers::start(&name).await?,
             ContainersAction::Stop  { name } => containers::stop(&name).await?,
             ContainersAction::Delete { name, yes } => containers::delete(&name, yes).await?,
-            ContainersAction::Reload { names } => containers::restart(&names).await?,
         },
-        Command::Reload => {
+        Command::Reload { containers, all } => {
             use claudulhu_k8s_ops::k8s;
             let client = k8s::build_client().await?;
-            let updated = k8s::restart_deployments(&client, &["rulyeh"]).await?;
+            let updated = if all {
+                k8s::update_and_restart_all(&client).await?
+            } else if !containers.is_empty() {
+                let names: Vec<&str> = containers.iter().map(|s| s.as_str()).collect();
+                k8s::restart_deployments(&client, &names).await?
+            } else {
+                k8s::restart_deployments(&client, &["rulyeh"]).await?
+            };
             if updated.is_empty() {
                 println!("Nothing restarted.");
             } else {
