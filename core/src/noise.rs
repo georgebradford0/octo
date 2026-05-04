@@ -2,6 +2,17 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// Returned when a connection closes before sending any handshake bytes.
+/// This is normal for TCP probes and reconnect races; not a real error.
+#[derive(Debug)]
+pub struct ProbeClosed;
+impl std::fmt::Display for ProbeClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "connection closed before handshake")
+    }
+}
+impl std::error::Error for ProbeClosed {}
+
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 
 /// Fixed dev keypair — always the same so the mobile app can hardcode the public key.
@@ -80,7 +91,19 @@ pub async fn noise_handshake(
     let builder = snow::Builder::new(NOISE_PATTERN.parse()?);
     let mut hs = builder.local_private_key(static_private).build_responder()?;
     let mut payload = vec![0u8; 65535];
-    let msg1 = read_noise_frame(stream).await?;
+    // Use read() for the first 2-byte length prefix so we can distinguish a
+    // clean close (0 bytes → probe) from an EOF mid-handshake (real error).
+    let mut len_buf = [0u8; 2];
+    let n = stream.read(&mut len_buf).await?;
+    if n == 0 {
+        return Err(anyhow::Error::new(ProbeClosed));
+    }
+    if n == 1 {
+        stream.read_exact(&mut len_buf[1..]).await?;
+    }
+    let msg1_len = u16::from_be_bytes(len_buf) as usize;
+    let mut msg1 = vec![0u8; msg1_len];
+    stream.read_exact(&mut msg1).await?;
     hs.read_message(&msg1, &mut payload)?;
     let mut msg2 = vec![0u8; 65535];
     let n = hs.write_message(&[], &mut msg2)?;
@@ -150,10 +173,7 @@ pub async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port
         let priv_clone = static_private.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_noise_connection(stream, priv_clone, http_port).await {
-                let msg = e.to_string();
-                if msg.contains("early eof") || msg.contains("unexpected eof") {
-                    // Dropped probe/reconnect attempt before handshake — not an error.
-                } else {
+                if !e.is::<ProbeClosed>() {
                     eprintln!("[noise] error from {peer}: {e}");
                 }
             }
