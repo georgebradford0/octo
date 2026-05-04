@@ -47,7 +47,7 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
     println!("Provisioning rulyeh data volume...");
     k8s::ensure_rulyeh_pvc(&client).await?;
     println!("Applying rulyeh Deployment...");
-    k8s::upsert_rulyeh_deployment(&client, noise_port).await?;
+    k8s::upsert_rulyeh_deployment(&client, public_port).await?;
     println!("Configuring ClusterIP and NodePort services...");
     k8s::ensure_rulyeh_services(&client, noise_port).await?;
 

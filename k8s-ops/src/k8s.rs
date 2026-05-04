@@ -548,7 +548,7 @@ pub async fn ensure_rulyeh_pvc(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn upsert_rulyeh_deployment(client: &Client, noise_port: u16) -> anyhow::Result<()> {
+pub async fn upsert_rulyeh_deployment(client: &Client, public_port: u16) -> anyhow::Result<()> {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
     let deployment: Deployment = serde_json::from_value(json!({
         "apiVersion": "apps/v1",
@@ -570,7 +570,7 @@ pub async fn upsert_rulyeh_deployment(client: &Client, noise_port: u16) -> anyho
                         "image": IMAGE,
                         "imagePullPolicy": "Always",
                         "env": [
-                            {"name": "PUBLIC_PORT",           "value": noise_port.to_string()},
+                            {"name": "PUBLIC_PORT",           "value": public_port.to_string()},
                             {"name": "NOISE_PORT",            "value": "9000"},
                             {"name": "CLAUDULHU_DATA_DIR",    "value": "/data"},
                             {"name": "NOISE_KEY_FILE",        "value": "/data/noise_key.bin"},
