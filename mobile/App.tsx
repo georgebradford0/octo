@@ -559,6 +559,7 @@ const ChatPane = memo(function ChatPane({
   const [inputAreaH,     setInputAreaH]     = useState(0)
   const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null)
   const [stopSent,       setStopSent]       = useState(false)
+  const stopAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const sendMessageRef    = useRef<() => void>(() => {})
   const wsRef             = useRef<WebSocket | null>(null)
@@ -643,6 +644,12 @@ const ChatPane = memo(function ChatPane({
       wsRef.current = null
       opts.onStreamEnd?.()
       opts.onDone()
+    } else if (event.type === 'interrupt_ack') {
+      log('[chat] interrupt acknowledged by server')
+      if (stopAckTimerRef.current) {
+        clearTimeout(stopAckTimerRef.current)
+        stopAckTimerRef.current = null
+      }
     } else if (event.type === 'interrupted') {
       log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
       lastToolIdRef.current = null
@@ -860,7 +867,15 @@ const ChatPane = memo(function ChatPane({
   clearRef.current = clearConversation
 
   const isPending = status === 'streaming'
-  useEffect(() => { if (!isPending) setStopSent(false) }, [isPending])
+  useEffect(() => {
+    if (!isPending) {
+      setStopSent(false)
+      if (stopAckTimerRef.current) {
+        clearTimeout(stopAckTimerRef.current)
+        stopAckTimerRef.current = null
+      }
+    }
+  }, [isPending])
 
   const renderMessageItem = useCallback(({ item, index }: { item: Message; index: number }) => (
     <MessageBubble
@@ -934,6 +949,12 @@ const ChatPane = memo(function ChatPane({
                 const ws = wsRef.current
                 if (ws) {
                   ws.send(JSON.stringify({ type: 'interrupt' }))
+                  // If no ack arrives within 3 s, re-enable so the user can retry
+                  if (stopAckTimerRef.current) clearTimeout(stopAckTimerRef.current)
+                  stopAckTimerRef.current = setTimeout(() => {
+                    stopAckTimerRef.current = null
+                    setStopSent(false)
+                  }, 3000)
                   const toolId = lastToolIdRef.current
                   if (toolId) {
                     setMessages(prev => prev.map(m =>

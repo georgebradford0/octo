@@ -7,6 +7,7 @@ use std::{
     },
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 
 use tracing::{error, info, warn};
 
@@ -155,12 +156,19 @@ struct AppState {
     stream_state:  Mutex<StreamState>,
     /// True while a /stream loop is running.
     is_streaming:  AtomicBool,
+    /// Cancellation token for the current streaming turn. Replaced at the start of each turn.
+    cancel:        Mutex<CancellationToken>,
     mcp_pool:      McpPool,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn health_handler() -> impl IntoResponse { (StatusCode::OK, "ok") }
+
+async fn interrupt_handler(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.cancel.lock().unwrap().cancel();
+    StatusCode::OK
+}
 
 async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cost = *state.last_cost_usd.lock().unwrap();
@@ -199,7 +207,7 @@ async fn message_handler(
     info!("[server/message_handler] calling ephemeral send_message");
     let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
     let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor());
-    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, &state.cwd, None, Arc::new(AtomicBool::new(false)), &extra_tools, executor).await {
+    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, &state.cwd, None, CancellationToken::new(), &extra_tools, executor).await {
         Ok((text, cost_usd, _)) => {
             let elapsed = start.elapsed().as_millis();
             info!("[server/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
@@ -294,8 +302,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(256);
     let done_tx = event_tx.clone();
 
-    let aborted             = Arc::new(AtomicBool::new(false));
-    let aborted_for_listener = aborted.clone();
+    // Fresh cancellation token for this turn; stored on AppState so /interrupt can reach it.
+    let cancel = CancellationToken::new();
+    *state.cancel.lock().unwrap() = cancel.clone();
+    let cancel_for_listener = cancel.clone();
 
     // Clear any leftover buffer/subs from a previous turn before starting a new one.
     {
@@ -305,6 +315,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     }
     state.is_streaming.store(true, Ordering::Relaxed);
 
+    // WS listener: cancel the token on "interrupt" or if the socket closes.
     tokio::spawn(async move {
         while let Some(Ok(WsMessage::Text(t))) = ws_rx.next().await {
             if serde_json::from_str::<serde_json::Value>(&t)
@@ -312,7 +323,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 .and_then(|v| v["type"].as_str().map(str::to_string))
                 .as_deref() == Some("interrupt")
             {
-                aborted_for_listener.store(true, Ordering::Relaxed);
+                cancel_for_listener.cancel();
                 break;
             }
         }
@@ -321,9 +332,9 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
     let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor());
     tokio::spawn(async move {
-        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), aborted.clone(), &extra_tools, executor).await {
+        match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), cancel.clone(), &extra_tools, executor).await {
             Ok((_, cost_usd, mut updated)) => {
-                if aborted.load(Ordering::Relaxed) {
+                if cancel.is_cancelled() {
                     updated.push(ApiMessage {
                         role:    "interrupted".to_string(),
                         content: vec![ContentBlock::Text { text: "interrupted".to_string() }],
@@ -364,6 +375,8 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 Some(serde_json::json!({"type":"done","cost_usd":cost_usd})),
             ChatEvent::Interrupted { cost_usd } =>
                 Some(serde_json::json!({"type":"interrupted","cost_usd":cost_usd})),
+            ChatEvent::InterruptAck =>
+                Some(serde_json::json!({"type":"interrupt_ack"})),
             ChatEvent::Error { message } =>
                 Some(serde_json::json!({"type":"error","message":message})),
             _ => None,
@@ -614,6 +627,7 @@ async fn main() {
         cwd: repo.clone(),
         stream_state:  Mutex::new(StreamState { buffer: Vec::new(), subs: Vec::new() }),
         is_streaming:  AtomicBool::new(false),
+        cancel:        Mutex::new(CancellationToken::new()),
         mcp_pool,
     });
 
@@ -627,6 +641,7 @@ async fn main() {
         .route("/history",     get(history_handler))
         .route("/message",     post(message_handler))
         .route("/stream",      get(stream_handler))
+        .route("/interrupt",   post(interrupt_handler))
         .route("/clear",       post(clear_handler))
         .route("/branches",    get(get_branches_handler))
         .route("/completions", get(get_completions_handler))
@@ -668,7 +683,7 @@ async fn main() {
                     &api_key_sp,
                     &state_sp.cwd,
                     None,
-                    Arc::new(AtomicBool::new(false)),
+                    CancellationToken::new(),
                     &extra_tools,
                     executor,
                 ).await {

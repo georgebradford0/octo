@@ -3,11 +3,9 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
-    },
+    sync::{Arc, Mutex, OnceLock},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub mod mcp;
@@ -120,14 +118,13 @@ pub fn read_key_from_shell_files() -> Option<String> {
 // ── Session ───────────────────────────────────────────────────────────────────
 
 pub struct Session {
-    pub messages:         Vec<ApiMessage>,
-    pub system_prompt:    String,
-    pub cwd:              String,
-    pub aborted:          Arc<AtomicBool>,
-    pub pending_question: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    pub messages:      Vec<ApiMessage>,
+    pub system_prompt: String,
+    pub cwd:           String,
+    pub cancel:        CancellationToken,
     /// Connected MCP server clients.  Populated once at session creation and
     /// shared across all turns in the agentic loop.
-    pub mcp_pool:         McpPool,
+    pub mcp_pool:      McpPool,
 }
 
 // ── API Types ─────────────────────────────────────────────────────────────────
@@ -166,7 +163,8 @@ pub enum ChatEvent {
     Result             { cost_usd: f64, turns: usize, session_id: String, result: Option<String> },
     Error              { message: String },
     Interrupted        { cost_usd: f64 },
-    Question           { question: String },
+    InterruptAck,
+    Question           { question: String, answer_tx: oneshot::Sender<String> },
     System             { text: String },
     Spawning           { task: String },
     WorkerCreated      { branch: String, worktree_path: String, task: String },
@@ -418,7 +416,7 @@ pub async fn execute_tool(
     input:            &serde_json::Value,
     cwd:              &str,
     tx:               &mpsc::Sender<ChatEvent>,
-    pending_question: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    cancel:           CancellationToken,
     extra_executor:   Option<&(dyn Fn(String, serde_json::Value)
                                -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
                                + Send + Sync)>,
@@ -460,6 +458,10 @@ pub async fn execute_tool(
                                 }
                                 _ => break,
                             },
+                            _ = cancel.cancelled() => {
+                                child.kill().await.ok();
+                                return "error: interrupted".to_string();
+                            }
                         }
                     }
                     // Drain whichever pipe still has data after select exits.
@@ -587,11 +589,13 @@ pub async fn execute_tool(
             let question = input["question"].as_str().unwrap_or("").to_string();
             if question.is_empty() { return "error: question is required".to_string(); }
             let (otx, orx) = oneshot::channel::<String>();
-            { *pending_question.lock().await = Some(otx); }
-            tx.send(ChatEvent::Question { question }).await.ok();
-            match orx.await {
-                Ok(answer) => answer,
-                Err(_)     => "error: question was cancelled".to_string(),
+            tx.send(ChatEvent::Question { question, answer_tx: otx }).await.ok();
+            tokio::select! {
+                res = orx => match res {
+                    Ok(answer) => answer,
+                    Err(_)     => "error: question was cancelled".to_string(),
+                },
+                _ = cancel.cancelled() => "error: interrupted".to_string(),
             }
         }
         "task_create" => {
@@ -931,7 +935,7 @@ pub async fn call_turn(
     system:      &str,
     model:       &str,
     api_key:     &str,
-    aborted:     &AtomicBool,
+    cancel:      &CancellationToken,
     tx:          &mpsc::Sender<ChatEvent>,
     extra_tools: &[AnthropicTool],
 ) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
@@ -972,13 +976,16 @@ pub async fn call_turn(
         "messages": messages_json,
     });
 
-    let response = http_client()
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("anthropic-beta", "prompt-caching-2024-07-31")
-        .header("content-type", "application/json")
-        .json(&body).send().await.map_err(|e| e.to_string())?;
+    let response = tokio::select! {
+        res = http_client()
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .header("content-type", "application/json")
+            .json(&body).send() => res.map_err(|e| e.to_string())?,
+        _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -986,11 +993,14 @@ pub async fn call_turn(
         return Err(format!("API error {status}: {text}"));
     }
 
-    if aborted.load(Ordering::Relaxed) {
+    if cancel.is_cancelled() {
         return Err("__interrupted__".to_string());
     }
 
-    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = tokio::select! {
+        res = response.json() => res.map_err(|e| e.to_string())?,
+        _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
+    };
 
     let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
     let usage = &json["usage"];
@@ -1031,7 +1041,7 @@ pub async fn call_turn(
 /// Returns (final_text, total_cost_usd, updated_messages).
 /// MCP is disabled; only built-in tools are available.
 /// If `event_tx` is Some, Text and ToolUse events are forwarded to the caller.
-/// Setting `aborted` to true between turns causes an early return.
+/// Passing a cancelled `CancellationToken` causes an early return.
 pub async fn send_message(
     mut messages:   Vec<ApiMessage>,
     system:         &str,
@@ -1039,7 +1049,7 @@ pub async fn send_message(
     api_key:        &str,
     cwd:            &str,
     event_tx:       Option<mpsc::Sender<ChatEvent>>,
-    aborted:        Arc<AtomicBool>,
+    cancel:         CancellationToken,
     extra_tools:    &[AnthropicTool],
     extra_executor: Option<Arc<dyn Fn(String, serde_json::Value)
                             -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
@@ -1050,17 +1060,6 @@ pub async fn send_message(
 
     let (dummy_tx, _) = mpsc::channel::<ChatEvent>(1);
     let tx = event_tx.unwrap_or(dummy_tx);
-    let pending_question = std::sync::Arc::new(tokio::sync::Mutex::new(
-        None::<oneshot::Sender<String>>,
-    ));
-    let pq_watcher = pending_question.clone();
-    let watcher = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let mut slot = pq_watcher.lock().await;
-            if let Some(s) = slot.take() { s.send(String::new()).ok(); }
-        }
-    });
 
     let tools: Vec<serde_json::Value> = {
         let mut t: Vec<serde_json::Value> = tool_definitions_with_mcp(extra_tools)
@@ -1074,11 +1073,10 @@ pub async fn send_message(
     let mut turn = 0usize;
     loop {
         turn += 1;
-        if aborted.load(Ordering::Relaxed) {
-            watcher.abort();
+        if cancel.is_cancelled() {
+            tx.send(ChatEvent::InterruptAck).await.ok();
             return Ok((last_text, total_cost, messages));
         }
-        info!("[send_message] turn={turn} messages={}", messages.len());
         let compacted = compact_history(&messages, 20);
         let mut messages_json: Vec<serde_json::Value> = compacted.iter()
             .map(|m| serde_json::to_value(m).unwrap())
@@ -1108,22 +1106,33 @@ pub async fn send_message(
             "messages":   messages_json,
         });
 
-        let response = http_client()
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key",         api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta",    "prompt-caching-2024-07-31")
-            .header("content-type",      "application/json")
-            .json(&body).send().await.map_err(|e| e.to_string())?;
+        let response = tokio::select! {
+            res = http_client()
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key",         api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-beta",    "prompt-caching-2024-07-31")
+                .header("content-type",      "application/json")
+                .json(&body).send() => res.map_err(|e| e.to_string())?,
+            _ = cancel.cancelled() => {
+                tx.send(ChatEvent::InterruptAck).await.ok();
+                return Ok((last_text, total_cost, messages));
+            }
+        };
 
         if !response.status().is_success() {
-            watcher.abort();
             let status = response.status();
             let text   = response.text().await.unwrap_or_default();
             return Err(format!("API error {status}: {text}"));
         }
 
-        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        let json: serde_json::Value = tokio::select! {
+            res = response.json() => res.map_err(|e| e.to_string())?,
+            _ = cancel.cancelled() => {
+                tx.send(ChatEvent::InterruptAck).await.ok();
+                return Ok((last_text, total_cost, messages));
+            }
+        };
 
         let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
         let usage = &json["usage"];
@@ -1176,7 +1185,6 @@ pub async fn send_message(
         messages.push(ApiMessage { role: "assistant".to_string(), content: blocks });
 
         if stop_reason != "tool_use" || tool_uses.is_empty() {
-            watcher.abort();
             return Ok((text_buf, total_cost, messages));
         }
 
@@ -1184,9 +1192,22 @@ pub async fn send_message(
 
         // Execute tools and collect results.
         let mut results = Vec::new();
+        let mut ack_sent = false;
         for (id, name, input) in tool_uses {
+            if cancel.is_cancelled() {
+                if !ack_sent {
+                    tx.send(ChatEvent::InterruptAck).await.ok();
+                    ack_sent = true;
+                }
+                // Append a synthetic tool_result so history stays valid.
+                results.push(ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content:     vec![serde_json::json!({"type":"text","text":"interrupted"})],
+                });
+                continue;
+            }
             let result = truncate_tool_output(
-                execute_tool(&name, &input, cwd, &tx, pending_question.clone(), extra_executor.as_deref()).await,
+                execute_tool(&name, &input, cwd, &tx, cancel.clone(), extra_executor.as_deref()).await,
                 tool_output_limit(&name),
             );
             let result_preview = result.chars().take(200).collect::<String>();
@@ -1230,20 +1251,22 @@ pub async fn run_agentic_loop(
             return;
         }
 
-        let (messages, system, cwd, aborted, pending_question) = {
+        let (messages, system, cwd, cancel) = {
             let s = session.lock().unwrap();
-            (s.messages.clone(), s.system_prompt.clone(), s.cwd.clone(), s.aborted.clone(), s.pending_question.clone())
+            (s.messages.clone(), s.system_prompt.clone(), s.cwd.clone(), s.cancel.clone())
         };
 
-        if aborted.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
+            tx.send(ChatEvent::InterruptAck).await.ok();
             tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
             return;
         }
 
-        match call_turn(&messages, &system, &model, &api_key, &aborted, &tx, &extra_tools).await {
+        match call_turn(&messages, &system, &model, &api_key, &cancel, &tx, &extra_tools).await {
             Err(e) if e == "__interrupted__" => {
                 let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
+                tx.send(ChatEvent::InterruptAck).await.ok();
                 tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
                 return;
             }
@@ -1274,8 +1297,16 @@ pub async fn run_agentic_loop(
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
                 for block in &blocks {
                     if let ContentBlock::ToolUse { id, name, input } = block {
+                        if cancel.is_cancelled() {
+                            // Keep history valid — synthetic result for each orphaned tool_use.
+                            tool_results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: vec![serde_json::json!({"type":"text","text":"interrupted"})],
+                            });
+                            continue;
+                        }
                         let result = truncate_tool_output(
-                            execute_tool(name, input, &cwd, &tx, pending_question.clone(), extra_executor.as_deref()).await,
+                            execute_tool(name, input, &cwd, &tx, cancel.clone(), extra_executor.as_deref()).await,
                             tool_output_limit(name),
                         );
                         tx.send(ChatEvent::ToolResult {
@@ -1287,6 +1318,15 @@ pub async fn run_agentic_loop(
                             content: vec![serde_json::json!({"type":"text","text":result})],
                         });
                     }
+                }
+
+                // If cancelled mid-tool-loop, flush results and stop.
+                if cancel.is_cancelled() {
+                    let mut s = session.lock().unwrap();
+                    s.messages.push(ApiMessage { role: "user".to_string(), content: tool_results });
+                    let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
+                    tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
+                    return;
                 }
 
                 {
