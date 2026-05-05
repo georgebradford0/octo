@@ -1,10 +1,10 @@
 [package]
-name    = "claudulhu-tests"
+name    = "octo-tests"
 version = "0.0.1"
 edition = "2021"
 
 [dev-dependencies]
-claudulhu-core = { path = "../core" }
+octo-core = { path = "../core" }
 snow           = "0.9"
 tokio          = { version = "1", features = ["full"] }
 anyhow         = "1.0"

@@ -15,6 +15,6 @@ desktop: build
 dev:
 	cd desktop && npm run tauri:dev
 
-# Run just the Vite dev server (browser mode, requires claudulhud running separately)
+# Run just the Vite dev server (browser mode, requires octod running separately)
 dev-web:
 	cd desktop && npm run dev

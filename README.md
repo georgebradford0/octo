@@ -1,23 +1,23 @@
-# claudulhu
+# octo
 
-`claudulhu` is a mobile agent management system which manages a fleet of Claude agents using Kubernetes.  It was originally designed to be specifically for coding but can be used to deploy any type of agent.  
+`octo` is a mobile agent management system which manages a fleet of Claude agents using Kubernetes.  It was originally designed to be specifically for coding but can be used to deploy any type of agent.  
 
 ## Architecture
 
 The system consists of a mobile client which connects to a Kubernetes cluster using the Noise Protocol.  Using the mobile client, a user can deploy new pods in the cluster from a main chat which connects to the Kubernetes control plane and interact with them through dedicated chats.  
 
 ## Install the CLI
-The CLI is a Rust command line client `claudulhu` that is used for setting up the Kubernetes cluster and is mostly a thin wrapper around it, along with support for adding MCPs.
+The CLI is a Rust command line client `octo` that is used for setting up the Kubernetes cluster and is mostly a thin wrapper around it, along with support for adding MCPs.
 ```sh
-curl -fsSL https://raw.githubusercontent.com/georgebradford0/claudulhu/main/scripts/get-cli.sh | sh
+curl -fsSL https://raw.githubusercontent.com/georgebradford0/octo/main/scripts/get-cli.sh | sh
 ```
 
 ## Setup
 `init` must be run on a host with static IP.  It assumes there are `ANTHROPIC_API_KEY` and `GH_TOKEN` vars present in the environment.  If not they can be passed with fields `--api-key` and `--gh-token`.  Port 8443 is used by default as it is not blocked by mobile providers but can be changed with field `--public-port`.
 ```sh
-claudulhu init
+octo init
 ```
-The `init` will install k3s if no cluster is reachable, create `claudulhu` namespace and RBAC, generate Noise keypair, download `rulyeh` image and run it.   When `rulyeh` is ready, a QR code will be printed to the screen.
+The `init` will install k3s if no cluster is reachable, create `octo` namespace and RBAC, generate Noise keypair, download `rulyeh` image and run it.   When `rulyeh` is ready, a QR code will be printed to the screen.
 
 The QR code contains host, port and Noise pubkey.  Please be aware, anyone who has the QR data can connect to the cluster.
 
@@ -25,33 +25,33 @@ The QR code contains host, port and Noise pubkey.  Please be aware, anyone who h
 ```
 // TODO generate instructions for building React Native android app.
 ```
-Open the mobile app and press the pulsing icon and scan QR printed by `claudulhu init`.  It will establish a connection and open the main `rulyeh` chat.
+Open the mobile app and press the pulsing icon and scan QR printed by `octo init`.  It will establish a connection and open the main `rulyeh` chat.
 
 ## MCP Support
 MCP servers can be setup at initialization by passing an MCP JSON file to `init`.  
 ```
-claudulhu init --mcp-config <path_to_mcp_json_file>
+octo init --mcp-config <path_to_mcp_json_file>
 ```
 They can also be added at runtime in any container (including the `rulyeh` container) and are hot reloaded. Below are some examples for 'uvx', 'npx' and 'uv run' (when package doesn't support 'uvx').  
 
 ```sh
 # uvx-based server
-claudulhu mcp add --name aws-ec2 --command uvx \
+octo mcp add --name aws-ec2 --command uvx \
   --env AWS_ACCESS_KEY_ID=... --env AWS_SECRET_ACCESS_KEY=... --env AWS_REGION=us-east-1 \
   -- awslabs.amazon-ec2-mcp-server
 
 # uv run (for packages without a script entry point)
-claudulhu mcp add --name prime-intellect --command uv \
+octo mcp add --name prime-intellect --command uv \
   --env PRIME_API_KEY=... \
   -- run --with prime-mcp-server python -m prime_mcp.mcp
 
 # Add to a specific child container (default is rulyeh)
-claudulhu mcp add --container rulyeh-myrepo --name linear --command npx \
+octo mcp add --container rulyeh-myrepo --name linear --command npx \
   --env LINEAR_API_KEY=lin_api_... \
   -- -y @linear/mcp-server
 
-claudulhu mcp list
-claudulhu mcp remove --name github
+octo mcp list
+octo mcp remove --name github
 ```
 
 `mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. The server config is stored in `/data/mcp.json` inside the container and hot-reloaded within a few seconds — you can also ask rulyeh to add MCP servers directly from chat, though I've found the cli is usually easier because Claude sometimes hallucinates package names for MCP servers.  Best practice is to ask to do a web search to verify package names before adding.

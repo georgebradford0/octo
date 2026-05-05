@@ -15,16 +15,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: claudulhu-linux-x86_64
+            artifact: octo-linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: claudulhu-linux-aarch64
+            artifact: octo-linux-aarch64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: claudulhu-macos-x86_64
+            artifact: octo-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: claudulhu-macos-aarch64
+            artifact: octo-macos-aarch64
 
     steps:
       - name: Checkout
@@ -47,10 +47,10 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Build
-        run: cargo build --release -p claudulhu --target ${{ matrix.target }}
+        run: cargo build --release -p octo --target ${{ matrix.target }}
 
       - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/claudulhu ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/octo ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -83,8 +83,8 @@ jobs:
       - name: Create GitHub release
         run: |
           gh release create "cli-v${{ steps.version.outputs.value }}" \
-            --title "claudulhu CLI v${{ steps.version.outputs.value }}" \
-            --notes "claudulhu cluster management CLI
+            --title "octo CLI v${{ steps.version.outputs.value }}" \
+            --notes "octo cluster management CLI
 
           ## Installation
 
@@ -92,24 +92,24 @@ jobs:
 
           \`\`\`sh
           # macOS (Apple Silicon)
-          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-macos-aarch64 -o claudulhu
-          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-macos-aarch64 -o octo
+          chmod +x octo && sudo mv octo /usr/local/bin/
 
           # macOS (Intel)
-          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-macos-x86_64 -o claudulhu
-          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-macos-x86_64 -o octo
+          chmod +x octo && sudo mv octo /usr/local/bin/
 
           # Linux (x86_64)
-          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-linux-x86_64 -o claudulhu
-          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-linux-x86_64 -o octo
+          chmod +x octo && sudo mv octo /usr/local/bin/
 
           # Linux (aarch64)
-          curl -fsSL https://github.com/georgebradford0/claudulhu/releases/latest/download/claudulhu-linux-aarch64 -o claudulhu
-          chmod +x claudulhu && sudo mv claudulhu /usr/local/bin/
+          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-linux-aarch64 -o octo
+          chmod +x octo && sudo mv octo /usr/local/bin/
           \`\`\`" \
-            artifacts/claudulhu-linux-x86_64/claudulhu-linux-x86_64 \
-            artifacts/claudulhu-linux-aarch64/claudulhu-linux-aarch64 \
-            artifacts/claudulhu-macos-x86_64/claudulhu-macos-x86_64 \
-            artifacts/claudulhu-macos-aarch64/claudulhu-macos-aarch64
+            artifacts/octo-linux-x86_64/octo-linux-x86_64 \
+            artifacts/octo-linux-aarch64/octo-linux-aarch64 \
+            artifacts/octo-macos-x86_64/octo-macos-x86_64 \
+            artifacts/octo-macos-aarch64/octo-macos-aarch64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

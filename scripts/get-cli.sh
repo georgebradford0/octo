@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -e
 
-REPO="georgebradford0/claudulhu"
-BIN="claudulhu"
+REPO="georgebradford0/octo"
+BIN="octo"
 INSTALL_DIR="$HOME/.local/bin"
 
 OS=$(uname -s)
@@ -11,15 +11,15 @@ ARCH=$(uname -m)
 case "$OS" in
   Linux)
     case "$ARCH" in
-      x86_64)  ARTIFACT="claudulhu-linux-x86_64" ;;
-      aarch64) ARTIFACT="claudulhu-linux-aarch64" ;;
+      x86_64)  ARTIFACT="octo-linux-x86_64" ;;
+      aarch64) ARTIFACT="octo-linux-aarch64" ;;
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     ;;
   Darwin)
     case "$ARCH" in
-      x86_64)  ARTIFACT="claudulhu-macos-x86_64" ;;
-      arm64)   ARTIFACT="claudulhu-macos-aarch64" ;;
+      x86_64)  ARTIFACT="octo-macos-x86_64" ;;
+      arm64)   ARTIFACT="octo-macos-aarch64" ;;
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     ;;
@@ -48,8 +48,8 @@ case "$DETECTED_SHELL" in
   zsh)
     COMP_DIR="$HOME/.zfunc"
     mkdir -p "$COMP_DIR"
-    "$INSTALL_DIR/$BIN" completions zsh > "$COMP_DIR/_claudulhu"
-    echo "Zsh completions installed to $COMP_DIR/_claudulhu"
+    "$INSTALL_DIR/$BIN" completions zsh > "$COMP_DIR/_octo"
+    echo "Zsh completions installed to $COMP_DIR/_octo"
     ZSHRC="$HOME/.zshrc"
     if ! grep -q 'fpath.*\.zfunc' "$ZSHRC" 2>/dev/null; then
       printf '\nfpath+=~/.zfunc\nautoload -Uz compinit && compinit\n' >> "$ZSHRC"
@@ -57,7 +57,7 @@ case "$DETECTED_SHELL" in
     fi
     ;;
   bash)
-    COMP_FILE="$HOME/.local/share/bash-completion/completions/claudulhu"
+    COMP_FILE="$HOME/.local/share/bash-completion/completions/octo"
     mkdir -p "$(dirname "$COMP_FILE")"
     "$INSTALL_DIR/$BIN" completions bash > "$COMP_FILE"
     echo "Bash completions installed to $COMP_FILE"
@@ -65,7 +65,7 @@ case "$DETECTED_SHELL" in
     # bash-completion package (which is required for the XDG directory to be
     # picked up automatically).
     BASHRC="$HOME/.bashrc"
-    if ! grep -q "claudulhu" "$BASHRC" 2>/dev/null; then
+    if ! grep -q "octo" "$BASHRC" 2>/dev/null; then
       printf '\n. %s\n' "$COMP_FILE" >> "$BASHRC"
       echo "Added completion source to $BASHRC"
     fi
@@ -73,11 +73,11 @@ case "$DETECTED_SHELL" in
   fish)
     COMP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
     mkdir -p "$COMP_DIR"
-    "$INSTALL_DIR/$BIN" completions fish > "$COMP_DIR/claudulhu.fish"
-    echo "Fish completions installed to $COMP_DIR/claudulhu.fish"
+    "$INSTALL_DIR/$BIN" completions fish > "$COMP_DIR/octo.fish"
+    echo "Fish completions installed to $COMP_DIR/octo.fish"
     ;;
   *)
-    echo "Completions: run 'claudulhu completions <bash|zsh|fish>' to generate for your shell."
+    echo "Completions: run 'octo completions <bash|zsh|fish>' to generate for your shell."
     ;;
 esac
 

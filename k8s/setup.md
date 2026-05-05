@@ -6,7 +6,7 @@
 curl -sfL https://get.k3s.io | sh -
 ```
 
-## 2. Create the `claudulhu` namespace
+## 2. Create the `octo` namespace
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
@@ -17,22 +17,22 @@ kubectl apply -f k8s/namespace.yaml
 ```sh
 kubectl create secret generic k3s-join-token \
   --from-literal=token="$(cat /var/lib/rancher/k3s/server/node-token)" \
-  -n claudulhu
+  -n octo
 ```
 
 ## 4. Store API keys as a K8s Secret
 
 ```sh
-kubectl create secret generic claudulhu-secrets \
+kubectl create secret generic octo-secrets \
   --from-literal=anthropic-api-key="<key>" \
   --from-literal=gh-token="<token>" \
-  -n claudulhu
+  -n octo
 ```
 
 For remote EC2 provisioning also add:
 
 ```sh
-kubectl patch secret claudulhu-secrets -n claudulhu \
+kubectl patch secret octo-secrets -n octo \
   --patch='{"stringData":{"aws-access-key-id":"<id>","aws-secret-access-key":"<secret>"}}'
 ```
 
@@ -55,6 +55,6 @@ kubectl apply -f k8s/rulyeh.yaml
 ## Verify
 
 ```sh
-kubectl get pods -n claudulhu
-kubectl logs -n claudulhu deploy/rulyeh
+kubectl get pods -n octo
+kubectl logs -n octo deploy/rulyeh
 ```

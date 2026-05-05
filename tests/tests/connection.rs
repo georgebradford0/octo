@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use claudulhu_core::noise::{
+use octo_core::noise::{
     handle_noise_connection, noise_handshake, read_noise_frame, write_noise_frame,
     DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC, NOISE_PATTERN,
 };

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PID_FILE="/tmp/claudulhu-dev-portforward.pid"
+PID_FILE="/tmp/octo-dev-portforward.pid"
 
 if [ -f "${PID_FILE}" ]; then
     while IFS= read -r pid; do
@@ -13,8 +13,8 @@ if [ -f "${PID_FILE}" ]; then
     rm -f "${PID_FILE}"
 fi
 
-echo "▸ Deleting all resources in claudulhu namespace..."
-kubectl delete namespace claudulhu --ignore-not-found
+echo "▸ Deleting all resources in octo namespace..."
+kubectl delete namespace octo --ignore-not-found
 
 echo ""
 echo "✓ Dev environment stopped."

@@ -11,23 +11,23 @@ services:
     ports:
       - "${MASTER_PORT:-9000}:${MASTER_PORT:-9000}"
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY_CLAUDULHU}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY_OCTO}
       - GH_TOKEN=${GH_TOKEN:-}
       - PUBLIC_HOST=${PUBLIC_HOST:-}
       - NOISE_PORT=${MASTER_PORT:-9000}
       - CHILD_PORT_RANGE=${CHILD_PORT_RANGE:-9100-9199}
-      - CLAUDULHU_DEV=${CLAUDULHU_DEV:-0}
+      - OCTO_DEV=${OCTO_DEV:-0}
       - STARTUP_SCRIPT=${STARTUP_SCRIPT:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - claudulhu-rulyeh-data:/data
+      - octo-rulyeh-data:/data
     networks:
-      - claudulhu-net
+      - octo-net
 
   # ── Standalone child server (optional / dev) ───────────────────────────────
   # Use this to run a single repo server without master, or as a template for
   # understanding the env vars master uses when spawning child containers.
-  claudulhu:
+  octo:
     build:
       context: .
       dockerfile: rulyeh/Dockerfile
@@ -38,30 +38,30 @@ services:
       - GIT_URL=${GIT_URL:-}
       - GH_TOKEN=${GH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GIT_USER_NAME=${GIT_USER_NAME:-claudulhu}
-      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-claudulhu@localhost}
+      - GIT_USER_NAME=${GIT_USER_NAME:-octo}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-octo@localhost}
       - PUBLIC_HOST=${PUBLIC_HOST:-}
       - NOISE_PORT=${NOISE_PORT:-9100}
-      - CLAUDULHU_DEV=${CLAUDULHU_DEV:-0}
+      - OCTO_DEV=${OCTO_DEV:-0}
     volumes:
       - workspace:/workspace
-      - claudulhu-data:/data
+      - octo-data:/data
       # Uncomment to use SSH key auth instead of GH_TOKEN:
       # - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
     networks:
-      - claudulhu-net
+      - octo-net
     labels:
-      claudulhu.managed: "1"
-      claudulhu.git_url: "${GIT_URL}"
+      octo.managed: "1"
+      octo.git_url: "${GIT_URL}"
     profiles:
       - standalone
 
 networks:
-  claudulhu-net:
-    name: claudulhu-net
+  octo-net:
+    name: octo-net
     driver: bridge
 
 volumes:
   workspace:
-  claudulhu-data:
-  claudulhu-rulyeh-data:
+  octo-data:
+  octo-rulyeh-data:

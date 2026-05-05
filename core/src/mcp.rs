@@ -5,7 +5,7 @@
 ///
 /// # Configuration
 ///
-/// Read from `$CLAUDULHU_DATA_DIR/mcp.json` (i.e. `/data/mcp.json` in Docker).
+/// Read from `$OCTO_DATA_DIR/mcp.json` (i.e. `/data/mcp.json` in Docker).
 /// Format: a JSON array of server descriptors:
 ///
 /// ```json
@@ -50,7 +50,7 @@ pub struct McpServerConfig {
     pub env:     HashMap<String, String>,
 }
 
-/// Load MCP server configs from `$CLAUDULHU_DATA_DIR/mcp.json`.
+/// Load MCP server configs from `$OCTO_DATA_DIR/mcp.json`.
 /// Returns an empty vec if the file is absent or unparseable.
 pub fn load_mcp_configs() -> Vec<McpServerConfig> {
     let path = crate::data_dir().join("mcp.json");
@@ -122,7 +122,7 @@ impl McpClient {
         let init_result = client.request("initialize", serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
-            "clientInfo": { "name": "claudulhu", "version": env!("CARGO_PKG_VERSION") }
+            "clientInfo": { "name": "octo", "version": env!("CARGO_PKG_VERSION") }
         })).await;
 
         if let Err(e) = init_result {

@@ -9,7 +9,7 @@ Migrate rulyeh's container management from direct Docker CLI calls to Kubernetes
 ## Assumptions
 
 - Self-hosted **k3s** cluster (single control-plane, any number of workers)
-- Single `claudulhu` namespace for all workloads
+- Single `octo` namespace for all workloads
 - rulyeh runs inside the cluster as a Pod with an in-cluster ServiceAccount
 - AWS is the only supported cloud provider for now (others added later)
 - No LoadBalancers — NodePort for all external Noise connections
@@ -26,7 +26,7 @@ Migrate rulyeh's container management from direct Docker CLI calls to Kubernetes
 curl -sfL https://get.k3s.io | sh -
 ```
 
-### 2. Create the `claudulhu` namespace
+### 2. Create the `octo` namespace
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
@@ -37,7 +37,7 @@ kubectl apply -f k8s/namespace.yaml
 ```sh
 kubectl create secret generic k3s-join-token \
   --from-literal=token="$(cat /var/lib/rancher/k3s/server/node-token)" \
-  -n claudulhu
+  -n octo
 ```
 
 This is how rulyeh reads the join token at runtime — works whether rulyeh is on the control-plane node or not.
@@ -45,10 +45,10 @@ This is how rulyeh reads the join token at runtime — works whether rulyeh is o
 ### 4. Store API keys as a K8s Secret
 
 ```sh
-kubectl create secret generic claudulhu-secrets \
+kubectl create secret generic octo-secrets \
   --from-literal=anthropic-api-key="<key>" \
   --from-literal=gh-token="<token>" \
-  -n claudulhu
+  -n octo
 ```
 
 ### 5. Create AWS prerequisites (one-time, manual)
@@ -87,7 +87,7 @@ kubectl apply -f k8s/rulyeh.yaml
 
 | File | Contents |
 |---|---|
-| `k8s/namespace.yaml` | `claudulhu` Namespace |
+| `k8s/namespace.yaml` | `octo` Namespace |
 | `k8s/rbac.yaml` | ServiceAccount `rulyeh` + Role + RoleBinding |
 | `k8s/secret.example.yaml` | Non-secret template showing expected keys (no real values) |
 | `k8s/rulyeh.yaml` | rulyeh Deployment + PVC (`/data`) + ClusterIP Service (port 8000) + NodePort Service (port 9000) |
@@ -101,7 +101,7 @@ For a child named `rulyeh-myrepo`:
 |---|---|---|
 | PVC | `rulyeh-myrepo-data` | `ReadWriteOnce`, mounted at `/data` |
 | PVC | `rulyeh-myrepo-workspace` | `ReadWriteOnce`, mounted at `/workspace` |
-| Deployment | `rulyeh-myrepo` | 1 replica, labels `claudulhu.managed=1` + `claudulhu.git_url=<url>` |
+| Deployment | `rulyeh-myrepo` | 1 replica, labels `octo.managed=1` + `octo.git_url=<url>` |
 | Service (ClusterIP) | `rulyeh-myrepo` | Port 8000, internal HTTP for `message_child` and `RULYEH_URL` |
 | Service (NodePort) | `rulyeh-myrepo-noise` | Port 9000 → NodePort 301xx, external Noise connection |
 
@@ -111,7 +111,7 @@ For remote children, the Deployment also gets a `nodeSelector` pinning it to the
 
 ## RBAC — required verbs
 
-ServiceAccount `rulyeh` in namespace `claudulhu`:
+ServiceAccount `rulyeh` in namespace `octo`:
 
 | Resource | Verbs |
 |---|---|
@@ -162,7 +162,7 @@ Triggered when `create_container` is called with `remote: true`.
    - `--security-group-ids <AWS_SECURITY_GROUP_ID>`
    - `--subnet-id <AWS_SUBNET_ID>`
    - `--associate-public-ip-address`
-   - `--tag-specifications` including `claudulhu.managed=1`, `claudulhu.child-name=<name>`
+   - `--tag-specifications` including `octo.managed=1`, `octo.child-name=<name>`
    - `--user-data <script>` (see below)
 
 4. **User-data script** embedded at launch time:
@@ -178,16 +178,16 @@ Triggered when `create_container` is called with `remote: true`.
 
 5. **Poll for public IP** — rulyeh polls `aws ec2 describe-instances --instance-ids <id>` every 5s until state is `running` and a public IP is assigned (typically 20–40s).
 
-6. **Wait for node Ready** — rulyeh watches `Api::<Node>` until a node appears with label `claudulhu.child-name=<name>` (set via k3s node label, added to user-data: `K3S_NODE_LABEL="claudulhu.child-name=<name>"`) and its `Ready` condition is `True`. Timeout: 3 minutes.
+6. **Wait for node Ready** — rulyeh watches `Api::<Node>` until a node appears with label `octo.child-name=<name>` (set via k3s node label, added to user-data: `K3S_NODE_LABEL="octo.child-name=<name>"`) and its `Ready` condition is `True`. Timeout: 3 minutes.
 
 7. **Label the node** — rulyeh patches the Node with:
-   - `claudulhu.ec2-instance-id=<instance-id>`
-   - `claudulhu.child-name=<child-name>`
+   - `octo.ec2-instance-id=<instance-id>`
+   - `octo.child-name=<child-name>`
 
 8. **Create child resources** — same as local flow (PVCs, Deployment, Services), but the Deployment spec includes:
    ```yaml
    nodeSelector:
-     claudulhu.child-name: <child-name>
+     octo.child-name: <child-name>
    ```
 
 9. **Return to user** — child name, NodePort, EC2 public IP.
@@ -236,8 +236,8 @@ A `terminate_container` tool is added alongside the existing `create_container` 
 
 `list_managed_deployments()` replaces `fetch_managed_containers()`:
 
-- `Api::<Deployment>::namespaced(client, "claudulhu").list(ListParams::default().labels("claudulhu.managed=1"))`
-- `git_url` from Deployment label `claudulhu.git_url`
+- `Api::<Deployment>::namespaced(client, "octo").list(ListParams::default().labels("octo.managed=1"))`
+- `git_url` from Deployment label `octo.git_url`
 - `NOISE_PORT` from container env in pod template spec
 - Status mapped from `deployment.status`: `available_replicas > 0` → `"running"`, `replicas == 0` → `"stopped"`, otherwise `"pending"`
 - NodePort read from the associated `*-noise` Service
@@ -257,7 +257,7 @@ These are included in the existing `container_list` wire frame at no protocol co
 `fetch_pubkey_via_exec()` replaces `docker exec`:
 
 1. Find the running Pod for the Deployment: `Api::<Pod>::list` with label selector `app=<child-name>`, filter for phase `Running`
-2. `pods.exec(pod_name, ["claudulhu-server", "--print-pubkey"], &AttachParams::default().stdout(true))`
+2. `pods.exec(pod_name, ["octo-server", "--print-pubkey"], &AttachParams::default().stdout(true))`
 3. Cache result in `/data/pubkey_registry.json` as before
 
 ---
@@ -291,8 +291,8 @@ In `rulyeh/Dockerfile` runtime stage:
 - No `kubectl` binary needed
 
 In `rulyeh/docker-entrypoint.sh`:
-- **Remove** `docker network create claudulhu-net` line
-- **Remove** `docker network connect claudulhu-net "$(hostname)"` line
+- **Remove** `docker network create octo-net` line
+- **Remove** `docker network connect octo-net "$(hostname)"` line
 - Everything else stays the same
 
 ---

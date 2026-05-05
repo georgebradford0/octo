@@ -264,7 +264,7 @@ pub async fn write_noise_frame(stream: &mut TcpStream, data: &[u8]) -> anyhow::R
 
 ## 5. iOS Native Module: `NoiseConnection.connect()`
 
-The native module (`mobile/ios/claudulhu/NoiseConnectionModule.swift`) acts as a local
+The native module (`mobile/ios/octo/NoiseConnectionModule.swift`) acts as a local
 TCP proxy. `connect()` doesn't actually connect to the server in the JS sense — it
 sets up a local listening socket and returns its port. The actual server connection
 happens only when the app opens a WebSocket to that local port.
@@ -781,7 +781,7 @@ and the old QR codes become invalid (the client will throw `identityMismatch` at
 message 2 of the handshake). This is the expected and correct behavior — it's the
 server proving its identity.
 
-In dev mode (`CLAUDULHU_DEV=1`), a fixed hardcoded keypair is used and the public key
+In dev mode (`OCTO_DEV=1`), a fixed hardcoded keypair is used and the public key
 is baked into the iOS simulator path in `App.tsx`.
 
 Child containers inherit the parent's keypair via the `NOISE_PRIVATE_KEY` env var

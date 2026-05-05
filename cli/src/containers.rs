@@ -1,5 +1,5 @@
 use anyhow::Result;
-use claudulhu_k8s_ops::k8s;
+use octo_k8s_ops::k8s;
 
 pub async fn list() -> Result<()> {
     let client = k8s::build_client().await?;

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Claudulhu uses Anthropic's [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) to reduce input token costs during agentic sessions. Cached tokens are billed at ~10% of the normal input rate (cache read) or ~125% (cache write, amortised on first use), so effective placement of cache breakpoints is the primary lever for controlling per-turn cost.
+Octo uses Anthropic's [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) to reduce input token costs during agentic sessions. Cached tokens are billed at ~10% of the normal input rate (cache read) or ~125% (cache write, amortised on first use), so effective placement of cache breakpoints is the primary lever for controlling per-turn cost.
 
 Anthropic allows a maximum of **4 cache breakpoints per request**. We consume all 4.
 

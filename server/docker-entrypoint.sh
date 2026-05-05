@@ -12,7 +12,7 @@ if [ -z "$PUBLIC_HOST" ]; then
         echo "ERROR: Could not auto-detect public IP. Set PUBLIC_HOST explicitly." >&2
         exit 1
     fi
-    echo "[claudulhu] Detected public IP: ${PUBLIC_HOST}"
+    echo "[octo] Detected public IP: ${PUBLIC_HOST}"
 fi
 
 NOISE_PORT="${NOISE_PORT:-9000}"
@@ -21,14 +21,14 @@ NOISE_PORT="${NOISE_PORT:-9000}"
 # Generate (or load) the server's static Curve25519 keypair and print the
 # base32-encoded public key.  The key file is persisted across container
 # restarts so the client only needs to re-scan the QR if the volume is lost.
-mkdir -p /etc/claudulhu
-NOISE_PUBKEY=$(claudulhu-server --print-pubkey)
-echo "[claudulhu] Noise public key: ${NOISE_PUBKEY}"
+mkdir -p /etc/octo
+NOISE_PUBKEY=$(octo-server --print-pubkey)
+echo "[octo] Noise public key: ${NOISE_PUBKEY}"
 
 # ── Git clone (optional) ─────────────────────────────────────────────────────
 WORKSPACE=/workspace
-CLAUDULHU_DATA_DIR="${CLAUDULHU_DATA_DIR:-/data}"
-mkdir -p "$CLAUDULHU_DATA_DIR" "$WORKSPACE"
+OCTO_DATA_DIR="${OCTO_DATA_DIR:-/data}"
+mkdir -p "$OCTO_DATA_DIR" "$WORKSPACE"
 
 if [ -n "$GIT_URL" ]; then
     # Allow token via env var or mounted secret file (/run/secrets/gh_token).
@@ -54,16 +54,16 @@ if [ -n "$GIT_URL" ]; then
     esac
 
     if [ -d "$WORKSPACE/.git" ]; then
-        echo "[claudulhu] Updating existing repo at $WORKSPACE"
+        echo "[octo] Updating existing repo at $WORKSPACE"
         git -C "$WORKSPACE" remote set-url origin "$CLONE_URL"
         git -C "$WORKSPACE" fetch --all
     else
-        echo "[claudulhu] Cloning $GIT_URL into $WORKSPACE"
+        echo "[octo] Cloning $GIT_URL into $WORKSPACE"
         git clone "$CLONE_URL" "$WORKSPACE"
     fi
 
-    GIT_USER_NAME="${GIT_USER_NAME:-claudulhu}"
-    GIT_USER_EMAIL="${GIT_USER_EMAIL:-claudulhu@localhost}"
+    GIT_USER_NAME="${GIT_USER_NAME:-octo}"
+    GIT_USER_EMAIL="${GIT_USER_EMAIL:-octo@localhost}"
     git -C "$WORKSPACE" config user.name  "$GIT_USER_NAME"
     git -C "$WORKSPACE" config user.email "$GIT_USER_EMAIL"
 
@@ -73,17 +73,17 @@ if [ -n "$GIT_URL" ]; then
     fi
 
     REPO_NAME=$(basename "$GIT_URL" .git)
-    printf '{"repo":"%s","name":"%s"}\n' "$WORKSPACE" "$REPO_NAME" > "$CLAUDULHU_DATA_DIR/config.json"
-    echo "[claudulhu] Starting server (repo: $WORKSPACE)"
+    printf '{"repo":"%s","name":"%s"}\n' "$WORKSPACE" "$REPO_NAME" > "$OCTO_DATA_DIR/config.json"
+    echo "[octo] Starting server (repo: $WORKSPACE)"
 else
-    echo "[claudulhu] No GIT_URL set — starting server without a repository"
+    echo "[octo] No GIT_URL set — starting server without a repository"
 fi
 
 # ── Startup script ────────────────────────────────────────────────────────────
 if [ -n "$STARTUP_SCRIPT" ]; then
-    echo "[claudulhu] Running STARTUP_SCRIPT..."
+    echo "[octo] Running STARTUP_SCRIPT..."
     printf '%s' "$STARTUP_SCRIPT" | bash
-    echo "[claudulhu] STARTUP_SCRIPT complete."
+    echo "[octo] STARTUP_SCRIPT complete."
 fi
 
 # ── Start server, then print QR once it is listening ─────────────────────────
@@ -95,14 +95,14 @@ fi
 # All chars uppercase+digits+colon → QR alphanumeric mode → compact QR.
 QR_DATA="2:${PUBLIC_HOST}:${NOISE_PORT}:${NOISE_PUBKEY}"
 
-SENTINEL="[claudulhu] HTTP/WebSocket on"
+SENTINEL="[octo] HTTP/WebSocket on"
 
 # Named pipe lets us tee server stdout through a watcher without a temp file.
-PIPE=$(mktemp -t claudulhu-pipe-XXXXXX)
+PIPE=$(mktemp -t octo-pipe-XXXXXX)
 rm -f "$PIPE"
 mkfifo "$PIPE"
 
-claudulhu-server 2>&1 | tee "$PIPE" &
+octo-server 2>&1 | tee "$PIPE" &
 SERVER_PID=$!
 
 # Read lines from the pipe; forward each one and trigger QR on sentinel.
@@ -112,7 +112,7 @@ while IFS= read -r line; do
     if [ "$QR_PRINTED" -eq 0 ] && \
        printf '%s' "$line" | grep -qF "$SENTINEL"; then
         echo ""
-        echo "[claudulhu] Scan this QR code with the app to connect:"
+        echo "[octo] Scan this QR code with the app to connect:"
         echo ""
         printf '%s' "${QR_DATA}" | qrencode -l L -m 4 -t UTF8 -o -
         echo ""

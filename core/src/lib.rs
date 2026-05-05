@@ -39,13 +39,13 @@ use tokio::sync::{mpsc, oneshot};
 
 // ── Data directory ────────────────────────────────────────────────────────────
 
-/// Root data directory: $CLAUDULHU_DATA_DIR if set, otherwise $HOME/.claudulhu.
+/// Root data directory: $OCTO_DATA_DIR if set, otherwise $HOME/.octo.
 /// In Docker this is set to /data so sessions survive image updates via a named volume.
 pub fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("CLAUDULHU_DATA_DIR") {
+    if let Ok(d) = std::env::var("OCTO_DATA_DIR") {
         PathBuf::from(d)
     } else {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claudulhu")
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".octo")
     }
 }
 
@@ -683,7 +683,7 @@ pub async fn execute_tool(
             let url = input["url"].as_str().unwrap_or("");
             if url.is_empty() { return "error: url is required".to_string(); }
             match http_client().get(url)
-                .header("User-Agent", "Mozilla/5.0 (compatible; claudulhu/1.0)")
+                .header("User-Agent", "Mozilla/5.0 (compatible; octo/1.0)")
                 .send().await {
                 Err(e)   => format!("error: {e}"),
                 Ok(resp) => {
@@ -1308,7 +1308,7 @@ pub async fn run_startup_prompt(
 /// returned as the HTTP response — so the model MUST always emit a text block
 /// in the last turn.
 pub fn build_ephemeral_system_prompt() -> &'static str {
-    "You are responding to a query from another container in the claudulhu network. \
+    "You are responding to a query from another container in the octo network. \
      Use whatever tools are available to answer fully. \
      IMPORTANT: you MUST end your response with a text message that directly answers \
      the query — even if you used tools to gather information, always write a final \
@@ -1440,7 +1440,7 @@ pub fn create_worktree(repo_path: &str, branch: &str) -> Result<String, String> 
 // ── Shell Environment Bootstrap ───────────────────────────────────────────────
 
 pub fn init_shell_env() {
-    if std::env::var("CLAUDULHU_SKIP_SHELL_ENV").is_ok() {
+    if std::env::var("OCTO_SKIP_SHELL_ENV").is_ok() {
         return;
     }
     let output = std::process::Command::new("zsh")

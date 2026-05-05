@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use claudulhu_k8s_ops::k8s;
+use octo_k8s_ops::k8s;
 use data_encoding::BASE32_NOPAD;
 use tokio::process::Command;
 
@@ -38,7 +38,7 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
 
     let client = k8s::build_client().await?;
 
-    println!("Ensuring claudulhu namespace...");
+    println!("Ensuring octo namespace...");
     k8s::ensure_namespace(&client).await?;
     println!("Configuring RBAC...");
     k8s::ensure_rbac(&client).await?;

@@ -13,7 +13,7 @@ use kube::{
 use serde_json::json;
 use tracing::{error, info};
 
-pub const NAMESPACE:         &str = "claudulhu";
+pub const NAMESPACE:         &str = "octo";
 pub const RULYEH_NOISE_PORT: u16  = 30900;
 
 const NODEPORT_MIN:  u16  = 30100;
@@ -38,7 +38,7 @@ pub async fn build_client() -> anyhow::Result<Client> {
 pub async fn list_managed_deployments(client: &Client) -> anyhow::Result<Vec<ChildInfo>> {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
     let list = deployments
-        .list(&ListParams::default().labels("claudulhu.managed=1"))
+        .list(&ListParams::default().labels("octo.managed=1"))
         .await
         .context("list deployments")?;
 
@@ -48,7 +48,7 @@ pub async fn list_managed_deployments(client: &Client) -> anyhow::Result<Vec<Chi
     for d in list {
         let name        = d.metadata.name.unwrap_or_default();
         let annotations = d.metadata.annotations.unwrap_or_default();
-        let git_url     = annotations.get("claudulhu.git_url").cloned().unwrap_or_default();
+        let git_url     = annotations.get("octo.git_url").cloned().unwrap_or_default();
 
         let status = {
             let st        = d.status.as_ref();
@@ -157,13 +157,13 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
 
     let meta_labels = json!({
-        "claudulhu.managed": "1",
+        "octo.managed": "1",
         "app": p.name,
     });
 
     let mut meta_annotations = json!({});
     if let Some(url) = p.git_url {
-        meta_annotations["claudulhu.git_url"] = json!(url);
+        meta_annotations["octo.git_url"] = json!(url);
     }
 
     let mut env = vec![
@@ -186,11 +186,11 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     if let Some(s) = p.startup_prompt {
         env.push(json!({"name": "STARTUP_PROMPT", "value": s}));
     }
-    if std::env::var("CLAUDULHU_DEV").as_deref() == Ok("1") {
-        env.push(json!({"name": "CLAUDULHU_DEV", "value": "1"}));
+    if std::env::var("OCTO_DEV").as_deref() == Ok("1") {
+        env.push(json!({"name": "OCTO_DEV", "value": "1"}));
     }
 
-    let pull_policy = if std::env::var("CLAUDULHU_DEV").as_deref() == Ok("1") {
+    let pull_policy = if std::env::var("OCTO_DEV").as_deref() == Ok("1") {
         "IfNotPresent"
     } else {
         "Always"
@@ -201,7 +201,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
 
     let pod_spec = json!({
         "containers": [{
-            "name": "claudulhu",
+            "name": "octo",
             "image": IMAGE,
             "imagePullPolicy": pull_policy,
             "command": [ENTRYPOINT],
@@ -322,7 +322,7 @@ pub async fn restart_deployments(client: &Client, names: &[&str]) -> anyhow::Res
 
     let targets: Vec<String> = if names.is_empty() {
         let list = deployments
-            .list(&ListParams::default().labels("claudulhu.managed=1"))
+            .list(&ListParams::default().labels("octo.managed=1"))
             .await
             .context("list managed deployments")?;
         let mut t: Vec<String> = list.iter().filter_map(|d| d.metadata.name.clone()).collect();
@@ -377,12 +377,12 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
 
     // Collect: all managed children + rulyeh.
     let mut targets: Vec<(String, &str)> = deployments
-        .list(&ListParams::default().labels("claudulhu.managed=1"))
+        .list(&ListParams::default().labels("octo.managed=1"))
         .await
         .context("list managed deployments")?
         .iter()
         .filter_map(|d| d.metadata.name.clone())
-        .map(|n| (n, "claudulhu"))
+        .map(|n| (n, "octo"))
         .collect();
     targets.push((RULYEH_NAME.to_string(), RULYEH_NAME));
 
@@ -437,7 +437,7 @@ pub async fn delete_child_resources(client: &Client, name: &str) -> anyhow::Resu
     Ok(())
 }
 
-// ── Init (claudulhu init) ─────────────────────────────────────────────────────
+// ── Init (octo init) ─────────────────────────────────────────────────────
 
 pub async fn ensure_namespace(client: &Client) -> anyhow::Result<()> {
     let api: Api<Namespace> = Api::all(client.clone());
@@ -446,7 +446,7 @@ pub async fn ensure_namespace(client: &Client) -> anyhow::Result<()> {
         "kind": "Namespace",
         "metadata": {"name": NAMESPACE}
     }))?;
-    api.patch(NAMESPACE, &PatchParams::apply("claudulhu").force(), &Patch::Apply(ns))
+    api.patch(NAMESPACE, &PatchParams::apply("octo").force(), &Patch::Apply(ns))
         .await.context("ensure namespace")?;
     Ok(())
 }
@@ -458,7 +458,7 @@ pub async fn ensure_rbac(client: &Client) -> anyhow::Result<()> {
         "kind": "ServiceAccount",
         "metadata": {"name": RULYEH_NAME, "namespace": NAMESPACE}
     }))?;
-    sa_api.patch(RULYEH_NAME, &PatchParams::apply("claudulhu").force(), &Patch::Apply(sa))
+    sa_api.patch(RULYEH_NAME, &PatchParams::apply("octo").force(), &Patch::Apply(sa))
         .await.context("ensure ServiceAccount")?;
 
     let cr_api: Api<ClusterRole> = Api::all(client.clone());
@@ -476,7 +476,7 @@ pub async fn ensure_rbac(client: &Client) -> anyhow::Result<()> {
              "verbs": ["get","list","watch","patch","delete"]}
         ]
     }))?;
-    cr_api.patch(RULYEH_NAME, &PatchParams::apply("claudulhu").force(), &Patch::Apply(cr))
+    cr_api.patch(RULYEH_NAME, &PatchParams::apply("octo").force(), &Patch::Apply(cr))
         .await.context("ensure ClusterRole")?;
 
     let crb_api: Api<ClusterRoleBinding> = Api::all(client.clone());
@@ -491,7 +491,7 @@ pub async fn ensure_rbac(client: &Client) -> anyhow::Result<()> {
         },
         "subjects": [{"kind": "ServiceAccount", "name": RULYEH_NAME, "namespace": NAMESPACE}]
     }))?;
-    crb_api.patch(RULYEH_NAME, &PatchParams::apply("claudulhu").force(), &Patch::Apply(crb))
+    crb_api.patch(RULYEH_NAME, &PatchParams::apply("octo").force(), &Patch::Apply(crb))
         .await.context("ensure ClusterRoleBinding")?;
 
     Ok(())
@@ -525,7 +525,7 @@ pub async fn upsert_secret(
         "metadata": {"name": "rulyeh-secrets", "namespace": NAMESPACE},
         "stringData": string_data
     }))?;
-    secrets.patch("rulyeh-secrets", &PatchParams::apply("claudulhu").force(), &Patch::Apply(secret))
+    secrets.patch("rulyeh-secrets", &PatchParams::apply("octo").force(), &Patch::Apply(secret))
         .await.context("upsert secret")?;
     Ok(())
 }
@@ -572,9 +572,9 @@ pub async fn upsert_rulyeh_deployment(client: &Client, public_port: u16) -> anyh
                         "env": [
                             {"name": "PUBLIC_PORT",           "value": public_port.to_string()},
                             {"name": "NOISE_PORT",            "value": "9000"},
-                            {"name": "CLAUDULHU_DATA_DIR",    "value": "/data"},
+                            {"name": "OCTO_DATA_DIR",    "value": "/data"},
                             {"name": "NOISE_KEY_FILE",        "value": "/data/noise_key.bin"},
-                            {"name": "CLAUDULHU_SKIP_SHELL_ENV", "value": "1"}
+                            {"name": "OCTO_SKIP_SHELL_ENV", "value": "1"}
                         ],
                         "envFrom": [{"secretRef": {"name": "rulyeh-secrets"}}],
                         "ports": [
@@ -588,7 +588,7 @@ pub async fn upsert_rulyeh_deployment(client: &Client, public_port: u16) -> anyh
             }
         }
     }))?;
-    deployments.patch(RULYEH_NAME, &PatchParams::apply("claudulhu").force(), &Patch::Apply(deployment))
+    deployments.patch(RULYEH_NAME, &PatchParams::apply("octo").force(), &Patch::Apply(deployment))
         .await.context("upsert rulyeh deployment")?;
     Ok(())
 }
@@ -605,7 +605,7 @@ pub async fn ensure_rulyeh_services(client: &Client, noise_port: u16) -> anyhow:
             "ports": [{"port": 8000, "targetPort": 8000, "name": "http"}]
         }
     }))?;
-    services.patch(RULYEH_NAME, &PatchParams::apply("claudulhu").force(), &Patch::Apply(svc))
+    services.patch(RULYEH_NAME, &PatchParams::apply("octo").force(), &Patch::Apply(svc))
         .await.context("ensure rulyeh ClusterIP service")?;
 
     let np_name = format!("{RULYEH_NAME}-noise");
@@ -681,7 +681,7 @@ pub async fn get_public_ip_via_pod(client: &Client, deployment: &str) -> anyhow:
     Ok(ip.trim().to_string())
 }
 
-/// Read a single key from a K8s Secret in the claudulhu namespace.
+/// Read a single key from a K8s Secret in the octo namespace.
 pub async fn read_secret_value(client: &Client, secret_name: &str, key: &str) -> anyhow::Result<String> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
     let secret  = secrets.get(secret_name).await.with_context(|| format!("get secret {secret_name}"))?;
@@ -714,7 +714,7 @@ pub async fn rollout_restart_deployment(client: &Client, name: &str) -> anyhow::
         }
     });
     deployments
-        .patch(name, &PatchParams::apply("claudulhu"), &Patch::Merge(&patch))
+        .patch(name, &PatchParams::apply("octo"), &Patch::Merge(&patch))
         .await
         .with_context(|| format!("rollout restart deployment/{name}"))?;
     Ok(())
@@ -737,7 +737,7 @@ pub async fn exec_in_pod(pod_name: &str, cmd: &[&str]) -> anyhow::Result<String>
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Delete the entire claudulhu namespace, removing all resources and PVC data.
+/// Delete the entire octo namespace, removing all resources and PVC data.
 pub async fn delete_namespace(client: &Client) -> anyhow::Result<()> {
     let api: Api<Namespace> = Api::all(client.clone());
     api.delete(NAMESPACE, &DeleteParams::default()).await
@@ -746,7 +746,7 @@ pub async fn delete_namespace(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns true if the claudulhu namespace still exists.
+/// Returns true if the octo namespace still exists.
 pub async fn namespace_exists(client: &Client) -> bool {
     let api: Api<Namespace> = Api::all(client.clone());
     api.get(NAMESPACE).await.is_ok()

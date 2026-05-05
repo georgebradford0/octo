@@ -21,7 +21,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use claudulhu_core::{
+use octo_core::{
     build_ephemeral_system_prompt, build_system_prompt, build_tools_with_mcp,
     chain_executor_with_mcp, effective_repo, get_branches_for_repo,
     init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config, resolve_api_key,
@@ -33,15 +33,15 @@ use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
-const NOISE_KEY_FILE: &str = "/etc/claudulhu/noise_key.bin";
+const NOISE_KEY_FILE: &str = "/etc/octo/noise_key.bin";
 
 // ── Session persistence ───────────────────────────────────────────────────────
 
 fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("CLAUDULHU_DATA_DIR") {
+    if let Ok(d) = std::env::var("OCTO_DATA_DIR") {
         PathBuf::from(d)
     } else {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claudulhu")
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".octo")
     }
 }
 
@@ -585,7 +585,7 @@ async fn main() {
     init_shell_env();
 
     let args: Vec<String> = std::env::args().collect();
-    let is_dev   = std::env::var("CLAUDULHU_DEV").as_deref() == Ok("1");
+    let is_dev   = std::env::var("OCTO_DEV").as_deref() == Ok("1");
     let key_file = std::env::var("NOISE_KEY_FILE").unwrap_or_else(|_| NOISE_KEY_FILE.to_string());
 
     let injected_keypair: Option<(Vec<u8>, Vec<u8>)> = std::env::var("NOISE_PRIVATE_KEY").ok()
@@ -612,7 +612,7 @@ async fn main() {
     }
 
     let (static_private, static_public) = if is_dev {
-        warn!("[server] DEV MODE: using fixed dev keypair (CLAUDULHU_DEV=1)");
+        warn!("[server] DEV MODE: using fixed dev keypair (OCTO_DEV=1)");
         (DEV_STATIC_PRIVATE.to_vec(), DEV_STATIC_PUBLIC.to_vec())
     } else if let Some(kp) = injected_keypair {
         kp

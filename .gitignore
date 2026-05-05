@@ -1,6 +1,6 @@
-claudulhu/install
+octo/install
 __pycache__/
-claudulhu-upload.keystore
+octo-upload.keystore
 server/target/
 mobile/android/zotik-456123-a116e792e9e6.json
 target/

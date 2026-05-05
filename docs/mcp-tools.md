@@ -1,13 +1,13 @@
 # Runtime MCP Tools
 
-Claudulhu supports adding tools at runtime — without rebuilding the Docker image — via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). MCP servers are external processes that advertise tools over a simple JSON-RPC protocol. Claudulhu acts as an MCP host: it spawns configured servers on startup, discovers their tools, and makes them available to the AI alongside built-in tools.
+Octo supports adding tools at runtime — without rebuilding the Docker image — via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). MCP servers are external processes that advertise tools over a simple JSON-RPC protocol. Octo acts as an MCP host: it spawns configured servers on startup, discovers their tools, and makes them available to the AI alongside built-in tools.
 
 ## How it works
 
-1. On startup, Claudulhu reads `/data/mcp.json` (see [Configuration](#configuration)).
+1. On startup, Octo reads `/data/mcp.json` (see [Configuration](#configuration)).
 2. Each configured server is spawned as a child process.
-3. Claudulhu performs the MCP handshake (`initialize` → `tools/list`) and merges the returned tool definitions into the set sent to Claude.
-4. When Claude calls one of these tools, Claudulhu dispatches a `tools/call` JSON-RPC request to the appropriate server and returns the result.
+3. Octo performs the MCP handshake (`initialize` → `tools/list`) and merges the returned tool definitions into the set sent to Claude.
+4. When Claude calls one of these tools, Octo dispatches a `tools/call` JSON-RPC request to the appropriate server and returns the result.
 
 The transport is **stdio** (newline-delimited JSON-RPC over the process's stdin/stdout). This is the standard transport used by all major MCP SDKs.
 
@@ -72,7 +72,7 @@ docker run \
   -v /host/path/to/mcp.json:/data/mcp.json:ro \
   -e ANTHROPIC_API_KEY=... \
   -e GIT_URL=... \
-  ghcr.io/georgebradford0/claudulhu-server:latest
+  ghcr.io/georgebradford0/octo-server:latest
 ```
 
 ### Docker Compose
@@ -81,11 +81,11 @@ Add a bind mount to your `docker-compose.yml`:
 
 ```yaml
 services:
-  claudulhu:
-    image: ghcr.io/georgebradford0/claudulhu-server:latest
+  octo:
+    image: ghcr.io/georgebradford0/octo-server:latest
     volumes:
       - ./mcp.json:/data/mcp.json:ro
-      - claudulhu-data:/data
+      - octo-data:/data
     environment:
       - GIT_URL=${GIT_URL}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}

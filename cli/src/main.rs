@@ -2,14 +2,14 @@ mod containers;
 mod init;
 mod mcp;
 
-use claudulhu_k8s_ops;
+use octo_k8s_ops;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 
 #[derive(Parser)]
-#[command(name = "claudulhu", about = "claudulhu cluster management CLI")]
+#[command(name = "octo", about = "octo cluster management CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -48,7 +48,7 @@ enum Command {
         action: ContainersAction,
     },
 
-    /// Delete the entire claudulhu namespace and all data (irreversible)
+    /// Delete the entire octo namespace and all data (irreversible)
     Destroy {
         /// Skip confirmation prompt
         #[arg(short, long)]
@@ -78,10 +78,10 @@ enum Command {
     /// Print the CLI version
     Version,
 
-    /// Update the claudulhu CLI to the latest release
+    /// Update the octo CLI to the latest release
     Update,
 
-    /// Remove the claudulhu binary and shell completions from this machine
+    /// Remove the octo binary and shell completions from this machine
     Uninstall {
         /// Skip confirmation prompt
         #[arg(short, long)]
@@ -200,9 +200,9 @@ fn remove_completions() {
     };
 
     let files = [
-        home.join(".local/share/bash-completion/completions/claudulhu"),
-        home.join(".zfunc/_claudulhu"),
-        home.join(".config/fish/completions/claudulhu.fish"),
+        home.join(".local/share/bash-completion/completions/octo"),
+        home.join(".zfunc/_octo"),
+        home.join(".config/fish/completions/octo.fish"),
     ];
     for path in &files {
         if path.exists() {
@@ -210,12 +210,12 @@ fn remove_completions() {
         }
     }
 
-    // Remove the `. .../claudulhu` source line added to ~/.bashrc.
+    // Remove the `. .../octo` source line added to ~/.bashrc.
     let bashrc = home.join(".bashrc");
     if let Ok(content) = std::fs::read_to_string(&bashrc) {
         let cleaned = content
             .lines()
-            .filter(|l| !l.contains("claudulhu"))
+            .filter(|l| !l.contains("octo"))
             .collect::<Vec<_>>()
             .join("\n");
         let cleaned = if content.ends_with('\n') { cleaned + "\n" } else { cleaned };
@@ -228,16 +228,16 @@ async fn update() -> Result<()> {
     use tokio::process::Command;
 
     let artifact = match (OS, ARCH) {
-        ("linux",  "x86_64")  => "claudulhu-linux-x86_64",
-        ("linux",  "aarch64") => "claudulhu-linux-aarch64",
-        ("macos",  "x86_64")  => "claudulhu-macos-x86_64",
-        ("macos",  "aarch64") => "claudulhu-macos-aarch64",
+        ("linux",  "x86_64")  => "octo-linux-x86_64",
+        ("linux",  "aarch64") => "octo-linux-aarch64",
+        ("macos",  "x86_64")  => "octo-macos-x86_64",
+        ("macos",  "aarch64") => "octo-macos-aarch64",
         _ => anyhow::bail!("unsupported platform: {OS}/{ARCH}"),
     };
 
     // Fetch the latest release tag from GitHub API.
     let api_output = Command::new("curl")
-        .args(["-fsSL", "https://api.github.com/repos/georgebradford0/claudulhu/releases/latest"])
+        .args(["-fsSL", "https://api.github.com/repos/georgebradford0/octo/releases/latest"])
         .output()
         .await?;
     anyhow::ensure!(api_output.status.success(), "failed to fetch release info");
@@ -254,30 +254,30 @@ async fn update() -> Result<()> {
     }
 
     let url = format!(
-        "https://github.com/georgebradford0/claudulhu/releases/latest/download/{artifact}"
+        "https://github.com/georgebradford0/octo/releases/latest/download/{artifact}"
     );
 
     println!("Downloading {artifact}...");
     let status = Command::new("curl")
-        .args(["-fsSL", &url, "-o", "/tmp/claudulhu-update"])
+        .args(["-fsSL", &url, "-o", "/tmp/octo-update"])
         .status()
         .await?;
     anyhow::ensure!(status.success(), "download failed");
 
     // Determine current binary path.
     let current = std::env::current_exe()?;
-    let dest = current.to_str().unwrap_or("/usr/local/bin/claudulhu");
+    let dest = current.to_str().unwrap_or("/usr/local/bin/octo");
 
-    Command::new("chmod").args(["+x", "/tmp/claudulhu-update"]).status().await?;
+    Command::new("chmod").args(["+x", "/tmp/octo-update"]).status().await?;
 
     // Try direct move, fall back to sudo.
     let mv = Command::new("mv")
-        .args(["/tmp/claudulhu-update", dest])
+        .args(["/tmp/octo-update", dest])
         .status()
         .await?;
     if !mv.success() {
         let status = Command::new("sudo")
-            .args(["mv", "/tmp/claudulhu-update", dest])
+            .args(["mv", "/tmp/octo-update", dest])
             .status()
             .await?;
         anyhow::ensure!(status.success(), "failed to install updated binary");
@@ -329,7 +329,7 @@ async fn main() -> Result<()> {
         Command::Destroy { yes } => {
             if !yes {
                 use std::io::Write;
-                print!("This will delete the entire claudulhu namespace and all PVC data. Type 'yes' to confirm: ");
+                print!("This will delete the entire octo namespace and all PVC data. Type 'yes' to confirm: ");
                 std::io::stdout().flush()?;
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
@@ -341,7 +341,7 @@ async fn main() -> Result<()> {
             remove_completions();
             use std::io::Write;
             use std::time::Instant;
-            use claudulhu_k8s_ops::k8s;
+            use octo_k8s_ops::k8s;
             let client = k8s::build_client().await?;
 
             println!("Deleting namespace '{}'...", k8s::NAMESPACE);
@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
             ContainersAction::Delete { name, yes } => containers::delete(&name, yes).await?,
         },
         Command::Reload { containers, all } => {
-            use claudulhu_k8s_ops::k8s;
+            use octo_k8s_ops::k8s;
             let client = k8s::build_client().await?;
             let updated = if all {
                 k8s::update_and_restart_all(&client).await?
@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Logs { name, follow } => {
-            use claudulhu_k8s_ops::k8s;
+            use octo_k8s_ops::k8s;
             let client = k8s::build_client().await?;
 
             // Build list of deployment names to show logs for.
@@ -423,7 +423,7 @@ async fn main() -> Result<()> {
         Command::Update => update().await?,
         Command::Uninstall { yes } => uninstall(yes).await?,
         Command::Completions { shell } => {
-            generate(shell, &mut Cli::command(), "claudulhu", &mut std::io::stdout());
+            generate(shell, &mut Cli::command(), "octo", &mut std::io::stdout());
         }
         Command::Mcp { action } => match action {
             McpAction::List { container } => mcp::list(&container).await?,

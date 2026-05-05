@@ -1,15 +1,15 @@
 [package]
-name        = "claudulhu"
+name        = "octo"
 version     = "0.0.32"
 edition     = "2021"
-description = "claudulhu cluster management CLI"
+description = "octo cluster management CLI"
 
 [[bin]]
-name = "claudulhu"
+name = "octo"
 path = "src/main.rs"
 
 [dependencies]
-claudulhu-k8s-ops = { path = "../k8s-ops" }
+octo-k8s-ops = { path = "../k8s-ops" }
 anyhow            = "1.0"
 clap              = { version = "4", features = ["derive", "env"] }
 clap_complete     = "4"

@@ -30,7 +30,7 @@ COPY rulyeh/src  rulyeh/src
 COPY server/src  server/src
 COPY k8s-ops/src k8s-ops/src
 
-RUN cargo build --release -p claudulhu-rulyeh -p claudulhu-server
+RUN cargo build --release -p octo-rulyeh -p octo-server
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -45,18 +45,18 @@ RUN apt-get update && apt-get install -y ca-certificates curl git && \
     # uvx (via uv)
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
 
-COPY --from=builder /build/target/release/claudulhu-rulyeh /usr/local/bin/claudulhu-rulyeh
-COPY --from=builder /build/target/release/claudulhu-server /usr/local/bin/claudulhu-server
+COPY --from=builder /build/target/release/octo-rulyeh /usr/local/bin/octo-rulyeh
+COPY --from=builder /build/target/release/octo-server /usr/local/bin/octo-server
 
 COPY rulyeh/docker-entrypoint.sh        /usr/local/bin/docker-entrypoint.sh
 COPY server/docker-entrypoint.sh        /usr/local/bin/docker-entrypoint-server.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-server.sh
 
-LABEL org.opencontainers.image.source=https://github.com/georgebradford0/claudulhu
+LABEL org.opencontainers.image.source=https://github.com/georgebradford0/octo
 
 ENV HOME=/root
-ENV CLAUDULHU_SKIP_SHELL_ENV=1
-ENV CLAUDULHU_DATA_DIR=/data
+ENV OCTO_SKIP_SHELL_ENV=1
+ENV OCTO_DATA_DIR=/data
 ENV NOISE_KEY_FILE=/data/noise_key.bin
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

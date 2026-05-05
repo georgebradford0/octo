@@ -18,7 +18,7 @@
 ## [0.1.0] - 2026-04-06
 
 ### Added
-- **Connection status dot in chat header** — 8×8 colored circle to the left of the "claudulhu" title indicates server connection state (green = ready, yellow = connecting/streaming, red = error)
+- **Connection status dot in chat header** — 8×8 colored circle to the left of the "octo" title indicates server connection state (green = ready, yellow = connecting/streaming, red = error)
 
 ### Fixed
 - **Noise tunnel re-establishment on app foreground** — AppState listener in `AppInner` now calls `NoiseConnection.disconnect()` + `NoiseConnection.connect()` when the app resumes from background, fixing silent WebSocket reconnect failures caused by iOS suspending the native Noise TCP proxy

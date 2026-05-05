@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use claudulhu_k8s_ops::k8s;
+use octo_k8s_ops::k8s;
 use serde::{Deserialize, Serialize};
 
 const MCP_PATH: &str = "/data/mcp.json";
@@ -137,7 +137,7 @@ pub async fn add(
     } else if logs.contains(&init_fail_marker) {
         anyhow::bail!("MCP server '{name}' process started but MCP handshake failed.");
     } else {
-        anyhow::bail!("MCP server '{name}' did not confirm connection within timeout — entry not saved. Run `claudulhu logs {container}` to investigate.");
+        anyhow::bail!("MCP server '{name}' did not confirm connection within timeout — entry not saved. Run `octo logs {container}` to investigate.");
     }
 
     Ok(())

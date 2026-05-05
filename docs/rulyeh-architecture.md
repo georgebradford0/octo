@@ -1,8 +1,8 @@
-# claudulhu-rulyeh: Architecture
+# octo-rulyeh: Architecture
 
 ## Overview
 
-`claudulhu-rulyeh` is a Docker container that acts as the single entry point for the mobile app. It runs a full AI agentic loop (same as `claudulhu-server`) with Docker socket access, so it can manage child repo containers via bash. The mobile app scans one QR code (rulyeh's), chats with rulyeh for control tasks, and taps into individual child containers for code work.
+`octo-rulyeh` is a Docker container that acts as the single entry point for the mobile app. It runs a full AI agentic loop (same as `octo-server`) with Docker socket access, so it can manage child repo containers via bash. The mobile app scans one QR code (rulyeh's), chats with rulyeh for control tasks, and taps into individual child containers for code work.
 
 ## Components
 
@@ -17,9 +17,9 @@
 
 ### Child containers
 
-- Unchanged `claudulhu-server` instances
+- Unchanged `octo-server` instances
 - Each has its own Noise keypair and port (default range 9100–9199, set via `CHILD_PORT_RANGE`)
-- Labeled `claudulhu.managed=1` and `claudulhu.git_url=<url>` so rulyeh can discover them
+- Labeled `octo.managed=1` and `octo.git_url=<url>` so rulyeh can discover them
 - Mobile connects directly to each child via an independent Noise tunnel
 
 ### Mobile
@@ -48,25 +48,25 @@ These frames are intercepted by `ChatPane`'s `onContainerFrame` prop and routed 
 
 ## Pubkey discovery
 
-Rulyeh runs `docker exec <container_name> claudulhu-server --print-pubkey` to get a child's Noise public key. Results are cached in `/data/pubkey_registry.json` (maps container ID → base32 pubkey) so exec is only run once per container.
+Rulyeh runs `docker exec <container_name> octo-server --print-pubkey` to get a child's Noise public key. Results are cached in `/data/pubkey_registry.json` (maps container ID → base32 pubkey) so exec is only run once per container.
 
 ## Networking
 
-All containers run on the `claudulhu-net` Docker bridge network (created by rulyeh's entrypoint on startup). Only rulyeh's Noise port (9000) is published to the host. Child Noise ports are reachable from outside for direct mobile connections.
+All containers run on the `octo-net` Docker bridge network (created by rulyeh's entrypoint on startup). Only rulyeh's Noise port (9000) is published to the host. Child Noise ports are reachable from outside for direct mobile connections.
 
 ## Deploying rulyeh
 
 ```sh
 docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v claudulhu-rulyeh-data:/data \
+  -v octo-rulyeh-data:/data \
   -p 9000:9000 \
   -e ANTHROPIC_API_KEY=... \
   -e PUBLIC_HOST=<your-server-ip> \
   ghcr.io/georgebradford0/rulyeh:latest
 ```
 
-Rulyeh creates the `claudulhu-net` network on startup. Child containers are created by asking rulyeh in chat (e.g. "start a server for github.com/owner/repo").
+Rulyeh creates the `octo-net` network on startup. Child containers are created by asking rulyeh in chat (e.g. "start a server for github.com/owner/repo").
 
 ## Docker image
 

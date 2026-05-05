@@ -1,4 +1,4 @@
-# claudulhu — project notes for Claude
+# octo — project notes for Claude
 
 `@` is used as a path prefix to reference files in the repository (e.g. `@src/main.rs`).
 
@@ -35,7 +35,7 @@ docker buildx build \
 
 ## Architecture overview
 
-Claudulhu is an agentic coding assistant: a server runs an AI loop against a git repo and clients (mobile, desktop) connect to it via an encrypted tunnel.
+Octo is an agentic coding assistant: a server runs an AI loop against a git repo and clients (mobile, desktop) connect to it via an encrypted tunnel.
 
 ### Components
 
@@ -61,7 +61,7 @@ Server listens on port 9000 (`NOISE_PORT`). The Curve25519 keypair is persisted 
 
 `rulyeh` is the parent orchestration node. The mobile client connects to it first via the QR-scanned Noise tunnel. It:
 
-- Polls Kubernetes (every 10 s) for Deployments in the `claudulhu` namespace labelled `claudulhu.managed=1`
+- Polls Kubernetes (every 10 s) for Deployments in the `octo` namespace labelled `octo.managed=1`
 - Caches each child's Noise public key in `/data/pubkey_registry.json`
 - Exposes `/containers` HTTP endpoint; clients poll it to get the current container list
 - Accepts `start_container` commands from the client, which scale the child Deployment to 1 replica and trigger an immediate re-poll

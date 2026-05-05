@@ -1,4 +1,4 @@
-use claudulhu_k8s_ops::k8s;
+use octo_k8s_ops::k8s;
 
 use std::{
     fs,
@@ -22,7 +22,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use claudulhu_core::{
+use octo_core::{
     build_ephemeral_system_prompt, build_tools_with_mcp, chain_executor_with_mcp,
     init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config,
     resolve_api_key, run_noise_proxy, send_message, to_base32, ApiMessage, AnthropicTool,
@@ -30,7 +30,7 @@ use claudulhu_core::{
 };
 use hex;
 use futures_util::{SinkExt, StreamExt};
-use claudulhu_k8s_ops::Client;
+use octo_k8s_ops::Client;
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -43,7 +43,7 @@ const NOISE_KEY_FILE: &str = "/data/noise_key.bin";
 // ── Container registry ────────────────────────────────────────────────────────
 
 fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("CLAUDULHU_DATA_DIR") {
+    if let Ok(d) = std::env::var("OCTO_DATA_DIR") {
         PathBuf::from(d)
     } else {
         PathBuf::from("/data")
@@ -454,7 +454,7 @@ async fn poll_containers(state: Arc<AppState>) {
 
 fn build_system_prompt() -> String {
     "\
-You are the master control node for a fleet of claudulhu coding assistant containers running on Kubernetes.\n\n\
+You are the master control node for a fleet of octo coding assistant containers running on Kubernetes.\n\n\
 To create a new child for a Git repository, use the create_pod tool — \
 it handles Kubernetes resources (Deployments, Services, PVCs), port assignment (NodePorts 30100–30199), \
 and all required environment variables automatically.\n\n\
@@ -493,7 +493,7 @@ fn message_child_tool() -> AnthropicTool {
 fn create_pod_tool() -> AnthropicTool {
     AnthropicTool {
         name: "create_pod".to_string(),
-        description: "Create and start a new claudulhu child for a Git repository on Kubernetes. \
+        description: "Create and start a new octo child for a Git repository on Kubernetes. \
                        Handles port assignment (NodePorts 30100–30199), PVCs, Deployment, and Services."
             .to_string(),
         input_schema: serde_json::json!({
@@ -737,7 +737,7 @@ async fn main() {
     init_shell_env();
 
     let args: Vec<String> = std::env::args().collect();
-    let is_dev   = std::env::var("CLAUDULHU_DEV").as_deref() == Ok("1");
+    let is_dev   = std::env::var("OCTO_DEV").as_deref() == Ok("1");
     let key_file = std::env::var("NOISE_KEY_FILE").unwrap_or_else(|_| NOISE_KEY_FILE.to_string());
 
     let injected_keypair: Option<(Vec<u8>, Vec<u8>)> = std::env::var("NOISE_PRIVATE_KEY").ok()

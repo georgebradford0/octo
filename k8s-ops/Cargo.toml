@@ -1,8 +1,8 @@
 [package]
-name        = "claudulhu-k8s-ops"
+name        = "octo-k8s-ops"
 version     = "0.1.0"
 edition     = "2021"
-description = "Shared Kubernetes and AWS operations for claudulhu"
+description = "Shared Kubernetes and AWS operations for octo"
 
 [dependencies]
 anyhow      = "1.0"
