@@ -152,7 +152,7 @@ pub enum ContentBlock {
 
 // ── Chat Events ───────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
     Ready              { session_id: String, resumed: bool },
@@ -164,7 +164,7 @@ pub enum ChatEvent {
     Error              { message: String },
     Interrupted        { cost_usd: f64 },
     InterruptAck,
-    Question           { question: String, answer_tx: oneshot::Sender<String> },
+    Question           { question: String, #[serde(skip)] answer_tx: Option<oneshot::Sender<String>> },
     System             { text: String },
     Spawning           { task: String },
     WorkerCreated      { branch: String, worktree_path: String, task: String },
@@ -589,7 +589,7 @@ pub async fn execute_tool(
             let question = input["question"].as_str().unwrap_or("").to_string();
             if question.is_empty() { return "error: question is required".to_string(); }
             let (otx, orx) = oneshot::channel::<String>();
-            tx.send(ChatEvent::Question { question, answer_tx: otx }).await.ok();
+            tx.send(ChatEvent::Question { question, answer_tx: Some(otx) }).await.ok();
             tokio::select! {
                 res = orx => match res {
                     Ok(answer) => answer,
@@ -1322,8 +1322,10 @@ pub async fn run_agentic_loop(
 
                 // If cancelled mid-tool-loop, flush results and stop.
                 if cancel.is_cancelled() {
-                    let mut s = session.lock().unwrap();
-                    s.messages.push(ApiMessage { role: "user".to_string(), content: tool_results });
+                    {
+                        let mut s = session.lock().unwrap();
+                        s.messages.push(ApiMessage { role: "user".to_string(), content: tool_results });
+                    }
                     let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
                     tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
                     return;

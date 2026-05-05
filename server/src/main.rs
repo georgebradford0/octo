@@ -368,13 +368,14 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             Err(e) => {
-                let mut msgs = msgs_arc.lock().unwrap();
-                msgs.push(ApiMessage {
-                    role:    "error".to_string(),
-                    content: vec![ContentBlock::Text { text: e.clone() }],
-                });
-                save_messages(&msgs);
-                drop(msgs);
+                {
+                    let mut msgs = msgs_arc.lock().unwrap();
+                    msgs.push(ApiMessage {
+                        role:    "error".to_string(),
+                        content: vec![ContentBlock::Text { text: e.clone() }],
+                    });
+                    save_messages(&msgs);
+                }
                 done_tx.send(ChatEvent::Error { message: e }).await.ok();
             }
         }
