@@ -88,18 +88,29 @@ pub async fn add(
     println!("→ writing config to '{container}'");
     write_config(&pod, &configs).await?;
 
-    println!("→ waiting for hot-reload watcher (~2s)...");
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let connected_marker  = format!("[mcp] '{name}' connected");
+    let spawn_fail_marker = format!("[mcp] failed to spawn '{name}'");
+    let init_fail_marker  = format!("[mcp] '{name}' initialize failed");
+    let no_tools_marker   = format!("[mcp] warning: server '{name}' advertised no tools");
 
-    println!("→ spawning MCP server process...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    println!("→ checking pod logs...");
-    let logs = tokio::process::Command::new("kubectl")
-        .args(["logs", "-n", k8s::NAMESPACE, &format!("deployment/{container}"), "--since=15s"])
-        .output().await
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
+    println!("→ waiting for MCP server to connect (up to 60s)...");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut logs = String::new();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        logs = tokio::process::Command::new("kubectl")
+            .args(["logs", "-n", k8s::NAMESPACE, &format!("deployment/{container}"), "--since=75s"])
+            .output().await
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let done = logs.contains(&connected_marker)
+            || logs.contains(&no_tools_marker)
+            || logs.contains(&spawn_fail_marker)
+            || logs.contains(&init_fail_marker);
+        if done || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+    }
 
     // Print any [mcp] lines relevant to this server so the user can see what happened.
     for line in logs.lines() {
@@ -107,11 +118,6 @@ pub async fn add(
             println!("  {line}");
         }
     }
-
-    let connected_marker  = format!("[mcp] '{name}' connected");
-    let spawn_fail_marker = format!("[mcp] failed to spawn '{name}'");
-    let init_fail_marker  = format!("[mcp] '{name}' initialize failed");
-    let no_tools_marker   = format!("[mcp] warning: server '{name}' advertised no tools");
 
     let success = logs.contains(&connected_marker) || logs.contains(&no_tools_marker);
 
