@@ -5,5 +5,6 @@ members = [
     "rulyeh",
     "k8s-ops",
     "cli",
+    "tests",
 ]
 resolver = "2"
