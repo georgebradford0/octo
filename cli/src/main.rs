@@ -235,11 +235,29 @@ async fn update() -> Result<()> {
         _ => anyhow::bail!("unsupported platform: {OS}/{ARCH}"),
     };
 
+    // Fetch the latest release tag from GitHub API.
+    let api_output = Command::new("curl")
+        .args(["-fsSL", "https://api.github.com/repos/georgebradford0/claudulhu/releases/latest"])
+        .output()
+        .await?;
+    anyhow::ensure!(api_output.status.success(), "failed to fetch release info");
+    let api_json: serde_json::Value = serde_json::from_slice(&api_output.stdout)?;
+    let latest_tag = api_json["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("unexpected release API response"))?;
+    let latest_version = latest_tag.trim_start_matches('v');
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    if latest_version == current_version {
+        println!("Already up to date (v{current_version}).");
+        return Ok(());
+    }
+
     let url = format!(
         "https://github.com/georgebradford0/claudulhu/releases/latest/download/{artifact}"
     );
 
-    println!("Downloading latest {artifact}...");
+    println!("Downloading {artifact}...");
     let status = Command::new("curl")
         .args(["-fsSL", &url, "-o", "/tmp/claudulhu-update"])
         .status()
@@ -265,7 +283,7 @@ async fn update() -> Result<()> {
         anyhow::ensure!(status.success(), "failed to install updated binary");
     }
 
-    println!("Updated to latest release.");
+    println!("Updated: v{current_version} → v{latest_version}");
     Ok(())
 }
 
