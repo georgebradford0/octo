@@ -96,7 +96,7 @@ pub async fn add(
 
     println!("→ checking pod logs...");
     let logs = tokio::process::Command::new("kubectl")
-        .args(["logs", "-n", k8s::NAMESPACE, &pod, "--since=15s"])
+        .args(["logs", "-n", k8s::NAMESPACE, &format!("deployment/{container}"), "--since=15s"])
         .output().await
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
@@ -117,7 +117,9 @@ pub async fn add(
 
     if !success {
         configs.retain(|c| c.name != name);
-        write_config(&pod, &configs).await?;
+        // Re-fetch the pod in case it was replaced since we started.
+        let current_pod = get_pod(container).await.unwrap_or(pod);
+        write_config(&current_pod, &configs).await?;
     }
 
     if logs.contains(&connected_marker) {
