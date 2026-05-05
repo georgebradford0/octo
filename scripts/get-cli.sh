@@ -39,7 +39,9 @@ echo "Installed to $INSTALL_DIR/$BIN"
 # Install k3s if not present (Linux only).
 if [ "$OS" = "Linux" ] && ! command -v k3s > /dev/null 2>&1; then
   echo "k3s not found — installing..."
-  curl -fsSL https://get.k3s.io | sh -
+  curl -fsSL https://get.k3s.io -o /tmp/k3s-install.sh
+  sh /tmp/k3s-install.sh
+  rm -f /tmp/k3s-install.sh
   # Copy kubeconfig to user location so kubectl/octo work without sudo.
   mkdir -p "$HOME/.kube"
   sudo cp /etc/rancher/k3s/k3s.yaml "$HOME/.kube/config"
