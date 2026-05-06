@@ -1,6 +1,6 @@
 # octo
 
-`octo` is a mobile agent management system which manages a fleet of Claude agents using Kubernetes.  It was originally designed to be specifically for coding but can be used to deploy any type of agent.  
+`octo` is a mobile agent management system which manages a fleet of LLM agents using Kubernetes.  It was originally designed for coding but can be used to deploy any type of agent.  
 
 ## Architecture
 
