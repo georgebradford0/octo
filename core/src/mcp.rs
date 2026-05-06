@@ -256,7 +256,9 @@ fn parse_tools(server_name: &str, result: &Value) -> Vec<AnthropicTool> {
         } else {
             serde_json::json!({ "type": "object", "properties": {} })
         };
-        Some(AnthropicTool { name: name.to_string(), description, input_schema })
+        // Prefix with server name to avoid collisions with built-in tools.
+        let prefixed = format!("{server_name}__{name}");
+        Some(AnthropicTool { name: prefixed, description, input_schema })
     }).collect::<Vec<_>>()
     .tap_warn_empty(server_name)
 }
@@ -323,7 +325,10 @@ pub async fn pool_call_tool(pool: &McpPool, name: &str, input: Value) -> Option<
     for client in guard.iter() {
         let mut c = client.lock().await;
         if c.tools.iter().any(|t| t.name == name) {
-            return Some(c.call_tool(name, input).await);
+            // Strip the "{server_name}__" prefix before forwarding to the MCP server,
+            // which expects the original unprefixed tool name.
+            let original = name.split_once("__").map(|(_, n)| n).unwrap_or(name);
+            return Some(c.call_tool(original, input).await);
         }
     }
     None
