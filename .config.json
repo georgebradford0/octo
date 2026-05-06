@@ -1,0 +1,6 @@
+{
+  "repo": "/path/to/your/repo",
+  "api_key": "sk-ant-...",
+  "model": "claude-sonnet-4-6",
+  "base_url": "https://your-openai-compatible-endpoint.com"
+}
