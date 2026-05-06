@@ -20,7 +20,7 @@ pub const LAIR_NOISE_PORT: u16  = 30900;
 
 const NODEPORT_MIN:  u16  = 30100;
 const NODEPORT_MAX:  u16  = 30199;
-const IMAGE:         &str = "ghcr.io/georgebradford0/lair:latest";
+pub const IMAGE:     &str = "ghcr.io/georgebradford0/lair:latest";
 const ENTRYPOINT:    &str = "/usr/local/bin/docker-entrypoint-server.sh";
 const LAIR_NAME:   &str = "lair";
 

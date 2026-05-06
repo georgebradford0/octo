@@ -436,7 +436,17 @@ async fn main() -> Result<()> {
             if updated.is_empty() {
                 println!("Nothing restarted.");
             } else {
-                println!("Restarted: {}", updated.join(", "));
+                println!(
+                    "Restarting {} with image {} ...",
+                    updated.join(", "),
+                    k8s::IMAGE,
+                );
+                for name in &updated {
+                    print!("  Waiting for {name} to be ready...");
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    k8s::wait_for_deployment_ready(&client, name, 120).await?;
+                    println!(" ready.");
+                }
             }
         }
         Command::Logs { name, follow } => {
