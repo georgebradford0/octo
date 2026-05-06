@@ -94,14 +94,3 @@ pub async fn delete(name: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn restart(names: &[String]) -> Result<()> {
-    let client = k8s::build_client().await?;
-    let name_strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let restarted = k8s::restart_deployments(&client, &name_strs).await?;
-    if restarted.is_empty() {
-        println!("Nothing to restart.");
-    } else {
-        println!("Restarted: {}", restarted.join(", "));
-    }
-    Ok(())
-}

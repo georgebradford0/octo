@@ -56,10 +56,33 @@ pub fn config_path() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    pub repo:    Option<String>,
-    pub name:    Option<String>,
-    pub api_key: Option<String>,
-    pub model:   Option<String>,
+    pub repo:     Option<String>,
+    pub name:     Option<String>,
+    pub api_key:  Option<String>,
+    pub model:    Option<String>,
+    pub base_url: Option<String>,
+}
+
+// ── API Backend ───────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub enum ApiBackend {
+    Anthropic,
+    OpenAi { base_url: String },
+}
+
+impl ApiBackend {
+    /// Resolve the backend from environment then config.
+    /// `OPENAI_BASE_URL` env var or `config.base_url` → OpenAI-compatible.
+    /// Otherwise → Anthropic.
+    pub fn resolve() -> Self {
+        let url = std::env::var("OPENAI_BASE_URL").ok().filter(|s| !s.is_empty())
+            .or_else(|| read_config().base_url.filter(|s| !s.is_empty()));
+        match url {
+            Some(u) => ApiBackend::OpenAi { base_url: u.trim_end_matches('/').to_string() },
+            None    => ApiBackend::Anthropic,
+        }
+    }
 }
 
 pub fn read_config() -> Config {
@@ -87,6 +110,7 @@ pub fn write_config(cfg: &Config) {
 
 pub fn resolve_api_key() -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()))
         .or_else(|| read_config().api_key)
         .or_else(|| read_key_from_shell_files())
 }
@@ -668,6 +692,101 @@ pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMess
     }).collect()
 }
 
+// ── OpenAI compatibility helpers ──────────────────────────────────────────────
+
+fn tools_to_openai(tools: &[AnthropicTool]) -> Vec<serde_json::Value> {
+    tools.iter().map(|t| serde_json::json!({
+        "type": "function",
+        "function": {
+            "name":        t.name,
+            "description": t.description,
+            "parameters":  t.input_schema,
+        }
+    })).collect()
+}
+
+/// Convert internal Anthropic-format messages to OpenAI chat messages.
+/// The system prompt is prepended as a `role: system` message.
+fn messages_to_openai(system: &str, messages: &[ApiMessage]) -> Vec<serde_json::Value> {
+    let mut out = vec![serde_json::json!({"role": "system", "content": system})];
+    for msg in messages {
+        match msg.role.as_str() {
+            "user" => {
+                // Text blocks → user message; tool_result blocks → tool messages.
+                let texts: Vec<&str> = msg.content.iter()
+                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
+                    .collect();
+                if !texts.is_empty() {
+                    out.push(serde_json::json!({"role": "user", "content": texts.join("\n")}));
+                }
+                for b in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, content } = b {
+                        let text = content.first()
+                            .and_then(|v| v["text"].as_str())
+                            .unwrap_or("");
+                        out.push(serde_json::json!({
+                            "role":         "tool",
+                            "tool_call_id": tool_use_id,
+                            "content":      text,
+                        }));
+                    }
+                }
+            }
+            "assistant" => {
+                let text: String = msg.content.iter()
+                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
+                    .collect::<Vec<_>>().join("");
+                let tool_calls: Vec<serde_json::Value> = msg.content.iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::ToolUse { id, name, input } = b {
+                            Some(serde_json::json!({
+                                "id":   id,
+                                "type": "function",
+                                "function": {
+                                    "name":      name,
+                                    "arguments": input.to_string(),
+                                }
+                            }))
+                        } else { None }
+                    }).collect();
+                let mut m = serde_json::json!({"role": "assistant", "content": serde_json::Value::Null});
+                if !text.is_empty()        { m["content"]    = serde_json::json!(text); }
+                if !tool_calls.is_empty()  { m["tool_calls"] = serde_json::json!(tool_calls); }
+                out.push(m);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Parse an OpenAI `/v1/chat/completions` response into (stop_reason, blocks).
+fn parse_openai_response(json: &serde_json::Value) -> (String, Vec<ContentBlock>) {
+    let choice       = &json["choices"][0];
+    let finish       = choice["finish_reason"].as_str().unwrap_or("stop");
+    let message      = &choice["message"];
+    let mut blocks   = Vec::new();
+
+    if let Some(text) = message["content"].as_str() {
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text { text: text.to_string() });
+        }
+    }
+    if let Some(calls) = message["tool_calls"].as_array() {
+        for tc in calls {
+            let id    = tc["id"].as_str().unwrap_or("").to_string();
+            let name  = tc["function"]["name"].as_str().unwrap_or("").to_string();
+            let args  = tc["function"]["arguments"].as_str().unwrap_or("{}");
+            let input = serde_json::from_str(args).unwrap_or_default();
+            blocks.push(ContentBlock::ToolUse { id, name, input });
+        }
+    }
+    let stop_reason = if finish == "tool_calls" { "tool_use" } else { "end_turn" }.to_string();
+    (stop_reason, blocks)
+}
+
+// ── call_turn ─────────────────────────────────────────────────────────────────
+
 pub async fn call_turn(
     messages:    &[ApiMessage],
     system:      &str,
@@ -676,103 +795,154 @@ pub async fn call_turn(
     cancel:      &CancellationToken,
     tx:          &mpsc::Sender<ChatEvent>,
     extra_tools: &[AnthropicTool],
+    backend:     &ApiBackend,
 ) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
-    let mut tools: Vec<serde_json::Value> = tool_definitions_with_mcp(extra_tools)
-        .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
-    if let Some(last) = tools.last_mut() {
-        last["cache_control"] = serde_json::json!({"type": "ephemeral"});
-    }
-
+    let all_tools = tool_definitions_with_mcp(extra_tools);
     let compacted = compact_history(messages, 20);
 
-    let mut messages_json: Vec<serde_json::Value> = compacted
-        .iter()
-        .map(|m| serde_json::to_value(m).unwrap())
-        .collect();
+    match backend {
+        ApiBackend::Anthropic => {
+            let mut tools_json: Vec<serde_json::Value> = all_tools
+                .iter().map(|t| serde_json::to_value(t).unwrap()).collect();
+            if let Some(last) = tools_json.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
 
-    // Distribute up to 2 cache breakpoints across the message history.
-    let n = messages_json.len();
-    if n >= 2 {
-        let candidates: Vec<usize> = if n < 4 { vec![n - 2] } else { vec![n - 2, n / 2] };
-        let mut seen = std::collections::HashSet::new();
-        for idx in candidates {
-            if seen.insert(idx) {
-                if let Some(content) = messages_json[idx]["content"].as_array_mut() {
-                    if let Some(last_block) = content.last_mut() {
-                        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            let mut messages_json: Vec<serde_json::Value> = compacted
+                .iter().map(|m| serde_json::to_value(m).unwrap()).collect();
+            let n = messages_json.len();
+            if n >= 2 {
+                let candidates: Vec<usize> = if n < 4 { vec![n - 2] } else { vec![n - 2, n / 2] };
+                let mut seen = std::collections::HashSet::new();
+                for idx in candidates {
+                    if seen.insert(idx) {
+                        if let Some(content) = messages_json[idx]["content"].as_array_mut() {
+                            if let Some(last_block) = content.last_mut() {
+                                last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
 
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 8192,
-        "system": [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
-        "tools": tools,
-        "messages": messages_json,
-    });
+            let body = serde_json::json!({
+                "model":      model,
+                "max_tokens": 8192,
+                "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
+                "tools":      tools_json,
+                "messages":   messages_json,
+            });
 
-    let response = tokio::select! {
-        res = http_client()
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "prompt-caching-2024-07-31")
-            .header("content-type", "application/json")
-            .json(&body).send() => res.map_err(|e| e.to_string())?,
-        _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
-    };
+            let response = tokio::select! {
+                res = http_client()
+                    .post("https://api.anthropic.com/v1/messages")
+                    .header("x-api-key",         api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("anthropic-beta",    "prompt-caching-2024-07-31")
+                    .header("content-type",      "application/json")
+                    .json(&body).send() => res.map_err(|e| e.to_string())?,
+                _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
+            };
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("API error {status}: {text}"));
-    }
+            if !response.status().is_success() {
+                let status = response.status();
+                let text   = response.text().await.unwrap_or_default();
+                return Err(format!("API error {status}: {text}"));
+            }
+            if cancel.is_cancelled() { return Err("__interrupted__".to_string()); }
 
-    if cancel.is_cancelled() {
-        return Err("__interrupted__".to_string());
-    }
+            let json: serde_json::Value = tokio::select! {
+                res = response.json() => res.map_err(|e| e.to_string())?,
+                _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
+            };
 
-    let json: serde_json::Value = tokio::select! {
-        res = response.json() => res.map_err(|e| e.to_string())?,
-        _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
-    };
+            let stop_reason  = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
+            let usage        = &json["usage"];
+            let stream_usage = StreamUsage {
+                input_tokens:                usage["input_tokens"].as_u64().unwrap_or(0),
+                output_tokens:               usage["output_tokens"].as_u64().unwrap_or(0),
+                cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                cache_read_input_tokens:     usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            };
 
-    let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
-    let usage = &json["usage"];
-    let stream_usage = StreamUsage {
-        input_tokens:                usage["input_tokens"].as_u64().unwrap_or(0),
-        output_tokens:               usage["output_tokens"].as_u64().unwrap_or(0),
-        cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-        cache_read_input_tokens:     usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
-    };
-
-    let mut blocks = Vec::new();
-    if let Some(content) = json["content"].as_array() {
-        for block in content {
-            match block["type"].as_str().unwrap_or("") {
-                "text" => {
-                    let text = block["text"].as_str().unwrap_or("").to_string();
-                    if !text.is_empty() {
-                        tx.send(ChatEvent::Text { text: text.clone() }).await.ok();
-                        blocks.push(ContentBlock::Text { text });
+            let mut blocks = Vec::new();
+            if let Some(content) = json["content"].as_array() {
+                for block in content {
+                    match block["type"].as_str().unwrap_or("") {
+                        "text" => {
+                            let text = block["text"].as_str().unwrap_or("").to_string();
+                            if !text.is_empty() {
+                                tx.send(ChatEvent::Text { text: text.clone() }).await.ok();
+                                blocks.push(ContentBlock::Text { text });
+                            }
+                        }
+                        "tool_use" => {
+                            let id    = block["id"].as_str().unwrap_or("").to_string();
+                            let name  = block["name"].as_str().unwrap_or("").to_string();
+                            let input = block["input"].clone();
+                            tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
+                            blocks.push(ContentBlock::ToolUse { id, name, input });
+                        }
+                        _ => {}
                     }
                 }
-                "tool_use" => {
-                    let id    = block["id"].as_str().unwrap_or("").to_string();
-                    let name  = block["name"].as_str().unwrap_or("").to_string();
-                    let input = block["input"].clone();
-                    tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
-                    blocks.push(ContentBlock::ToolUse { id, name, input });
-                }
-                _ => {}
             }
+            Ok((blocks, stop_reason, stream_usage))
+        }
+
+        ApiBackend::OpenAi { base_url } => {
+            let tools_json  = tools_to_openai(&all_tools);
+            let messages_oa = messages_to_openai(system, &compacted);
+
+            let body = serde_json::json!({
+                "model":      model,
+                "max_tokens": 8192,
+                "tools":      tools_json,
+                "messages":   messages_oa,
+            });
+
+            let url = format!("{base_url}/v1/chat/completions");
+            let response = tokio::select! {
+                res = http_client()
+                    .post(&url)
+                    .header("Authorization",  format!("Bearer {api_key}"))
+                    .header("content-type",   "application/json")
+                    .json(&body).send() => res.map_err(|e| e.to_string())?,
+                _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text   = response.text().await.unwrap_or_default();
+                return Err(format!("API error {status}: {text}"));
+            }
+            if cancel.is_cancelled() { return Err("__interrupted__".to_string()); }
+
+            let json: serde_json::Value = tokio::select! {
+                res = response.json() => res.map_err(|e| e.to_string())?,
+                _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
+            };
+
+            let (stop_reason, blocks) = parse_openai_response(&json);
+            for block in &blocks {
+                match block {
+                    ContentBlock::Text { text } =>
+                        tx.send(ChatEvent::Text { text: text.clone() }).await.ok(),
+                    ContentBlock::ToolUse { name, input, .. } =>
+                        tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok(),
+                    _ => None,
+                };
+            }
+            // OpenAI: no cache tokens; cost tracking skipped.
+            let stream_usage = StreamUsage {
+                input_tokens:                json["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+                output_tokens:               json["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens:     0,
+            };
+            Ok((blocks, stop_reason, stream_usage))
         }
     }
-
-    Ok((blocks, stop_reason, stream_usage))
 }
 
 /// Send a message and run the tool loop until Claude stops with end_turn.
@@ -793,20 +963,14 @@ pub async fn send_message(
                             -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
                             + Send + Sync>>,
 ) -> Result<(String, f64, Vec<ApiMessage>), String> {
+    let backend    = ApiBackend::resolve();
     let mut total_cost = 0.0f64;
     let mut last_text  = String::new();
 
     let (dummy_tx, _) = mpsc::channel::<ChatEvent>(1);
     let tx = event_tx.unwrap_or(dummy_tx);
 
-    let tools: Vec<serde_json::Value> = {
-        let mut t: Vec<serde_json::Value> = tool_definitions_with_mcp(extra_tools)
-            .into_iter().map(|t| serde_json::to_value(t).unwrap()).collect();
-        if let Some(last) = t.last_mut() {
-            last["cache_control"] = serde_json::json!({"type": "ephemeral"});
-        }
-        t
-    };
+    let all_tools = tool_definitions_with_mcp(extra_tools);
 
     let mut turn = 0usize;
     loop {
@@ -816,106 +980,174 @@ pub async fn send_message(
             return Ok((last_text, total_cost, messages));
         }
         let compacted = compact_history(&messages, 20);
-        let mut messages_json: Vec<serde_json::Value> = compacted.iter()
-            .map(|m| serde_json::to_value(m).unwrap())
-            .collect();
 
-        // Prompt-cache breakpoints.
-        let n = messages_json.len();
-        if n >= 2 {
-            let candidates: Vec<usize> = if n < 4 { vec![n - 2] } else { vec![n - 2, n / 2] };
-            let mut seen = std::collections::HashSet::new();
-            for idx in candidates {
-                if seen.insert(idx) {
-                    if let Some(content) = messages_json[idx]["content"].as_array_mut() {
-                        if let Some(last_block) = content.last_mut() {
-                            last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        let (json, stop_reason) = match &backend {
+            ApiBackend::Anthropic => {
+                let mut tools_json: Vec<serde_json::Value> = all_tools
+                    .iter().map(|t| serde_json::to_value(t).unwrap()).collect();
+                if let Some(last) = tools_json.last_mut() {
+                    last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                }
+                let mut messages_json: Vec<serde_json::Value> = compacted.iter()
+                    .map(|m| serde_json::to_value(m).unwrap()).collect();
+                let n = messages_json.len();
+                if n >= 2 {
+                    let candidates: Vec<usize> = if n < 4 { vec![n - 2] } else { vec![n - 2, n / 2] };
+                    let mut seen = std::collections::HashSet::new();
+                    for idx in candidates {
+                        if seen.insert(idx) {
+                            if let Some(content) = messages_json[idx]["content"].as_array_mut() {
+                                if let Some(last_block) = content.last_mut() {
+                                    last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                                }
+                            }
                         }
                     }
                 }
+                let body = serde_json::json!({
+                    "model":      model,
+                    "max_tokens": 8192,
+                    "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
+                    "tools":      tools_json,
+                    "messages":   messages_json,
+                });
+                let response = tokio::select! {
+                    res = http_client()
+                        .post("https://api.anthropic.com/v1/messages")
+                        .header("x-api-key",         api_key)
+                        .header("anthropic-version", "2023-06-01")
+                        .header("anthropic-beta",    "prompt-caching-2024-07-31")
+                        .header("content-type",      "application/json")
+                        .json(&body).send() => res.map_err(|e| e.to_string())?,
+                    _ = cancel.cancelled() => {
+                        tx.send(ChatEvent::InterruptAck).await.ok();
+                        return Ok((last_text, total_cost, messages));
+                    }
+                };
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let text   = response.text().await.unwrap_or_default();
+                    return Err(format!("API error {status}: {text}"));
+                }
+                let json: serde_json::Value = tokio::select! {
+                    res = response.json() => res.map_err(|e| e.to_string())?,
+                    _ = cancel.cancelled() => {
+                        tx.send(ChatEvent::InterruptAck).await.ok();
+                        return Ok((last_text, total_cost, messages));
+                    }
+                };
+                let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
+                let usage = &json["usage"];
+                info!(
+                    "[send_message] turn={turn} stop_reason={stop_reason} in={} out={} cache_create={} cache_read={}",
+                    usage["input_tokens"].as_u64().unwrap_or(0),
+                    usage["output_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                );
+                total_cost += cost_usd(
+                    model,
+                    usage["input_tokens"].as_u64().unwrap_or(0),
+                    usage["output_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                );
+                (json, stop_reason)
             }
-        }
 
-        let body = serde_json::json!({
-            "model":      model,
-            "max_tokens": 8192,
-            "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
-            "tools":      tools,
-            "messages":   messages_json,
-        });
-
-        let response = tokio::select! {
-            res = http_client()
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key",         api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("anthropic-beta",    "prompt-caching-2024-07-31")
-                .header("content-type",      "application/json")
-                .json(&body).send() => res.map_err(|e| e.to_string())?,
-            _ = cancel.cancelled() => {
-                tx.send(ChatEvent::InterruptAck).await.ok();
-                return Ok((last_text, total_cost, messages));
+            ApiBackend::OpenAi { base_url } => {
+                let tools_json  = tools_to_openai(&all_tools);
+                let messages_oa = messages_to_openai(system, &compacted);
+                let body = serde_json::json!({
+                    "model":      model,
+                    "max_tokens": 8192,
+                    "tools":      tools_json,
+                    "messages":   messages_oa,
+                });
+                let url = format!("{base_url}/v1/chat/completions");
+                let response = tokio::select! {
+                    res = http_client()
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .header("content-type",  "application/json")
+                        .json(&body).send() => res.map_err(|e| e.to_string())?,
+                    _ = cancel.cancelled() => {
+                        tx.send(ChatEvent::InterruptAck).await.ok();
+                        return Ok((last_text, total_cost, messages));
+                    }
+                };
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let text   = response.text().await.unwrap_or_default();
+                    return Err(format!("API error {status}: {text}"));
+                }
+                let json: serde_json::Value = tokio::select! {
+                    res = response.json() => res.map_err(|e| e.to_string())?,
+                    _ = cancel.cancelled() => {
+                        tx.send(ChatEvent::InterruptAck).await.ok();
+                        return Ok((last_text, total_cost, messages));
+                    }
+                };
+                let finish    = json["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
+                let stop_reason = if finish == "tool_calls" { "tool_use" } else { "end_turn" }.to_string();
+                info!("[send_message/openai] turn={turn} finish_reason={finish}");
+                // Cost tracking skipped for OpenAI-compatible backends.
+                (json, stop_reason)
             }
         };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text   = response.text().await.unwrap_or_default();
-            return Err(format!("API error {status}: {text}"));
-        }
-
-        let json: serde_json::Value = tokio::select! {
-            res = response.json() => res.map_err(|e| e.to_string())?,
-            _ = cancel.cancelled() => {
-                tx.send(ChatEvent::InterruptAck).await.ok();
-                return Ok((last_text, total_cost, messages));
-            }
-        };
-
-        let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
-        let usage = &json["usage"];
-        info!(
-            "[send_message] turn={turn} stop_reason={stop_reason} in={} out={} cache_create={} cache_read={}",
-            usage["input_tokens"].as_u64().unwrap_or(0),
-            usage["output_tokens"].as_u64().unwrap_or(0),
-            usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-            usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
-        );
-        total_cost += cost_usd(
-            model,
-            usage["input_tokens"].as_u64().unwrap_or(0),
-            usage["output_tokens"].as_u64().unwrap_or(0),
-            usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-            usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
-        );
-
+        // Parse content blocks (format differs by backend).
         let mut text_buf  = String::new();
         let mut blocks    = Vec::new();
         let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
 
-        if let Some(content) = json["content"].as_array() {
-            for block in content {
-                match block["type"].as_str().unwrap_or("") {
-                    "text" => {
-                        let t = block["text"].as_str().unwrap_or("").to_string();
-                        if !t.is_empty() {
-                            let preview = t.chars().take(120).collect::<String>();
-                            info!("[send_message] turn={turn} text ({} chars): {preview}", t.len());
-                            tx.send(ChatEvent::Text { text: t.clone() }).await.ok();
-                            text_buf.push_str(&t);
-                            blocks.push(ContentBlock::Text { text: t });
+        match &backend {
+            ApiBackend::Anthropic => {
+                if let Some(content) = json["content"].as_array() {
+                    for block in content {
+                        match block["type"].as_str().unwrap_or("") {
+                            "text" => {
+                                let t = block["text"].as_str().unwrap_or("").to_string();
+                                if !t.is_empty() {
+                                    let preview = t.chars().take(120).collect::<String>();
+                                    info!("[send_message] turn={turn} text ({} chars): {preview}", t.len());
+                                    tx.send(ChatEvent::Text { text: t.clone() }).await.ok();
+                                    text_buf.push_str(&t);
+                                    blocks.push(ContentBlock::Text { text: t });
+                                }
+                            }
+                            "tool_use" => {
+                                let id    = block["id"].as_str().unwrap_or("").to_string();
+                                let name  = block["name"].as_str().unwrap_or("").to_string();
+                                let input = block["input"].clone();
+                                info!("[send_message] turn={turn} tool_use name={name} input={input}");
+                                tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
+                                tool_uses.push((id.clone(), name.clone(), input.clone()));
+                                blocks.push(ContentBlock::ToolUse { id, name, input });
+                            }
+                            _ => {}
                         }
                     }
-                    "tool_use" => {
-                        let id    = block["id"].as_str().unwrap_or("").to_string();
-                        let name  = block["name"].as_str().unwrap_or("").to_string();
-                        let input = block["input"].clone();
-                        info!("[send_message] turn={turn} tool_use name={name} input={input}");
-                        tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
-                        tool_uses.push((id.clone(), name.clone(), input.clone()));
-                        blocks.push(ContentBlock::ToolUse { id, name, input });
+                }
+            }
+            ApiBackend::OpenAi { .. } => {
+                let (_, parsed_blocks) = parse_openai_response(&json);
+                for block in parsed_blocks {
+                    match &block {
+                        ContentBlock::Text { text } => {
+                            let preview = text.chars().take(120).collect::<String>();
+                            info!("[send_message/openai] turn={turn} text ({} chars): {preview}", text.len());
+                            tx.send(ChatEvent::Text { text: text.clone() }).await.ok();
+                            text_buf.push_str(text);
+                        }
+                        ContentBlock::ToolUse { id, name, input } => {
+                            info!("[send_message/openai] turn={turn} tool_use name={name}");
+                            tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
+                            tool_uses.push((id.clone(), name.clone(), input.clone()));
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                    blocks.push(block);
                 }
             }
         }
@@ -928,8 +1160,7 @@ pub async fn send_message(
 
         last_text = text_buf;
 
-        // Execute tools and collect results.
-        let mut results = Vec::new();
+        let mut results  = Vec::new();
         let mut ack_sent = false;
         for (id, name, input) in tool_uses {
             if cancel.is_cancelled() {
@@ -937,7 +1168,6 @@ pub async fn send_message(
                     tx.send(ChatEvent::InterruptAck).await.ok();
                     ack_sent = true;
                 }
-                // Append a synthetic tool_result so history stays valid.
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: id,
                     content:     vec![serde_json::json!({"type":"text","text":"interrupted"})],
@@ -973,11 +1203,18 @@ pub async fn run_agentic_loop(
                             -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
                             + Send + Sync>>,
 ) {
+    let backend = ApiBackend::resolve();
+
     let mut turns                        = 0usize;
     let mut total_input                  = 0u64;
     let mut total_output                 = 0u64;
     let mut total_cache_creation_input   = 0u64;
     let mut total_cache_read_input       = 0u64;
+
+    let partial_cost = |ti, to, tcc, tcr| match &backend {
+        ApiBackend::Anthropic => cost_usd(&model, ti, to, tcc, tcr),
+        ApiBackend::OpenAi { .. } => 0.0,
+    };
 
     const MAX_TURNS: usize = 100;
 
@@ -995,17 +1232,15 @@ pub async fn run_agentic_loop(
         };
 
         if cancel.is_cancelled() {
-            let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
             tx.send(ChatEvent::InterruptAck).await.ok();
-            tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
+            tx.send(ChatEvent::Interrupted { cost_usd: partial_cost(total_input, total_output, total_cache_creation_input, total_cache_read_input) }).await.ok();
             return;
         }
 
-        match call_turn(&messages, &system, &model, &api_key, &cancel, &tx, &extra_tools).await {
+        match call_turn(&messages, &system, &model, &api_key, &cancel, &tx, &extra_tools, &backend).await {
             Err(e) if e == "__interrupted__" => {
-                let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
                 tx.send(ChatEvent::InterruptAck).await.ok();
-                tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
+                tx.send(ChatEvent::Interrupted { cost_usd: partial_cost(total_input, total_output, total_cache_creation_input, total_cache_read_input) }).await.ok();
                 return;
             }
             Err(e) => {
@@ -1025,7 +1260,7 @@ pub async fn run_agentic_loop(
                 }
 
                 if stop_reason != "tool_use" {
-                    let cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
+                    let cost = partial_cost(total_input, total_output, total_cache_creation_input, total_cache_read_input);
                     tx.send(ChatEvent::Result {
                         cost_usd: cost, turns, session_id: session_id.clone(), result: None,
                     }).await.ok();
@@ -1064,8 +1299,7 @@ pub async fn run_agentic_loop(
                         let mut s = session.lock().unwrap();
                         s.messages.push(ApiMessage { role: "user".to_string(), content: tool_results });
                     }
-                    let partial_cost = cost_usd(&model, total_input, total_output, total_cache_creation_input, total_cache_read_input);
-                    tx.send(ChatEvent::Interrupted { cost_usd: partial_cost }).await.ok();
+                    tx.send(ChatEvent::Interrupted { cost_usd: partial_cost(total_input, total_output, total_cache_creation_input, total_cache_read_input) }).await.ok();
                     return;
                 }
 
