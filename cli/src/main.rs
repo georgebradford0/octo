@@ -42,10 +42,10 @@ enum Command {
         mcp_config: Option<std::path::PathBuf>,
     },
 
-    /// Manage child containers
-    Containers {
+    /// Manage child pods
+    Pods {
         #[command(subcommand)]
-        action: ContainersAction,
+        action: PodsAction,
     },
 
     /// Delete the entire octo namespace and all data (irreversible)
@@ -122,17 +122,17 @@ enum GetResource {
 }
 
 #[derive(Subcommand)]
-enum ContainersAction {
-    /// List all managed child containers
+enum PodsAction {
+    /// List all managed child pods
     List,
 
-    /// Create a new child container
+    /// Create a new child pod
     Create {
         /// Git repository URL
         #[arg(long)]
         git_url: Option<String>,
 
-        /// Container name (auto-derived from repo if omitted)
+        /// Pod name (auto-derived from repo if omitted)
         #[arg(long)]
         name: Option<String>,
 
@@ -141,17 +141,17 @@ enum ContainersAction {
         noise_port: Option<u16>,
     },
 
-    /// Scale a stopped container up to 1 replica
+    /// Scale a stopped pod up to 1 replica
     Start {
         name: String,
     },
 
-    /// Scale a running container down to 0 replicas
+    /// Scale a running pod down to 0 replicas
     Stop {
         name: String,
     },
 
-    /// Delete a container and all its data (irreversible)
+    /// Delete a pod and all its data (irreversible)
     Delete {
         name: String,
         /// Skip confirmation prompt
@@ -376,14 +376,14 @@ async fn main() -> Result<()> {
             println!("\rNamespace removed.                              ");
             println!("Done. All resources removed.");
         }
-        Command::Containers { action } => match action {
-            ContainersAction::List => containers::list().await?,
-            ContainersAction::Create { git_url, name, noise_port } => {
+        Command::Pods { action } => match action {
+            PodsAction::List => containers::list().await?,
+            PodsAction::Create { git_url, name, noise_port } => {
                 containers::create(git_url.as_deref(), name.as_deref(), noise_port).await?;
             }
-            ContainersAction::Start { name } => containers::start(&name).await?,
-            ContainersAction::Stop  { name } => containers::stop(&name).await?,
-            ContainersAction::Delete { name, yes } => containers::delete(&name, yes).await?,
+            PodsAction::Start { name } => containers::start(&name).await?,
+            PodsAction::Stop  { name } => containers::stop(&name).await?,
+            PodsAction::Delete { name, yes } => containers::delete(&name, yes).await?,
         },
         Command::Reload { containers, all } => {
             use octo_k8s_ops::k8s;

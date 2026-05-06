@@ -5,7 +5,7 @@ pub async fn list() -> Result<()> {
     let client = k8s::build_client().await?;
     let children = k8s::list_managed_deployments(&client).await?;
     if children.is_empty() {
-        println!("No containers.");
+        println!("No pods.");
         return Ok(());
     }
     println!("{:<32} {:<10} {:<6} {}", "NAME", "STATUS", "PORT", "GIT URL");
