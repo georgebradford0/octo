@@ -21,7 +21,7 @@ enum Command {
     Init {
         /// Anthropic API key
         #[arg(long, env = "ANTHROPIC_API_KEY")]
-        api_key: String,
+        api_key: Option<String>,
 
         /// GitHub token (optional, for private repos)
         #[arg(long, env = "GH_TOKEN")]
@@ -40,6 +40,10 @@ enum Command {
         /// Path to an mcp.json file to seed lair's MCP tool list on first startup
         #[arg(long)]
         mcp_config: Option<std::path::PathBuf>,
+
+        /// Path to a config.json file (sets model, base_url, api_key)
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
 
     /// Manage child pods
@@ -343,8 +347,41 @@ async fn uninstall(yes: bool) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { api_key, gh_token, noise_port, public_port, mcp_config } => {
-            init::run(&api_key, gh_token.as_deref(), noise_port, public_port, mcp_config.as_deref()).await?;
+        Command::Init { api_key, gh_token, noise_port, public_port, mcp_config, config } => {
+            // Read config file if provided.
+            let cfg_json: Option<serde_json::Value> = match &config {
+                None => None,
+                Some(path) => {
+                    if !path.exists() {
+                        eprintln!("error: config file not found: {}", path.display());
+                        std::process::exit(1);
+                    }
+                    let text = std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
+                    Some(serde_json::from_str(&text)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON in config file {}: {e}", path.display()))?)
+                }
+            };
+
+            // api_key: --api-key flag > config file > error
+            let resolved_api_key = api_key
+                .or_else(|| cfg_json.as_ref().and_then(|c| c["api_key"].as_str().map(str::to_string)))
+                .ok_or_else(|| anyhow::anyhow!(
+                    "API key is required: pass --api-key, set ANTHROPIC_API_KEY, or include api_key in --config"
+                ))?;
+
+            let model    = cfg_json.as_ref().and_then(|c| c["model"].as_str().map(str::to_string));
+            let base_url = cfg_json.as_ref().and_then(|c| c["base_url"].as_str().map(str::to_string));
+
+            init::run(
+                &resolved_api_key,
+                gh_token.as_deref(),
+                noise_port,
+                public_port,
+                mcp_config.as_deref(),
+                model.as_deref(),
+                base_url.as_deref(),
+            ).await?;
         }
         Command::Destroy { yes } => {
             if !yes {

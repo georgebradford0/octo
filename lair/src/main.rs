@@ -24,8 +24,8 @@ use axum::{
 };
 use octo_core::{
     build_ephemeral_system_prompt, build_tools_with_mcp, chain_executor_with_mcp,
-    init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config,
-    resolve_api_key, run_noise_proxy, send_message, to_base32, ApiMessage, AnthropicTool,
+    init_mcp_pool, init_shell_env, load_or_generate_keypair,
+    resolve_api_key, resolve_model, run_noise_proxy, send_message, to_base32, ApiMessage, AnthropicTool,
     ChatEvent, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use hex;
@@ -212,7 +212,7 @@ async fn message_handler(
                            Json(serde_json::json!({"error": "no API key configured"}))).into_response();
         }
     };
-    let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let model = resolve_model();
 
     let messages = vec![ApiMessage {
         role:    "user".to_string(),
@@ -270,7 +270,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
             return;
         }
     };
-    let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let model = resolve_model();
 
     {
         let mut msgs = state.messages.lock().unwrap();

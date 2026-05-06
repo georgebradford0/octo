@@ -25,7 +25,7 @@ use octo_core::{
     build_ephemeral_system_prompt, build_system_prompt, build_tools_with_mcp,
     chain_executor_with_mcp, effective_repo, get_branches_for_repo,
     init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config, resolve_api_key,
-    run_noise_proxy, send_message, to_base32, write_config, ApiMessage, AnthropicTool,
+    resolve_model, run_noise_proxy, send_message, to_base32, write_config, ApiMessage, AnthropicTool,
     ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -202,7 +202,7 @@ async fn message_handler(
                            Json(serde_json::json!({"error": "no API key configured"}))).into_response();
         }
     };
-    let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let model = resolve_model();
 
     // Ephemeral loop — does not touch the shared conversation history.
     let messages = vec![ApiMessage {
@@ -294,7 +294,7 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
             return;
         }
     };
-    let model = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let model = resolve_model();
 
     {
         let mut msgs = state.messages.lock().unwrap();
@@ -678,7 +678,7 @@ async fn main() {
         if !prompt.is_empty() {
             let state_sp   = Arc::clone(&state);
             let api_key_sp = resolve_api_key().unwrap_or_default();
-            let model_sp   = read_config().model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+            let model_sp   = resolve_model();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 info!("[server] running STARTUP_PROMPT ({} chars)", prompt.len());

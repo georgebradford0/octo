@@ -510,6 +510,8 @@ pub async fn upsert_secret(
     gh_token: Option<&str>,
     noise_private_key_hex: &str,
     mcp_config_json: Option<&str>,
+    model: Option<&str>,
+    base_url: Option<&str>,
 ) -> anyhow::Result<()> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
     let mut string_data = serde_json::json!({
@@ -521,6 +523,12 @@ pub async fn upsert_secret(
     }
     if let Some(mcp) = mcp_config_json {
         string_data["MCP_CONFIG_JSON"] = serde_json::json!(mcp);
+    }
+    if let Some(m) = model {
+        string_data["MODEL"] = serde_json::json!(m);
+    }
+    if let Some(u) = base_url {
+        string_data["OPENAI_BASE_URL"] = serde_json::json!(u);
     }
     let secret: Secret = serde_json::from_value(json!({
         "apiVersion": "v1",

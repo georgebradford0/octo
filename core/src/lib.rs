@@ -115,6 +115,13 @@ pub fn resolve_api_key() -> Option<String> {
         .or_else(|| read_key_from_shell_files())
 }
 
+/// MODEL env var > config.model > default sonnet.
+pub fn resolve_model() -> String {
+    std::env::var("MODEL").ok().filter(|s| !s.is_empty())
+        .or_else(|| read_config().model)
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string())
+}
+
 pub fn read_key_from_shell_files() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let candidates = [".zshrc", ".zprofile", ".bash_profile", ".bashrc", ".profile"];
