@@ -398,15 +398,21 @@ async fn main() -> Result<()> {
 
             let multi = names.len() > 1;
             for deployment in &names {
-                let pod_name = match k8s::get_running_pod(&client, deployment).await {
-                    Ok(p)  => p,
-                    Err(e) => { eprintln!("[{deployment}] {e}"); continue; }
+                let (pod_name, is_running) = match k8s::get_running_pod(&client, deployment).await {
+                    Ok(p)  => (p, true),
+                    Err(_) => match k8s::get_any_pod(&client, deployment).await {
+                        Ok((p, phase)) => {
+                            eprintln!("[{deployment}] pod is {phase} (not Running) — showing available logs:");
+                            (p, false)
+                        }
+                        Err(e) => { eprintln!("[{deployment}] {e}"); continue; }
+                    }
                 };
 
                 if multi { println!("\n=== {deployment} ==="); }
 
                 let mut args = vec!["logs", "-n", k8s::NAMESPACE, &pod_name];
-                if follow { args.push("-f"); }
+                if follow && is_running { args.push("-f"); }
 
                 let status = tokio::process::Command::new("kubectl")
                     .args(&args)

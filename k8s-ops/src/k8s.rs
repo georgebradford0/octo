@@ -11,7 +11,9 @@ use kube::{
     Api, Client,
 };
 use serde_json::json;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+const GHCR_PULL_SECRET: &str = "ghcr-pull-secret";
 
 pub const NAMESPACE:         &str = "octo";
 pub const LAIR_NOISE_PORT: u16  = 30900;
@@ -200,6 +202,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     let workspace_pvc = format!("{}-workspace", p.name);
 
     let pod_spec = json!({
+        "imagePullSecrets": [{"name": GHCR_PULL_SECRET}],
         "containers": [{
             "name": "octo",
             "image": IMAGE,
@@ -548,6 +551,39 @@ pub async fn ensure_lair_pvc(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Create or update a docker registry pull secret for GHCR using the provided token.
+/// Safe to call even if gh_token is None — just logs a warning and skips.
+pub async fn ensure_ghcr_pull_secret(client: &Client, gh_token: Option<&str>) -> anyhow::Result<()> {
+    let token = match gh_token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            warn!("[k8s] no GH_TOKEN provided — skipping GHCR pull secret (image must be public)");
+            return Ok(());
+        }
+    };
+    use base64::Engine as _;
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("octo:{token}"));
+    let docker_config = serde_json::json!({
+        "auths": {
+            "ghcr.io": { "auth": auth }
+        }
+    });
+    let secret: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": GHCR_PULL_SECRET, "namespace": NAMESPACE},
+        "type": "kubernetes.io/dockerconfigjson",
+        "stringData": {
+            ".dockerconfigjson": docker_config.to_string()
+        }
+    }))?;
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
+    secrets.patch(GHCR_PULL_SECRET, &PatchParams::apply("octo").force(), &Patch::Apply(secret))
+        .await.context("upsert GHCR pull secret")?;
+    info!("[k8s] upserted GHCR pull secret");
+    Ok(())
+}
+
 pub async fn upsert_lair_deployment(client: &Client, public_port: u16) -> anyhow::Result<()> {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
     let deployment: Deployment = serde_json::from_value(json!({
@@ -565,6 +601,7 @@ pub async fn upsert_lair_deployment(client: &Client, public_port: u16) -> anyhow
                 "metadata": {"labels": {"app": LAIR_NAME}},
                 "spec": {
                     "serviceAccountName": LAIR_NAME,
+                    "imagePullSecrets": [{"name": GHCR_PULL_SECRET}],
                     "containers": [{
                         "name": LAIR_NAME,
                         "image": IMAGE,
@@ -637,6 +674,21 @@ pub async fn wait_for_deployment_ready(client: &Client, name: &str, timeout_secs
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
     loop {
         if tokio::time::Instant::now() > deadline {
+            // Print pod describe output to help diagnose why the pod isn't starting.
+            eprintln!("\n[octo] Deployment '{name}' did not become ready. Collecting diagnostics...\n");
+            if let Ok((pod_name, phase)) = get_any_pod(client, name).await {
+                eprintln!("[octo] Pod '{pod_name}' is in phase: {phase}");
+                let _ = tokio::process::Command::new("kubectl")
+                    .args(["describe", "pod", &pod_name, "-n", NAMESPACE])
+                    .status()
+                    .await;
+            } else {
+                eprintln!("[octo] No pods found for app={name} — the deployment may not have scheduled.");
+                let _ = tokio::process::Command::new("kubectl")
+                    .args(["describe", "deployment", name, "-n", NAMESPACE])
+                    .status()
+                    .await;
+            }
             anyhow::bail!("timeout waiting for deployment '{name}' to be ready");
         }
         if let Ok(d) = deployments.get(name).await {
@@ -656,6 +708,23 @@ pub async fn get_running_pod(client: &Client, app_name: &str) -> anyhow::Result<
         .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
         .and_then(|p| p.metadata.name)
         .ok_or_else(|| anyhow::anyhow!("no running pod found for app={app_name}"))
+}
+
+/// Return the name of any pod for the given app label (regardless of phase).
+/// Useful for fetching logs from crashed or pending pods.
+pub async fn get_any_pod(client: &Client, app_name: &str) -> anyhow::Result<(String, String)> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), NAMESPACE);
+    let list = pods.list(&ListParams::default().labels(&format!("app={app_name}")))
+        .await.context("list pods")?;
+    list.into_iter()
+        .find(|p| p.metadata.name.is_some())
+        .map(|p| {
+            let phase = p.status.as_ref()
+                .and_then(|s| s.phase.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            (p.metadata.name.unwrap(), phase)
+        })
+        .ok_or_else(|| anyhow::anyhow!("no pod found for app={app_name}"))
 }
 
 /// Resolve the public IP of the k8s node by running `curl ipify.org` inside a

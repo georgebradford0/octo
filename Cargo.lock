@@ -426,106 +426,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "claudulhu"
-version = "0.0.32"
-dependencies = [
- "anyhow",
- "clap",
- "clap_complete",
- "claudulhu-k8s-ops",
- "data-encoding",
- "hex",
- "qrcode",
- "serde",
- "serde_json",
- "snow",
- "tokio",
-]
-
-[[package]]
-name = "claudulhu-core"
-version = "0.0.4"
-dependencies = [
- "anyhow",
- "futures-util",
- "git2",
- "glob",
- "reqwest",
- "serde",
- "serde_json",
- "snow",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "claudulhu-k8s-ops"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "k8s-openapi",
- "kube",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "claudulhu-rulyeh"
-version = "0.2.24"
-dependencies = [
- "anyhow",
- "axum",
- "claudulhu-core",
- "claudulhu-k8s-ops",
- "futures-util",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "claudulhu-server"
-version = "0.1.9"
-dependencies = [
- "anyhow",
- "axum",
- "claudulhu-core",
- "futures-util",
- "git2",
- "hex",
- "openssl",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "claudulhu-tests"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "claudulhu-core",
- "snow",
- "tokio",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1797,6 +1697,107 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "octo"
+version = "0.0.34"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "hex",
+ "octo-k8s-ops",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "snow",
+ "tokio",
+]
+
+[[package]]
+name = "octo-core"
+version = "0.0.4"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "git2",
+ "glob",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "snow",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "octo-k8s-ops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "octo-lair"
+version = "0.2.25"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "hex",
+ "octo-core",
+ "octo-k8s-ops",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "octo-server"
+version = "0.1.9"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "git2",
+ "hex",
+ "octo-core",
+ "openssl",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "octo-tests"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "octo-core",
+ "snow",
+ "tokio",
 ]
 
 [[package]]

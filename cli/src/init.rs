@@ -44,6 +44,8 @@ pub async fn run(api_key: &str, gh_token: Option<&str>, noise_port: u16, public_
     k8s::ensure_rbac(&client).await?;
     println!("Storing API keys and keypair in cluster secret...");
     k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex, mcp_config_json.as_deref()).await?;
+    println!("Configuring GHCR image pull credentials...");
+    k8s::ensure_ghcr_pull_secret(&client, gh_token).await?;
     println!("Provisioning lair data volume...");
     k8s::ensure_lair_pvc(&client).await?;
     println!("Applying lair Deployment...");
