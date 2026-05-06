@@ -460,8 +460,7 @@ async fn clear_handler(State(state): State<Arc<AppState>>) -> StatusCode {
 struct CompletionQuery { dir_part: Option<String>, file_part: Option<String> }
 
 async fn get_completions_handler(Query(p): Query<CompletionQuery>) -> Json<Vec<String>> {
-    let cfg       = read_config();
-    let repo      = effective_repo(&cfg);
+    let repo      = effective_repo();
     let dir_part  = p.dir_part.unwrap_or_default();
     let file_part = p.file_part.unwrap_or_default();
     let mut seen    = std::collections::HashSet::new();
@@ -482,8 +481,7 @@ async fn get_completions_handler(Query(p): Query<CompletionQuery>) -> Json<Vec<S
 }
 
 async fn get_branches_handler() -> impl IntoResponse {
-    let cfg  = read_config();
-    let repo = effective_repo(&cfg);
+    let repo = effective_repo();
     match get_branches_for_repo(&repo) {
         Ok(b)  => Json(b).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -494,13 +492,11 @@ async fn get_config_handler() -> Json<Config> { Json(read_config()) }
 
 async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
     info!(
-        "[server/config] update repo={:?} model={:?} api_key={}",
-        patch.repo,
+        "[server/config] update model={:?} api_key={}",
         patch.model,
         if patch.api_key.is_some() { "provided" } else { "unchanged" }
     );
     let mut cfg = read_config();
-    if patch.repo.is_some()    { cfg.repo    = patch.repo; }
     if patch.api_key.is_some() { cfg.api_key = patch.api_key; }
     if patch.model.is_some()   { cfg.model   = patch.model; }
     write_config(&cfg);
@@ -667,8 +663,7 @@ async fn main() {
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
-    let cfg      = read_config();
-    let repo     = effective_repo(&cfg);
+    let repo     = effective_repo();
     let system   = build_system_prompt(&repo);
     let messages = load_messages();
     info!("[server] loaded {} message(s) from history, repo={repo}", messages.len());

@@ -56,7 +56,6 @@ pub fn config_path() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    pub repo:     Option<String>,
     pub name:     Option<String>,
     pub api_key:  Option<String>,
     pub model:    Option<String>,
@@ -99,14 +98,10 @@ pub fn read_config() -> Config {
         .unwrap_or_default()
 }
 
-pub fn effective_repo(cfg: &Config) -> String {
-    cfg.repo.clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        })
+pub fn effective_repo() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 pub fn write_config(cfg: &Config) {
