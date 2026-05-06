@@ -553,16 +553,16 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 // ── ChatPane ──────────────────────────────────────────────────────────────────
 
 const ChatPane = memo(function ChatPane({
-  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange, silentReconnect, reloadRef, closeWsRef,
+  baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange, reconnectingRef, reloadRef, closeWsRef,
 }: {
-  baseUrl:           string
-  onStatusChange:    (s: ConnStatus) => void
-  clearRef:          React.MutableRefObject<() => void>
-  initialDraft?:     string
-  onDraftChange?:    (draft: string) => void
-  silentReconnect?:  React.MutableRefObject<boolean>
-  reloadRef?:        React.MutableRefObject<() => void>
-  closeWsRef?:       React.MutableRefObject<() => void>
+  baseUrl:            string
+  onStatusChange:     (s: ConnStatus) => void
+  clearRef:           React.MutableRefObject<() => void>
+  initialDraft?:      string
+  onDraftChange?:     (draft: string) => void
+  reconnectingRef?:   React.MutableRefObject<boolean>
+  reloadRef?:         React.MutableRefObject<() => void>
+  closeWsRef?:        React.MutableRefObject<() => void>
 }) {
   const insets                     = useSafeAreaInsets()
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
@@ -717,7 +717,7 @@ const ChatPane = memo(function ChatPane({
       logE(`[chat] reattachStream ws error after ${Date.now() - wsStart}ms: ${JSON.stringify(e)}`)
       wsRef.current = null
       setStreamingMsgId(null)
-      if (!closingRef.current) updateStatus('error')
+      if (!closingRef.current && !reconnectingRef?.current) updateStatus('error')
       closingRef.current = false
     }
     ws.onclose = (e) => {
@@ -803,10 +803,9 @@ const ChatPane = memo(function ChatPane({
   }, [draftKey, input])
 
   // Fetch history on mount and when baseUrl changes.
-  // For silent reconnects (same server, new local port) skip the 'connecting' flash.
+  // Skip the 'connecting' flash when a silent reconnect is in progress.
   useEffect(() => {
-    const silent = silentReconnect?.current ?? false
-    if (silentReconnect) silentReconnect.current = false  // consume
+    const silent = reconnectingRef?.current ?? false
     if (!silent) updateStatus('connecting')
     loadHistory()
     return () => { historyAbortRef.current?.abort() }
@@ -874,7 +873,7 @@ const ChatPane = memo(function ChatPane({
       logE(`[chat] ws error after ${Date.now() - wsSendStart}ms: ${JSON.stringify(e)}`)
       wsRef.current = null
       setStreamingMsgId(null)
-      if (!closingRef.current) {
+      if (!closingRef.current && !reconnectingRef?.current) {
         setMessages(prev => appendMsg(prev, { id: uid(), role: 'error' as const, text: 'network error' }))
         updateStatus('error')
       }
@@ -1051,14 +1050,14 @@ const ChatPane = memo(function ChatPane({
 
 // ── ChildChatScreen ───────────────────────────────────────────────────────────
 
-function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange, silentReconnect, reloadRef, closeWsRef }: {
+function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft, onDraftChange, reconnectingRef, reloadRef, closeWsRef }: {
   child:             ContainerInfo
   tunnelPort:        number | null
   tunnelError:       string | null
   onClose:           () => void
   initialDraft?:     string
   onDraftChange?:    (draft: string) => void
-  silentReconnect?:  React.MutableRefObject<boolean>
+  reconnectingRef?:  React.MutableRefObject<boolean>
   reloadRef?:        React.MutableRefObject<() => void>
   closeWsRef?:       React.MutableRefObject<() => void>
 }) {
@@ -1099,7 +1098,7 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
             clearRef={clearRef}
             initialDraft={initialDraft}
             onDraftChange={onDraftChange}
-            silentReconnect={silentReconnect}
+            reconnectingRef={reconnectingRef}
             reloadRef={reloadRef}
             closeWsRef={closeWsRef}
           />
@@ -1155,14 +1154,20 @@ function AppInner() {
   const [startingContainerId, setStartingContainerId] = useState<string | null>(null)
   const [startingError,       setStartingError]       = useState<string | null>(null)
   const startingContainerIdRef = useRef<string | null>(null)
-  const [reconnectKey, setReconnectKey] = useState(0)
-  const clearChatRef        = useRef<() => void>(() => {})
-  const prevTargetKeyRef    = useRef<string | null>(null)
-  const silentReconnectRef  = useRef<boolean>(false)
-  const reloadRef           = useRef<() => void>(() => {})
-  const closeWsRef          = useRef<() => void>(() => {})
+  const clearChatRef       = useRef<() => void>(() => {})
+  const reloadRef          = useRef<() => void>(() => {})
+  const closeWsRef         = useRef<() => void>(() => {})
   // In-memory draft cache: survives ChatPane unmount/remount without async latency.
-  const draftsRef = useRef<Record<string, string>>({})
+  const draftsRef          = useRef<Record<string, string>>({})
+  // Held true for the full duration of a foreground-return reconnect so that
+  // WS error/close callbacks know not to surface a connection-error to the user.
+  const reconnectingRef    = useRef<boolean>(false)
+  // Ref mirrors of conn/activeChild so the imperative reconnect() can read
+  // current values without being a useCallback dependency.
+  const connRef            = useRef<NoiseConnectionInfo | null>(null)
+  const activeChildRef     = useRef<ContainerInfo | null>(null)
+  useEffect(() => { connRef.current = conn },         [conn])
+  useEffect(() => { activeChildRef.current = activeChild }, [activeChild])
 
   // masterBaseUrl is only valid when not viewing a child — fetching containers
   // and sending master messages must always go through the master tunnel.
@@ -1183,15 +1188,9 @@ function AppInner() {
     return () => { cancelled = true }
   }, [])
 
-  // Single connection effect — owns the entire Noise tunnel lifecycle.
-  // Connects to whichever target is currently active: child if one is open,
-  // master otherwise. On failure from a child, clears activeChild so the
-  // effect re-runs immediately and falls back to the master connection.
-  //
-  // Silent reconnect: when the target server hasn't changed (same host/port/pk),
-  // we keep the existing tunnelPort visible so the chat stays on screen while
-  // the native layer reconnects in the background. The connecting banner and full
-  // message reload are suppressed; only new messages are appended.
+  // Connection effect — owns the Noise tunnel lifecycle for target changes
+  // (initial connect, switching between master and child servers).
+  // Foreground-return reconnects are handled imperatively by reconnect() below.
   useEffect(() => {
     setTunnelError(null)
 
@@ -1204,21 +1203,8 @@ function AppInner() {
     if (!target) {
       log('[noise] no target, skipping connect')
       setTunnelPort(null)
-      prevTargetKeyRef.current = null
-      silentReconnectRef.current = false
       return
     }
-
-    const targetKey = `${target.host}:${target.port}:${target.pk}`
-    const isSilent  = targetKey === prevTargetKeyRef.current
-    prevTargetKeyRef.current   = targetKey
-    silentReconnectRef.current = isSilent
-
-    if (!isSilent) {
-      // Switching to a different server — clear port to show connecting screen.
-      setTunnelPort(null)
-    }
-    // For silent reconnects, keep existing tunnelPort so the UI stays visible.
 
     if (!NoiseConnection) {
       logE('[noise] native module unavailable')
@@ -1226,7 +1212,9 @@ function AppInner() {
       return
     }
 
-    log(`[noise] ${isSilent ? 'silent-reconnect' : 'connect'} host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}…`)
+    // Show connecting screen when switching to a different server.
+    setTunnelPort(null)
+    log(`[noise] connect host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}…`)
 
     let live = true
     NoiseConnection.disconnect()
@@ -1236,10 +1224,6 @@ function AppInner() {
         log(`[noise] connect() resolved in ${Date.now() - connectStart}ms → local port ${port}`)
         if (!live) { log('[noise] connect resolved but effect already cleaned up — discarding'); return }
         setTunnelPort(port)
-        if (isSilent) {
-          // Tunnel re-established — now reload history.
-          reloadRef.current()
-        }
       })
       .catch(e => {
         logE(`[noise] connect() rejected in ${Date.now() - connectStart}ms: ${e?.message ?? String(e)}`)
@@ -1247,8 +1231,6 @@ function AppInner() {
         if (activeChild) {
           setActiveChild(null)
         } else {
-          // On silent reconnect failure, clear the port so the error is visible.
-          if (isSilent) setTunnelPort(null)
           setTunnelError(e?.message ?? String(e))
         }
       })
@@ -1258,15 +1240,54 @@ function AppInner() {
       log('[noise] effect cleanup: calling disconnect()')
       NoiseConnection?.disconnect()
     }
-  }, [conn, activeChild, reconnectKey])
+  }, [conn, activeChild])
 
-  // Single AppState listener — bumps reconnectKey to re-run the connection effect.
+  // Imperative reconnect — called on foreground return. Runs the full sequence
+  // in one async function so there are no races between effect re-runs and WS
+  // error callbacks. reconnectingRef suppresses spurious error UI throughout.
+  const reconnectRef = useRef<() => Promise<void>>(async () => {})
+  reconnectRef.current = async () => {
+    const target = activeChildRef.current
+      ? { host: activeChildRef.current.host, port: activeChildRef.current.port, pk: activeChildRef.current.pubkey }
+      : connRef.current
+      ? { host: connRef.current.host,        port: connRef.current.port,        pk: connRef.current.pk }
+      : null
+
+    if (!target || !NoiseConnection) return
+
+    log(`[noise] foreground reconnect host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}…`)
+    reconnectingRef.current = true
+
+    // Close the existing WebSocket cleanly — onerror/onclose will be suppressed
+    // for the duration because reconnectingRef is true.
+    closeWsRef.current()
+
+    try {
+      NoiseConnection.disconnect()
+      const connectStart = Date.now()
+      const port = await NoiseConnection.connect(target.host, target.port, target.pk)
+      log(`[noise] foreground reconnect resolved in ${Date.now() - connectStart}ms → local port ${port}`)
+      setTunnelPort(port)
+      // Tunnel is up — now reload history. reloadRef points to ChatPane's
+      // loadHistory which will set status 'ready' or 'streaming' on success.
+      reloadRef.current()
+    } catch (e: unknown) {
+      logE(`[noise] foreground reconnect failed: ${(e as Error)?.message ?? String(e)}`)
+      if (activeChildRef.current) {
+        setActiveChild(null)
+      } else {
+        setTunnelPort(null)
+        setTunnelError((e as Error)?.message ?? String(e))
+      }
+    } finally {
+      reconnectingRef.current = false
+    }
+  }
+
+  // Single AppState listener — calls the imperative reconnect on foreground return.
   useEffect(() => {
     const sub = AppState.addEventListener('change', state => {
-      if (state === 'active') {
-        closeWsRef.current()   // close existing WS cleanly before tunnel drops
-        setReconnectKey(k => k + 1)
-      }
+      if (state === 'active') reconnectRef.current()
     })
     return () => sub.remove()
   }, [])
@@ -1427,7 +1448,7 @@ function AppInner() {
         onClose={() => setActiveChild(null)}
         initialDraft={draftsRef.current[childKey]}
         onDraftChange={d => { draftsRef.current[childKey] = d }}
-        silentReconnect={silentReconnectRef}
+        reconnectingRef={reconnectingRef}
         reloadRef={reloadRef}
         closeWsRef={closeWsRef}
       />
@@ -1468,7 +1489,7 @@ function AppInner() {
             clearRef={clearChatRef}
             initialDraft={draftsRef.current['master']}
             onDraftChange={d => { draftsRef.current['master'] = d }}
-            silentReconnect={silentReconnectRef}
+            reconnectingRef={reconnectingRef}
             reloadRef={reloadRef}
             closeWsRef={closeWsRef}
           />
