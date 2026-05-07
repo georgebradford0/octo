@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "octo"
-version = "0.0.43"
+version = "0.0.44"
 dependencies = [
  "anyhow",
  "clap",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "octo-server"
-version = "0.1.9"
+version = "0.2.32"
 dependencies = [
  "anyhow",
  "axum",
@@ -1778,6 +1778,7 @@ dependencies = [
  "git2",
  "hex",
  "octo-core",
+ "octo-k8s-ops",
  "openssl",
  "reqwest",
  "serde",

@@ -195,8 +195,9 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
         json!({"name": "NOISE_PORT",         "value": "9000"}),
         json!({"name": "PUBLIC_PORT",        "value": p.noise_port.to_string()}),
         json!({"name": "PUBLIC_HOST",        "value": p.pub_host}),
-        json!({"name": "LAIR_URL",         "value": p.lair_url}),
+        json!({"name": "LAIR_URL",           "value": p.lair_url}),
         json!({"name": "NOISE_PRIVATE_KEY",  "value": p.noise_private_key}),
+        json!({"name": "DEPLOYMENT_NAME",    "value": p.name}),
     ];
     if let Some(url) = p.git_url {
         env.push(json!({"name": "GIT_URL", "value": url}));

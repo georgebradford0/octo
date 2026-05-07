@@ -28,6 +28,7 @@ use octo_core::{
     resolve_model, run_noise_proxy, send_message, to_base32, write_config, ApiMessage, AnthropicTool,
     ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
 };
+use octo_k8s_ops::k8s;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
@@ -662,6 +663,23 @@ async fn main() {
     }
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
+
+    // Stamp our version onto the deployment annotation so `octo reload`
+    // can display the version transition for child pods.
+    if let Ok(deployment_name) = std::env::var("DEPLOYMENT_NAME") {
+        tokio::spawn(async move {
+            match k8s::build_client().await {
+                Ok(client) => {
+                    if let Err(e) = k8s::stamp_deployment_version(&client, &deployment_name, env!("CARGO_PKG_VERSION")).await {
+                        warn!("[server] could not stamp version annotation: {e}");
+                    } else {
+                        info!("[server] stamped version {} on deployment/{deployment_name}", env!("CARGO_PKG_VERSION"));
+                    }
+                }
+                Err(e) => warn!("[server] k8s client unavailable, skipping version stamp: {e}"),
+            }
+        });
+    }
 
     let repo     = effective_repo();
     let system   = build_system_prompt(&repo);
