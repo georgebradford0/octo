@@ -56,10 +56,11 @@ pub fn config_path() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    pub name:     Option<String>,
-    pub api_key:  Option<String>,
-    pub model:    Option<String>,
-    pub base_url: Option<String>,
+    pub name:           Option<String>,
+    pub api_key:        Option<String>,
+    pub openai_api_key: Option<String>,
+    pub model:          Option<String>,
+    pub base_url:       Option<String>,
 }
 
 // ── API Backend ───────────────────────────────────────────────────────────────
@@ -113,7 +114,16 @@ pub fn write_config(cfg: &Config) {
 pub fn resolve_api_key() -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
         .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()))
-        .or_else(|| read_config().api_key)
+        .or_else(|| {
+            let cfg = read_config();
+            // Prefer openai_api_key when a base_url is configured (OpenAI-compatible backend),
+            // otherwise fall back to the generic api_key field.
+            if cfg.base_url.as_deref().filter(|s| !s.is_empty()).is_some() {
+                cfg.openai_api_key.filter(|s| !s.is_empty()).or(cfg.api_key)
+            } else {
+                cfg.api_key
+            }
+        })
         .or_else(|| read_key_from_shell_files())
 }
 

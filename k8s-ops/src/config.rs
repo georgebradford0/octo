@@ -15,10 +15,11 @@ pub fn config_path() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    pub name:     Option<String>,
-    pub api_key:  Option<String>,
-    pub model:    Option<String>,
-    pub base_url: Option<String>,
+    pub name:            Option<String>,
+    pub api_key:         Option<String>,
+    pub openai_api_key:  Option<String>,
+    pub model:           Option<String>,
+    pub base_url:        Option<String>,
 }
 
 pub fn read_config() -> Config {

@@ -536,6 +536,7 @@ pub async fn upsert_secret(
     mcp_config_json: Option<&str>,
     model: Option<&str>,
     base_url: Option<&str>,
+    openai_api_key: Option<&str>,
 ) -> anyhow::Result<()> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
     let mut string_data = serde_json::json!({
@@ -553,6 +554,9 @@ pub async fn upsert_secret(
     }
     if let Some(u) = base_url {
         string_data["OPENAI_BASE_URL"] = serde_json::json!(u);
+    }
+    if let Some(k) = openai_api_key {
+        string_data["OPENAI_API_KEY"] = serde_json::json!(k);
     }
     let secret: Secret = serde_json::from_value(json!({
         "apiVersion": "v1",
@@ -803,6 +807,7 @@ pub struct LairSecrets {
     pub mcp_config_json:   Option<String>,
     pub model:             Option<String>,
     pub base_url:          Option<String>,
+    pub openai_api_key:    Option<String>,
 }
 
 /// Read all current values from the `lair-secrets` Secret.
@@ -829,6 +834,7 @@ pub async fn read_lair_secrets(client: &Client) -> anyhow::Result<LairSecrets> {
         mcp_config_json:   read_opt("MCP_CONFIG_JSON"),
         model:             read_opt("MODEL"),
         base_url:          read_opt("OPENAI_BASE_URL"),
+        openai_api_key:    read_opt("OPENAI_API_KEY"),
     })
 }
 
