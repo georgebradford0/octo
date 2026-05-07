@@ -177,32 +177,18 @@ pub async fn import_from_file(pod: &str, path: &std::path::Path) -> Result<()> {
         return Ok(());
     }
 
-    // Remove any existing entries whose names match the import file so that
-    // add() sees them as new — enabling upsert semantics on re-import.
     let pod_name = running_pod(pod).await?;
-    let mut existing = read_config(&pod_name).await?;
-    let import_names: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.name.as_str()).collect();
-    let updating: Vec<&str> = existing.iter()
-        .filter(|c| import_names.contains(c.name.as_str()))
-        .map(|c| c.name.as_str())
-        .collect();
-    if !updating.is_empty() {
-        println!("Updating existing server(s): {}", updating.join(", "));
-        existing.retain(|c| !import_names.contains(c.name.as_str()));
-        write_config(&pod_name, &existing).await?;
-    }
 
-    println!("Importing {} MCP server(s) into '{pod}'...", entries.len());
-    // Expand ${VAR} references from the host environment before writing to the pod,
-    // then write entries directly to preserve all fields (url, headers, etc.).
+    // Expand ${VAR} references from the host environment before writing to the pod.
     let resolved: Vec<McpServerConfig> = entries.into_iter().map(|mut e| {
-        e.env = e.env.into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
+        e.env     = e.env    .into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
         e.headers = e.headers.into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
         e
     }).collect();
-    existing.extend(resolved);
-    write_config(&pod_name, &existing).await?;
+
+    // Replace the entire config with the contents of the file.
+    println!("Importing {} MCP server(s) into '{pod}' (replacing existing config)...", resolved.len());
+    write_config(&pod_name, &resolved).await?;
     println!("✓ imported successfully.");
     Ok(())
 }
