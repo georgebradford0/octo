@@ -955,7 +955,7 @@ pub async fn call_turn(
                 "messages":   messages_oa,
             });
 
-            let url = format!("{base_url}/v1/chat/completions");
+            let url = format!("{base_url}/chat/completions");
             let response = tokio::select! {
                 res = http_client()
                     .post(&url)
@@ -1126,7 +1126,7 @@ pub async fn send_message(
                     "tools":      tools_json,
                     "messages":   messages_oa,
                 });
-                let url = format!("{base_url}/v1/chat/completions");
+                let url = format!("{base_url}/chat/completions");
                 let response = tokio::select! {
                     res = http_client()
                         .post(&url)
