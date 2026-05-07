@@ -145,6 +145,7 @@ pub struct CreateChildParams<'a> {
     pub noise_private_key: &'a str,
     pub openai_api_key:    Option<&'a str>,
     pub openai_base_url:   Option<&'a str>,
+    pub model:             Option<&'a str>,
 }
 
 pub async fn create_child_resources(client: &Client, p: &CreateChildParams<'_>) -> anyhow::Result<()> {
@@ -218,6 +219,9 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     }
     if let Some(u) = p.openai_base_url {
         env.push(json!({"name": "OPENAI_BASE_URL", "value": u}));
+    }
+    if let Some(m) = p.model {
+        env.push(json!({"name": "MODEL", "value": m}));
     }
     if std::env::var("OCTO_DEV").as_deref() == Ok("1") {
         env.push(json!({"name": "OCTO_DEV", "value": "1"}));

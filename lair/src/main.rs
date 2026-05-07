@@ -707,6 +707,7 @@ async fn exec_create_pod(state: Arc<AppState>, input: serde_json::Value) -> Stri
     let gh_token            = std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty());
     let openai_api_key      = std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty());
     let openai_base_url     = std::env::var("OPENAI_BASE_URL").ok().filter(|s| !s.is_empty());
+    let model               = std::env::var("MODEL").ok().filter(|s| !s.is_empty());
     let pub_host            = state.public_host.clone();
     let lair_url            = state.lair_url.clone();
     let noise_private_key   = state.noise_private_key_hex.clone();
@@ -737,6 +738,7 @@ async fn exec_create_pod(state: Arc<AppState>, input: serde_json::Value) -> Stri
         noise_private_key: &noise_private_key,
         openai_api_key:    openai_api_key.as_deref(),
         openai_base_url:   openai_base_url.as_deref(),
+        model:             model.as_deref(),
     };
 
     match k8s::create_child_resources(&state.kube_client, &params).await {
