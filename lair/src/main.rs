@@ -28,6 +28,7 @@ use octo_core::{
     init_mcp_pool, init_shell_env, load_or_generate_keypair,
     resolve_api_key, resolve_model, run_noise_proxy, send_message, to_base32, ApiMessage, AnthropicTool,
     ChatEvent, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
+    KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
 };
 use hex;
 use futures_util::{SinkExt, StreamExt};
@@ -412,6 +413,17 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let mut events_rx     = state.events_tx.subscribe();
     let mut containers_rx = state.containers_rx.clone();
 
+    // App-level keepalive: server emits `ping` every KEEPALIVE_INTERVAL; client
+    // must echo `pong` with the same id. After KEEPALIVE_MAX_MISSED unacked
+    // pings we evict the WS so half-open connections (NAT timeout, dead peer)
+    // don't leak the task forever.
+    let mut ping_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
+        KEEPALIVE_INTERVAL,
+    );
+    let mut next_ping_id:  u64 = 0;
+    let mut last_acked_id: u64 = 0;
+
     loop {
         tokio::select! {
             // Outgoing: agentic-turn events broadcast from spawn_turn.
@@ -433,10 +445,26 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
             },
 
+            // Outgoing: keepalive ping. Evict if too many outstanding.
+            _ = ping_interval.tick() => {
+                let outstanding = next_ping_id.saturating_sub(last_acked_id);
+                if outstanding >= KEEPALIVE_MAX_MISSED {
+                    warn!("[lair/stream] evicting peer: {outstanding} unacked ping(s)");
+                    break;
+                }
+                next_ping_id += 1;
+                let json = serde_json::json!({"type":"ping","id":next_ping_id}).to_string();
+                if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
+            },
+
             // Incoming: client frames.
             msg = ws_rx.next() => match msg {
                 Some(Ok(WsMessage::Text(t))) => {
-                    handle_client_frame(&t, &state).await;
+                    if let Some(id) = parse_pong_id(&t) {
+                        if id > last_acked_id { last_acked_id = id; }
+                    } else {
+                        handle_client_frame(&t, &state).await;
+                    }
                 }
                 Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
                 Some(Ok(WsMessage::Close(_))) | None => break,
@@ -447,6 +475,14 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     }
 
     info!("[lair/stream] connection closed");
+}
+
+/// Cheap parse for app-level `pong` frames (handled per-WS, not via dispatcher).
+/// Returns the echoed ping id if `raw` is a valid pong, else `None`.
+fn parse_pong_id(raw: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if v.get("type").and_then(|x| x.as_str())? != "pong" { return None; }
+    v.get("id").and_then(|x| x.as_u64())
 }
 
 /// Dispatch a client → server frame parsed from a /stream WS message.

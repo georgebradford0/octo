@@ -34,6 +34,7 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 use serde::{Deserialize, Serialize};
+use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
 // ── Data directory ────────────────────────────────────────────────────────────
@@ -194,6 +195,19 @@ pub enum ContentBlock {
     ToolUse { id: String, name: String, input: serde_json::Value },
     ToolResult { tool_use_id: String, content: Vec<serde_json::Value> },
 }
+
+// ── /stream keepalive ─────────────────────────────────────────────────────────
+
+/// How often the server emits a `ping` frame on each /stream WebSocket. Mobile
+/// auto-responds with `pong` carrying the same id. Picked to be fast enough that
+/// half-open connections (NAT timeout, sleeping device) get evicted within ~30s
+/// without burning excessive bandwidth on idle chats.
+pub const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Maximum number of unacked pings before the server evicts the WS. Two missed
+/// pings means we waited two full intervals (~30s) without hearing back, which
+/// is conclusive on a healthy network.
+pub const KEEPALIVE_MAX_MISSED: u64 = 2;
 
 // ── Chat Events ───────────────────────────────────────────────────────────────
 
@@ -630,6 +644,7 @@ async fn execute_tool_inner(
 
 // ── Anthropic Streaming ───────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct StreamUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -799,29 +814,237 @@ fn messages_to_openai(system: &str, messages: &[ApiMessage]) -> Vec<serde_json::
     out
 }
 
-/// Parse an OpenAI `/v1/chat/completions` response into (stop_reason, blocks).
-fn parse_openai_response(json: &serde_json::Value) -> (String, Vec<ContentBlock>) {
-    let choice       = &json["choices"][0];
-    let finish       = choice["finish_reason"].as_str().unwrap_or("stop");
-    let message      = &choice["message"];
-    let mut blocks   = Vec::new();
+// ── SSE streaming helpers ─────────────────────────────────────────────────────
 
-    if let Some(text) = message["content"].as_str() {
-        if !text.is_empty() {
-            blocks.push(ContentBlock::Text { text: text.to_string() });
+/// Pull the next `event: ... \n data: ...\n\n` block out of `buffer` if one is
+/// fully present. Drains the consumed bytes from `buffer` on success. Returns
+/// `(event_type, data)` where event_type may be empty (default per RFC).
+fn pop_sse_event(buffer: &mut String) -> Option<(String, String)> {
+    // SSE events are terminated by a blank line. Tolerate \r\n\r\n and \n\n.
+    let term_idx = buffer.find("\n\n").map(|i| (i, 2))
+        .or_else(|| buffer.find("\r\n\r\n").map(|i| (i, 4)))?;
+    let (idx, term_len) = term_idx;
+    let event_str: String = buffer[..idx].to_string();
+    buffer.drain(..idx + term_len);
+
+    let mut event_type = String::new();
+    let mut data       = String::new();
+    for line in event_str.lines() {
+        if let Some(rest) = line.strip_prefix("event: ").or_else(|| line.strip_prefix("event:")) {
+            event_type = rest.trim_start().to_string();
+        } else if let Some(rest) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+            if !data.is_empty() { data.push('\n'); }
+            data.push_str(rest.trim_start_matches(' '));
         }
     }
-    if let Some(calls) = message["tool_calls"].as_array() {
-        for tc in calls {
-            let id    = tc["id"].as_str().unwrap_or("").to_string();
-            let name  = tc["function"]["name"].as_str().unwrap_or("").to_string();
-            let args  = tc["function"]["arguments"].as_str().unwrap_or("{}");
-            let input = serde_json::from_str(args).unwrap_or_default();
-            blocks.push(ContentBlock::ToolUse { id, name, input });
+    Some((event_type, data))
+}
+
+#[derive(Default)]
+struct StreamingBlock {
+    kind:           String, // "text" | "tool_use"
+    text:           String,
+    id:             String,
+    name:           String,
+    input_json_str: String,
+}
+
+/// Stream Anthropic /v1/messages SSE response, emitting Text deltas live and
+/// accumulating tool_use input JSON for end-of-block emission.
+async fn stream_anthropic(
+    response: reqwest::Response,
+    cancel:   &CancellationToken,
+    tx:       &mpsc::Sender<ChatEvent>,
+) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
+    let mut bytes_stream = response.bytes_stream();
+    let mut buffer       = String::new();
+    let mut current: Option<StreamingBlock> = None;
+    let mut blocks: Vec<ContentBlock>       = Vec::new();
+    let mut stop_reason = "end_turn".to_string();
+    let mut usage       = StreamUsage::default();
+
+    loop {
+        let chunk_res = tokio::select! {
+            c = bytes_stream.next() => c,
+            _ = cancel.cancelled()  => return Err("__interrupted__".to_string()),
+        };
+        let Some(chunk_res) = chunk_res else { break };
+        let chunk = chunk_res.map_err(|e| e.to_string())?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some((event_type, data)) = pop_sse_event(&mut buffer) {
+            if data.is_empty() { continue; }
+            let v: serde_json::Value = match serde_json::from_str(&data) {
+                Ok(v)  => v,
+                Err(_) => continue,
+            };
+            match event_type.as_str() {
+                "message_start" => {
+                    let u = &v["message"]["usage"];
+                    usage.input_tokens                = u["input_tokens"].as_u64().unwrap_or(0);
+                    usage.cache_creation_input_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    usage.cache_read_input_tokens     = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                }
+                "content_block_start" => {
+                    let cb = &v["content_block"];
+                    current = Some(StreamingBlock {
+                        kind: cb["type"].as_str().unwrap_or("").to_string(),
+                        id:   cb["id"].as_str().unwrap_or("").to_string(),
+                        name: cb["name"].as_str().unwrap_or("").to_string(),
+                        ..Default::default()
+                    });
+                }
+                "content_block_delta" => {
+                    let delta = &v["delta"];
+                    let dtype = delta["type"].as_str().unwrap_or("");
+                    if let Some(cur) = current.as_mut() {
+                        match dtype {
+                            "text_delta" => {
+                                let chunk = delta["text"].as_str().unwrap_or("").to_string();
+                                if !chunk.is_empty() {
+                                    cur.text.push_str(&chunk);
+                                    tx.send(ChatEvent::Text { text: chunk }).await.ok();
+                                }
+                            }
+                            "input_json_delta" => {
+                                cur.input_json_str.push_str(delta["partial_json"].as_str().unwrap_or(""));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "content_block_stop" => {
+                    if let Some(cur) = current.take() {
+                        match cur.kind.as_str() {
+                            "text" if !cur.text.is_empty() => {
+                                blocks.push(ContentBlock::Text { text: cur.text });
+                            }
+                            "tool_use" => {
+                                let input: serde_json::Value = if cur.input_json_str.is_empty() {
+                                    serde_json::json!({})
+                                } else {
+                                    serde_json::from_str(&cur.input_json_str).unwrap_or(serde_json::json!({}))
+                                };
+                                info!("[core/stream/anthropic] tool_use name={} id={}", cur.name, cur.id);
+                                tx.send(ChatEvent::ToolUse {
+                                    tool:  cur.name.clone(),
+                                    input: input.clone(),
+                                }).await.ok();
+                                blocks.push(ContentBlock::ToolUse {
+                                    id: cur.id, name: cur.name, input,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "message_delta" => {
+                    if let Some(sr) = v["delta"]["stop_reason"].as_str() {
+                        stop_reason = sr.to_string();
+                    }
+                    if let Some(out) = v["usage"]["output_tokens"].as_u64() {
+                        usage.output_tokens = out;
+                    }
+                }
+                "error" => {
+                    let msg = v["error"]["message"].as_str().unwrap_or("unknown streaming error");
+                    return Err(format!("API stream error: {msg}"));
+                }
+                _ => {} // message_stop, ping — no-op
+            }
         }
     }
-    let stop_reason = if finish == "tool_calls" { "tool_use" } else { "end_turn" }.to_string();
-    (stop_reason, blocks)
+
+    Ok((blocks, stop_reason, usage))
+}
+
+/// Stream OpenAI-compatible /chat/completions SSE response, emitting Text deltas
+/// live and accumulating tool_call arguments JSON for end-of-stream emission.
+async fn stream_openai(
+    response: reqwest::Response,
+    cancel:   &CancellationToken,
+    tx:       &mpsc::Sender<ChatEvent>,
+) -> Result<(Vec<ContentBlock>, String, StreamUsage), String> {
+    let mut bytes_stream = response.bytes_stream();
+    let mut buffer       = String::new();
+    let mut text_accum   = String::new();
+    // Tool calls keyed by index (some providers stream by index; some by id).
+    // We accumulate name once and arguments incrementally.
+    #[derive(Default, Clone)]
+    struct ToolCallAccum { id: String, name: String, args: String }
+    let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
+    let mut stop_reason  = "end_turn".to_string();
+    let mut usage        = StreamUsage::default();
+
+    loop {
+        let chunk_res = tokio::select! {
+            c = bytes_stream.next() => c,
+            _ = cancel.cancelled()  => return Err("__interrupted__".to_string()),
+        };
+        let Some(chunk_res) = chunk_res else { break };
+        let chunk = chunk_res.map_err(|e| e.to_string())?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some((_etype, data)) = pop_sse_event(&mut buffer) {
+            if data == "[DONE]" || data.is_empty() { continue; }
+            let v: serde_json::Value = match serde_json::from_str(&data) {
+                Ok(v)  => v,
+                Err(_) => continue,
+            };
+            // OpenAI streams chat completions chunks; usage lands in the final chunk
+            // when stream_options.include_usage is set.
+            if let Some(u) = v.get("usage") {
+                if let Some(p) = u["prompt_tokens"].as_u64()     { usage.input_tokens  = p; }
+                if let Some(c) = u["completion_tokens"].as_u64() { usage.output_tokens = c; }
+            }
+            let Some(choices) = v["choices"].as_array() else { continue };
+            let Some(choice)  = choices.first()                else { continue };
+            let delta = &choice["delta"];
+
+            if let Some(content) = delta["content"].as_str() {
+                if !content.is_empty() {
+                    text_accum.push_str(content);
+                    tx.send(ChatEvent::Text { text: content.to_string() }).await.ok();
+                }
+            }
+            if let Some(tcs) = delta["tool_calls"].as_array() {
+                for tc in tcs {
+                    let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                    while tool_calls.len() <= idx { tool_calls.push(ToolCallAccum::default()); }
+                    let acc = &mut tool_calls[idx];
+                    if let Some(id) = tc["id"].as_str() {
+                        if !id.is_empty() { acc.id = id.to_string(); }
+                    }
+                    if let Some(n) = tc["function"]["name"].as_str() {
+                        if !n.is_empty() { acc.name = n.to_string(); }
+                    }
+                    if let Some(a) = tc["function"]["arguments"].as_str() {
+                        acc.args.push_str(a);
+                    }
+                }
+            }
+            if let Some(fr) = choice["finish_reason"].as_str() {
+                stop_reason = if fr == "tool_calls" { "tool_use".to_string() } else { fr.to_string() };
+            }
+        }
+    }
+
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    if !text_accum.is_empty() {
+        blocks.push(ContentBlock::Text { text: text_accum });
+    }
+    for tc in tool_calls {
+        if tc.name.is_empty() { continue; }
+        let input: serde_json::Value = if tc.args.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&tc.args).unwrap_or(serde_json::json!({}))
+        };
+        info!("[core/stream/openai] tool_use name={} id={}", tc.name, tc.id);
+        tx.send(ChatEvent::ToolUse { tool: tc.name.clone(), input: input.clone() }).await.ok();
+        blocks.push(ContentBlock::ToolUse { id: tc.id, name: tc.name, input });
+    }
+    Ok((blocks, stop_reason, usage))
 }
 
 // ── call_turn ─────────────────────────────────────────────────────────────────
@@ -873,6 +1096,7 @@ pub async fn call_turn(
             let body = serde_json::json!({
                 "model":      model,
                 "max_tokens": 8192,
+                "stream":     true,
                 "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
                 "tools":      tools_json,
                 "messages":   messages_json,
@@ -885,6 +1109,7 @@ pub async fn call_turn(
                     .header("anthropic-version", "2023-06-01")
                     .header("anthropic-beta",    "prompt-caching-2024-07-31")
                     .header("content-type",      "application/json")
+                    .header("accept",            "text/event-stream")
                     .json(&body).send() => res.map_err(|e| e.to_string())?,
                 _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
             };
@@ -896,19 +1121,7 @@ pub async fn call_turn(
             }
             if cancel.is_cancelled() { return Err("__interrupted__".to_string()); }
 
-            let json: serde_json::Value = tokio::select! {
-                res = response.json() => res.map_err(|e| e.to_string())?,
-                _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
-            };
-
-            let stop_reason  = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
-            let usage        = &json["usage"];
-            let stream_usage = StreamUsage {
-                input_tokens:                usage["input_tokens"].as_u64().unwrap_or(0),
-                output_tokens:               usage["output_tokens"].as_u64().unwrap_or(0),
-                cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-                cache_read_input_tokens:     usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
-            };
+            let (blocks, stop_reason, stream_usage) = stream_anthropic(response, cancel, tx).await?;
             info!(
                 "[core/call_turn] stop_reason={stop_reason} in={} out={} cache_create={} cache_read={}",
                 stream_usage.input_tokens,
@@ -916,32 +1129,6 @@ pub async fn call_turn(
                 stream_usage.cache_creation_input_tokens,
                 stream_usage.cache_read_input_tokens,
             );
-
-            let mut blocks = Vec::new();
-            if let Some(content) = json["content"].as_array() {
-                for block in content {
-                    match block["type"].as_str().unwrap_or("") {
-                        "text" => {
-                            let text = block["text"].as_str().unwrap_or("").to_string();
-                            if !text.is_empty() {
-                                let preview: String = text.chars().take(80).collect();
-                                debug!("[core/call_turn] text block ({} chars): {preview}", text.len());
-                                tx.send(ChatEvent::Text { text: text.clone() }).await.ok();
-                                blocks.push(ContentBlock::Text { text });
-                            }
-                        }
-                        "tool_use" => {
-                            let id    = block["id"].as_str().unwrap_or("").to_string();
-                            let name  = block["name"].as_str().unwrap_or("").to_string();
-                            let input = block["input"].clone();
-                            info!("[core/call_turn] tool_use name={name} id={id}");
-                            tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
-                            blocks.push(ContentBlock::ToolUse { id, name, input });
-                        }
-                        _ => {}
-                    }
-                }
-            }
             Ok((blocks, stop_reason, stream_usage))
         }
 
@@ -952,6 +1139,8 @@ pub async fn call_turn(
             let body = serde_json::json!({
                 "model":      model,
                 "max_tokens": 8192,
+                "stream":     true,
+                "stream_options": { "include_usage": true },
                 "tools":      tools_json,
                 "messages":   messages_oa,
             });
@@ -962,6 +1151,7 @@ pub async fn call_turn(
                     .post(&url)
                     .header("Authorization",  format!("Bearer {api_key}"))
                     .header("content-type",   "application/json")
+                    .header("accept",         "text/event-stream")
                     .json(&body).send() => res.map_err(|e| e.to_string())?,
                 _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
             };
@@ -973,36 +1163,11 @@ pub async fn call_turn(
             }
             if cancel.is_cancelled() { return Err("__interrupted__".to_string()); }
 
-            let json: serde_json::Value = tokio::select! {
-                res = response.json() => res.map_err(|e| e.to_string())?,
-                _ = cancel.cancelled() => return Err("__interrupted__".to_string()),
-            };
-
-            let (stop_reason, blocks) = parse_openai_response(&json);
-            let stream_usage = StreamUsage {
-                input_tokens:                json["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
-                output_tokens:               json["usage"]["completion_tokens"].as_u64().unwrap_or(0),
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens:     0,
-            };
+            let (blocks, stop_reason, stream_usage) = stream_openai(response, cancel, tx).await?;
             info!(
                 "[core/call_turn/openai] stop_reason={stop_reason} in={} out={}",
                 stream_usage.input_tokens, stream_usage.output_tokens,
             );
-            for block in &blocks {
-                match block {
-                    ContentBlock::Text { text } => {
-                        let preview: String = text.chars().take(80).collect();
-                        debug!("[core/call_turn/openai] text block ({} chars): {preview}", text.len());
-                        tx.send(ChatEvent::Text { text: text.clone() }).await.ok()
-                    }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        info!("[core/call_turn/openai] tool_use name={name}");
-                        tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok()
-                    }
-                    _ => None,
-                };
-            }
             Ok((blocks, stop_reason, stream_usage))
         }
     }
@@ -1044,7 +1209,10 @@ pub async fn send_message(
         }
         let compacted = compact_history(&messages, 20);
 
-        let (json, stop_reason) = match &backend {
+        // Per-call request: stream the response and emit ChatEvent::Text deltas
+        // live (mobile renders typewriter-style). stream_anthropic / stream_openai
+        // also emit ChatEvent::ToolUse once each tool_use block finishes assembling.
+        let (blocks, stop_reason, usage) = match &backend {
             ApiBackend::Anthropic => {
                 let mut tools_json: Vec<serde_json::Value> = all_tools
                     .iter().map(|t| serde_json::to_value(t).unwrap()).collect();
@@ -1070,6 +1238,7 @@ pub async fn send_message(
                 let body = serde_json::json!({
                     "model":      model,
                     "max_tokens": 8192,
+                    "stream":     true,
                     "system":     [{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}],
                     "tools":      tools_json,
                     "messages":   messages_json,
@@ -1081,6 +1250,7 @@ pub async fn send_message(
                         .header("anthropic-version", "2023-06-01")
                         .header("anthropic-beta",    "prompt-caching-2024-07-31")
                         .header("content-type",      "application/json")
+                        .header("accept",            "text/event-stream")
                         .json(&body).send() => res.map_err(|e| (e.to_string(), messages.clone()))?,
                     _ = cancel.cancelled() => {
                         tx.send(ChatEvent::InterruptAck).await.ok();
@@ -1092,30 +1262,25 @@ pub async fn send_message(
                     let text   = response.text().await.unwrap_or_default();
                     return Err((format!("API error {status}: {text}"), messages));
                 }
-                let json: serde_json::Value = tokio::select! {
-                    res = response.json() => res.map_err(|e| (e.to_string(), messages.clone()))?,
-                    _ = cancel.cancelled() => {
+                let (blocks, stop_reason, usage) = match stream_anthropic(response, &cancel, &tx).await {
+                    Ok(v) => v,
+                    Err(e) if e == "__interrupted__" => {
                         tx.send(ChatEvent::InterruptAck).await.ok();
                         return Ok((last_text, total_cost, messages));
                     }
+                    Err(e) => return Err((e, messages)),
                 };
-                let stop_reason = json["stop_reason"].as_str().unwrap_or("end_turn").to_string();
-                let usage = &json["usage"];
                 info!(
                     "[send_message] turn={turn} stop_reason={stop_reason} in={} out={} cache_create={} cache_read={}",
-                    usage["input_tokens"].as_u64().unwrap_or(0),
-                    usage["output_tokens"].as_u64().unwrap_or(0),
-                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                    usage.input_tokens, usage.output_tokens,
+                    usage.cache_creation_input_tokens, usage.cache_read_input_tokens,
                 );
                 total_cost += cost_usd(
                     model,
-                    usage["input_tokens"].as_u64().unwrap_or(0),
-                    usage["output_tokens"].as_u64().unwrap_or(0),
-                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                    usage.input_tokens, usage.output_tokens,
+                    usage.cache_creation_input_tokens, usage.cache_read_input_tokens,
                 );
-                (json, stop_reason)
+                (blocks, stop_reason, usage)
             }
 
             ApiBackend::OpenAi { base_url } => {
@@ -1124,6 +1289,8 @@ pub async fn send_message(
                 let body = serde_json::json!({
                     "model":      model,
                     "max_tokens": 8192,
+                    "stream":     true,
+                    "stream_options": { "include_usage": true },
                     "tools":      tools_json,
                     "messages":   messages_oa,
                 });
@@ -1133,6 +1300,7 @@ pub async fn send_message(
                         .post(&url)
                         .header("Authorization", format!("Bearer {api_key}"))
                         .header("content-type",  "application/json")
+                        .header("accept",        "text/event-stream")
                         .json(&body).send() => res.map_err(|e| (e.to_string(), messages.clone()))?,
                     _ = cancel.cancelled() => {
                         tx.send(ChatEvent::InterruptAck).await.ok();
@@ -1144,74 +1312,33 @@ pub async fn send_message(
                     let text   = response.text().await.unwrap_or_default();
                     return Err((format!("API error {status}: {text}"), messages));
                 }
-                let json: serde_json::Value = tokio::select! {
-                    res = response.json() => res.map_err(|e| (e.to_string(), messages.clone()))?,
-                    _ = cancel.cancelled() => {
+                let (blocks, stop_reason, usage) = match stream_openai(response, &cancel, &tx).await {
+                    Ok(v) => v,
+                    Err(e) if e == "__interrupted__" => {
                         tx.send(ChatEvent::InterruptAck).await.ok();
                         return Ok((last_text, total_cost, messages));
                     }
+                    Err(e) => return Err((e, messages)),
                 };
-                let finish    = json["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
-                let stop_reason = if finish == "tool_calls" { "tool_use" } else { "end_turn" }.to_string();
-                info!("[send_message/openai] turn={turn} finish_reason={finish}");
-                // Cost tracking skipped for OpenAI-compatible backends.
-                (json, stop_reason)
+                info!(
+                    "[send_message/openai] turn={turn} stop_reason={stop_reason} in={} out={}",
+                    usage.input_tokens, usage.output_tokens,
+                );
+                // Cost tracking skipped for OpenAI-compatible backends (no fixed pricing).
+                (blocks, stop_reason, usage)
             }
         };
+        let _ = usage; // tokens already attributed above
 
-        // Parse content blocks (format differs by backend).
+        // Collect text + tool_uses out of the streamed blocks. Events were already
+        // emitted live by stream_anthropic / stream_openai — don't re-emit here.
         let mut text_buf  = String::new();
-        let mut blocks    = Vec::new();
         let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
-
-        match &backend {
-            ApiBackend::Anthropic => {
-                if let Some(content) = json["content"].as_array() {
-                    for block in content {
-                        match block["type"].as_str().unwrap_or("") {
-                            "text" => {
-                                let t = block["text"].as_str().unwrap_or("").to_string();
-                                if !t.is_empty() {
-                                    let preview = t.chars().take(120).collect::<String>();
-                                    info!("[send_message] turn={turn} text ({} chars): {preview}", t.len());
-                                    tx.send(ChatEvent::Text { text: t.clone() }).await.ok();
-                                    text_buf.push_str(&t);
-                                    blocks.push(ContentBlock::Text { text: t });
-                                }
-                            }
-                            "tool_use" => {
-                                let id    = block["id"].as_str().unwrap_or("").to_string();
-                                let name  = block["name"].as_str().unwrap_or("").to_string();
-                                let input = block["input"].clone();
-                                info!("[send_message] turn={turn} tool_use name={name} input={input}");
-                                tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
-                                tool_uses.push((id.clone(), name.clone(), input.clone()));
-                                blocks.push(ContentBlock::ToolUse { id, name, input });
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            ApiBackend::OpenAi { .. } => {
-                let (_, parsed_blocks) = parse_openai_response(&json);
-                for block in parsed_blocks {
-                    match &block {
-                        ContentBlock::Text { text } => {
-                            let preview = text.chars().take(120).collect::<String>();
-                            info!("[send_message/openai] turn={turn} text ({} chars): {preview}", text.len());
-                            tx.send(ChatEvent::Text { text: text.clone() }).await.ok();
-                            text_buf.push_str(text);
-                        }
-                        ContentBlock::ToolUse { id, name, input } => {
-                            info!("[send_message/openai] turn={turn} tool_use name={name}");
-                            tx.send(ChatEvent::ToolUse { tool: name.clone(), input: input.clone() }).await.ok();
-                            tool_uses.push((id.clone(), name.clone(), input.clone()));
-                        }
-                        _ => {}
-                    }
-                    blocks.push(block);
-                }
+        for block in &blocks {
+            match block {
+                ContentBlock::Text { text }                  => text_buf.push_str(text),
+                ContentBlock::ToolUse { id, name, input }    => tool_uses.push((id.clone(), name.clone(), input.clone())),
+                _                                            => {}
             }
         }
 

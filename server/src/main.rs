@@ -27,6 +27,7 @@ use octo_core::{
     init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config, resolve_api_key,
     resolve_model, run_noise_proxy, send_message, to_base32, write_config, ApiMessage, AnthropicTool,
     ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
+    KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
 };
 use octo_k8s_ops::k8s;
 use futures_util::{SinkExt, StreamExt};
@@ -412,6 +413,14 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
+    // App-level keepalive (see lair/handle_stream for design).
+    let mut ping_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
+        KEEPALIVE_INTERVAL,
+    );
+    let mut next_ping_id:  u64 = 0;
+    let mut last_acked_id: u64 = 0;
+
     loop {
         tokio::select! {
             // Outgoing: agentic-turn events fanned out from spawn_turn / buffer.
@@ -422,10 +431,26 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 None => break,
             },
 
+            // Outgoing: keepalive ping.
+            _ = ping_interval.tick() => {
+                let outstanding = next_ping_id.saturating_sub(last_acked_id);
+                if outstanding >= KEEPALIVE_MAX_MISSED {
+                    warn!("[server/stream] evicting peer: {outstanding} unacked ping(s)");
+                    break;
+                }
+                next_ping_id += 1;
+                let json = serde_json::json!({"type":"ping","id":next_ping_id}).to_string();
+                if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
+            },
+
             // Incoming: client frames.
             msg = ws_rx.next() => match msg {
                 Some(Ok(WsMessage::Text(t))) => {
-                    handle_client_frame(&t, &state).await;
+                    if let Some(id) = parse_pong_id(&t) {
+                        if id > last_acked_id { last_acked_id = id; }
+                    } else {
+                        handle_client_frame(&t, &state).await;
+                    }
                 }
                 Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
                 Some(Ok(WsMessage::Close(_))) | None => break,
@@ -435,7 +460,16 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
+
     info!("[server/stream] connection closed");
+}
+
+/// Cheap parse for app-level `pong` frames (handled per-WS, not via dispatcher).
+/// Returns the echoed ping id if `raw` is a valid pong, else `None`.
+fn parse_pong_id(raw: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if v.get("type").and_then(|x| x.as_str())? != "pong" { return None; }
+    v.get("id").and_then(|x| x.as_u64())
 }
 
 /// Dispatch a client → server frame parsed from a /stream WS message.

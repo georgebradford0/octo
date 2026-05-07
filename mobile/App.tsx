@@ -782,39 +782,83 @@ const ChatPane = memo(function ChatPane({
   useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
   useEffect(() => { if (reloadRef) reloadRef.current = loadHistory }, [loadHistory, reloadRef])
 
-  // Persistent /stream WebSocket: opens once per baseUrl, stays open across turns.
-  // Replaces the per-turn open/close that lived inside sendMessage. The server's
-  // `ready` event drives status; subsequent events feed handleStreamEvent until
-  // the WS closes (unmount or baseUrl change).
+  // Persistent /stream WebSocket with exponential-backoff reconnect.
+  //
+  // Opens once per baseUrl and stays open across turns. On unintentional close
+  // (network drop, server eviction, NAT timeout) it auto-reconnects with
+  // exponential backoff capped at 30s; the counter resets the moment the
+  // server's first `ready` event arrives. Intentional closes (effect cleanup
+  // on baseUrl change / unmount, parent-driven closeWsRef teardown) flag
+  // closingRef to suppress the retry loop.
   useEffect(() => {
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
-    log(`[chat] opening persistent ws ${wsUrl}`)
-    const wsStart = Date.now()
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
-    ws.onopen = () => {
-      log(`[chat] ws open after ${Date.now() - wsStart}ms`)
-      // No initial frame — server greets us with `ready` first.
-    }
-    ws.onmessage = (e) => {
-      handleStreamEvent(typeof e.data === 'string' ? e.data : '')
-    }
-    ws.onerror = (e) => {
-      logE(`[chat] ws error after ${Date.now() - wsStart}ms: ${JSON.stringify(e)}`)
-      if (!closingRef.current && !reconnectingRef?.current) updateStatus('error')
-    }
-    ws.onclose = (e) => {
-      log(`[chat] ws closed after ${Date.now() - wsStart}ms code=${e.code} reason=${e.reason}`)
-      if (wsRef.current === ws) wsRef.current = null
-      closingRef.current = false
-      // TODO: exponential backoff reconnect lives here once the rest of batch B lands.
+    let cancelled = false
+    let currentWs: WebSocket | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+
+    const BASE_BACKOFF_MS = 1000
+    const MAX_BACKOFF_MS  = 30_000
+    let attempt = 0
+
+    const connect = () => {
+      if (cancelled) return
+      log(`[chat] connecting ws ${wsUrl} (attempt ${attempt + 1})`)
+      const wsStart = Date.now()
+      const ws = new WebSocket(wsUrl)
+      currentWs = ws
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        log(`[chat] ws open after ${Date.now() - wsStart}ms`)
+        // We don't reset `attempt` here — wait for the server's `ready` frame
+        // to confirm the channel is actually usable, not just that TCP/WS opened.
+      }
+      ws.onmessage = (e) => {
+        const raw = typeof e.data === 'string' ? e.data : ''
+        if (raw) {
+          // Reset backoff on first sign of a real conversation: the server's
+          // `ready` greeting. Anything earlier (e.g. pre-Ready noise) doesn't
+          // count as a successful session.
+          if (attempt > 0 && raw.includes('"ready"')) {
+            attempt = 0
+          }
+          handleStreamEvent(raw)
+        }
+      }
+      ws.onerror = (e) => {
+        // Don't surface error UI on transient drops — onclose will fire and
+        // schedule a retry. Only the foreground-return path ever sets status='error'.
+        logE(`[chat] ws error after ${Date.now() - wsStart}ms: ${JSON.stringify(e)}`)
+      }
+      ws.onclose = (e) => {
+        log(`[chat] ws closed after ${Date.now() - wsStart}ms code=${e.code} reason=${e.reason}`)
+        if (wsRef.current === ws) wsRef.current = null
+        currentWs = null
+        const intentional = closingRef.current
+        closingRef.current = false
+        if (cancelled || intentional) return
+        const delay = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS)
+        attempt += 1
+        log(`[chat] reconnect scheduled in ${delay}ms (next attempt #${attempt + 1})`)
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          connect()
+        }, delay)
+      }
     }
 
+    connect()
+
     return () => {
-      if (wsRef.current === ws) {
+      cancelled = true
+      if (retryTimer) {
+        clearTimeout(retryTimer)
+        retryTimer = null
+      }
+      if (currentWs) {
         log('[chat] tearing down ws (effect cleanup)')
         closingRef.current = true
-        ws.close()
+        currentWs.close()
         wsRef.current = null
       }
     }

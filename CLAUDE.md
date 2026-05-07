@@ -51,9 +51,32 @@ Octo is an agentic coding assistant: a server runs an AI loop against a git repo
 All client↔server communication is encrypted with **Noise_XX_25519_ChaChaPoly_SHA256**:
 
 1. Client scans QR code → `2:<host>:<port>:<base32-pubkey>`
-2. TCP connection → 3-message Noise XX handshake (mutual auth, server pubkey from QR)
-3. Post-handshake: WebSocket runs over encrypted frames (2-byte big-endian length prefix)
-4. JSON message types: `history`, `token`, `tool`, `question`, `done`, `error`, `ack`
+2. TCP connection → 3-message Noise XX handshake. The QR-pinned server static key is verified during the handshake; the client's static key is captured from snow's `get_remote_static()` and logged at handshake completion (per-client allowlisting is plumbed but not yet enforced).
+3. Frame format: 2-byte big-endian length prefix + ciphertext. Frames over `MAX_FRAME_SIZE` (16 KiB) are rejected; body reads timeout after 30 s; the whole handshake must complete within 10 s. Per source IP, no more than 32 concurrent Noise sessions are accepted.
+4. Post-handshake: a single, persistent WebSocket runs over the encrypted frames. One WS per server (lair or child) for the entire chat session — opened on chat-screen mount, closed on unmount. `core/src/lib.rs::ChatEvent` is the wire schema; tagged JSON via serde `tag = "type"`.
+
+Wire frames (server → client unless noted):
+
+| `type`            | Direction | Payload                                                   |
+|-------------------|-----------|-----------------------------------------------------------|
+| `ready`           | s → c     | `session_id: string`, `resumed: bool`. Sent once on open. |
+| `text`            | s → c     | `text: string`. Streamed live: one delta per Anthropic `content_block_delta` (text_delta) or OpenAI `choices[0].delta.content`. Mobile appends to a single message id. |
+| `tool_use`        | s → c     | `tool: string`, `input: any`. Emitted once per tool call after its input JSON is fully assembled. |
+| `tool_output`     | s → c     | `line: string`. One per stdout/stderr line during tool execution. |
+| `tool_result`     | s → c     | `tool_use_id: string`, `output: any`. Final tool result. |
+| `done`            | s → c     | `cost_usd: number`. Turn finished cleanly. |
+| `interrupted`     | s → c     | `cost_usd: number`. Turn cancelled by client. |
+| `interrupt_ack`   | s → c     | (no fields) Ack of an `interrupt` frame. |
+| `error`           | s → c     | `message: string`. Turn failed; WS stays open. |
+| `system`          | s → c     | `text: string`. Server status string for the UI. |
+| `containers`      | s → c     | `containers: ContainerInfo[]`. **Lair only.** Pushed on poller change. |
+| `ping`            | s → c     | `id: number`. Liveness probe every `KEEPALIVE_INTERVAL` (15 s). |
+| `user_message`    | c → s     | `text: string`. Start a new agentic turn. |
+| `interrupt`       | c → s     | (no fields) Cancel the in-flight turn. |
+| `pong`            | c → s     | `id: number`. Reply to `ping`. After `KEEPALIVE_MAX_MISSED` (2) unacked pings the server evicts the WS. |
+| `start_container` | c → s     | `id: string`. **Lair only.** Scale a child Deployment to 1. |
+
+Mobile auto-reconnects with exponential backoff (1 s → 30 s, capped) on unintentional close; the counter resets on the next `ready`. The deprecated `GET /containers` and `POST /containers/start` HTTP endpoints have been removed (use the equivalent `/stream` events instead).
 
 Server listens on port 9000 (`NOISE_PORT`). The Curve25519 keypair is persisted in `/data`.
 
@@ -63,8 +86,8 @@ Server listens on port 9000 (`NOISE_PORT`). The Curve25519 keypair is persisted 
 
 - Polls Kubernetes (every 10 s) for Deployments in the `octo` namespace labelled `octo.managed=1`
 - Caches each child's Noise public key in `/data/pubkey_registry.json`
-- Exposes `/containers` HTTP endpoint; clients poll it to get the current container list
-- Accepts `start_container` commands from the client, which scale the child Deployment to 1 replica and trigger an immediate re-poll
+- Pushes the current container list as a `containers` event over `/stream` on every poller state-change (mobile subscribes; no HTTP polling)
+- Accepts `start_container` frames from the client over `/stream`, which scale the child Deployment to 1 replica and trigger an immediate re-poll
 - Runs its own agentic loop (via `core`) so the user can ask it to create/manage child containers
 
 Image: `ghcr.io/georgebradford0/lair`
