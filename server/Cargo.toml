@@ -1,6 +1,6 @@
 [package]
 name        = "octo-server"
-version     = "0.2.37"
+version     = "0.2.38"
 edition     = "2021"
 description = "octo standalone HTTP/WebSocket server"
 

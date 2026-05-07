@@ -138,11 +138,13 @@ pub struct CreateChildParams<'a> {
     pub api_key:           &'a str,
     pub gh_token:          Option<&'a str>,
     pub pub_host:          &'a str,
-    pub lair_url:        &'a str,
+    pub lair_url:          &'a str,
     pub startup_script:    Option<&'a str>,
     pub startup_prompt:    Option<&'a str>,
     /// Hex-encoded 64-byte keypair (32 private + 32 public) to inject into the child.
     pub noise_private_key: &'a str,
+    pub openai_api_key:    Option<&'a str>,
+    pub openai_base_url:   Option<&'a str>,
 }
 
 pub async fn create_child_resources(client: &Client, p: &CreateChildParams<'_>) -> anyhow::Result<()> {
@@ -210,6 +212,12 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     }
     if let Some(s) = p.startup_prompt {
         env.push(json!({"name": "STARTUP_PROMPT", "value": s}));
+    }
+    if let Some(k) = p.openai_api_key {
+        env.push(json!({"name": "OPENAI_API_KEY", "value": k}));
+    }
+    if let Some(u) = p.openai_base_url {
+        env.push(json!({"name": "OPENAI_BASE_URL", "value": u}));
     }
     if std::env::var("OCTO_DEV").as_deref() == Ok("1") {
         env.push(json!({"name": "OCTO_DEV", "value": "1"}));
