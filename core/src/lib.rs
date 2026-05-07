@@ -112,19 +112,22 @@ pub fn write_config(cfg: &Config) {
 }
 
 pub fn resolve_api_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()))
-        .or_else(|| {
-            let cfg = read_config();
-            // Prefer openai_api_key when a base_url is configured (OpenAI-compatible backend),
-            // otherwise fall back to the generic api_key field.
-            if cfg.base_url.as_deref().filter(|s| !s.is_empty()).is_some() {
+    // When using an OpenAI-compatible backend, OPENAI_API_KEY takes priority over
+    // ANTHROPIC_API_KEY so the correct provider key is sent as the Bearer token.
+    let openai_base = std::env::var("OPENAI_BASE_URL").ok().filter(|s| !s.is_empty())
+        .or_else(|| read_config().base_url.filter(|s| !s.is_empty()));
+
+    if openai_base.is_some() {
+        std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty())
+            .or_else(|| {
+                let cfg = read_config();
                 cfg.openai_api_key.filter(|s| !s.is_empty()).or(cfg.api_key)
-            } else {
-                cfg.api_key
-            }
-        })
-        .or_else(|| read_key_from_shell_files())
+            })
+    } else {
+        std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
+            .or_else(|| read_config().api_key)
+            .or_else(|| read_key_from_shell_files())
+    }
 }
 
 /// MODEL env var > config.model > default sonnet.
