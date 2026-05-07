@@ -654,7 +654,13 @@ pub async fn upsert_lair_deployment(client: &Client, public_port: u16) -> anyhow
                             {"containerPort": 8000, "name": "http"},
                             {"containerPort": 9000, "name": "noise"}
                         ],
-                        "volumeMounts": [{"name": "data", "mountPath": "/data"}]
+                        "volumeMounts": [{"name": "data", "mountPath": "/data"}],
+                        "readinessProbe": {
+                            "httpGet": {"path": "/health", "port": 8000},
+                            "initialDelaySeconds": 5,
+                            "periodSeconds": 3,
+                            "failureThreshold": 20
+                        }
                     }],
                     "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "lair-data"}}]
                 }
