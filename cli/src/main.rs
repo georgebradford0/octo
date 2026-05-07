@@ -500,10 +500,12 @@ async fn main() -> Result<()> {
                 for name in &updated {
                     let old_ver = k8s::get_deployment_version(&client, name).await
                         .unwrap_or_else(|| "unknown".to_string());
-                    print!("  {name}: {old_ver} → {} ... ", k8s::IMAGE_VERSION);
+                    print!("  {name}: {old_ver} → ? ... ");
                     std::io::Write::flush(&mut std::io::stdout())?;
                     k8s::wait_for_deployment_ready(&client, name, 120).await?;
-                    println!("ready.");
+                    let new_ver = k8s::get_deployment_version(&client, name).await
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!("{new_ver} ready.");
                 }
             }
         }

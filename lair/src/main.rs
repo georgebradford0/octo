@@ -869,6 +869,14 @@ async fn main() {
         }
     };
 
+    // Stamp our own version onto the deployment annotation so `octo reload`
+    // can display the version transition without the CLI hardcoding it.
+    if let Err(e) = k8s::stamp_deployment_version(&kube_client, &lair_name, env!("CARGO_PKG_VERSION")).await {
+        warn!("[lair] could not stamp version annotation: {e}");
+    } else {
+        info!("[lair] stamped version {} on deployment/{lair_name}", env!("CARGO_PKG_VERSION"));
+    }
+
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
     let dir = data_dir();

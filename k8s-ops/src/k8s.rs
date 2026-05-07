@@ -20,9 +20,8 @@ pub const LAIR_NOISE_PORT: u16  = 30900;
 
 const NODEPORT_MIN:  u16  = 30100;
 const NODEPORT_MAX:  u16  = 30199;
-pub const IMAGE:         &str = "ghcr.io/georgebradford0/lair:latest";
-pub const IMAGE_VERSION: &str = "0.2.31";
-const VERSION_ANNOTATION: &str = "octo.image-version";
+pub const IMAGE:          &str = "ghcr.io/georgebradford0/lair:latest";
+pub const VERSION_ANNOTATION: &str = "octo.image-version";
 const ENTRYPOINT:    &str = "/usr/local/bin/docker-entrypoint-server.sh";
 const LAIR_NAME:   &str = "lair";
 
@@ -41,6 +40,19 @@ pub async fn get_deployment_version(client: &Client, name: &str) -> Option<Strin
     deployments.get(name).await.ok()
         .and_then(|d| d.metadata.annotations)
         .and_then(|a| a.get(VERSION_ANNOTATION).cloned())
+}
+
+/// Write the running binary's version into the deployment's `octo.image-version` annotation.
+/// Called by lair on startup so the CLI can read it before/after a reload.
+pub async fn stamp_deployment_version(client: &Client, name: &str, version: &str) -> anyhow::Result<()> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
+    let patch = json!({
+        "metadata": { "annotations": { VERSION_ANNOTATION: version } }
+    });
+    deployments.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .with_context(|| format!("stamp version annotation on deployment/{name}"))?;
+    Ok(())
 }
 
 pub async fn build_client() -> anyhow::Result<Client> {
@@ -328,7 +340,6 @@ pub async fn restart_deployments(client: &Client, names: &[&str]) -> anyhow::Res
         format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
     };
     let patch = json!({
-        "metadata": { "annotations": { VERSION_ANNOTATION: IMAGE_VERSION } },
         "spec": { "template": { "metadata": { "annotations": {
             "kubectl.kubernetes.io/restartedAt": now
         }}}}
@@ -403,7 +414,6 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
     let mut updated = Vec::new();
     for (name, container_name) in &targets {
         let patch = json!({
-            "metadata": { "annotations": { VERSION_ANNOTATION: IMAGE_VERSION } },
             "spec": { "template": {
                 "metadata": { "annotations": { "kubectl.kubernetes.io/restartedAt": now } },
                 "spec": { "containers": [{ "name": container_name, "image": IMAGE }] }
