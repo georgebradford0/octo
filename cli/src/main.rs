@@ -572,7 +572,7 @@ async fn main() -> Result<()> {
         }
         Command::Get { resource } => {
             let kind = match resource {
-                GetResource::Pods        => "pods",
+                GetResource::Pods        => "deployments",
                 GetResource::Deployments => "deployments",
                 GetResource::Services    => "services",
                 GetResource::Pvc         => "pvc",
