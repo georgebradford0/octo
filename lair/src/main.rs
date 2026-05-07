@@ -600,6 +600,18 @@ fn terminate_pod_tool() -> AnthropicTool {
     }
 }
 
+fn list_pods_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "list_pods".to_string(),
+        description: "List all known child containers and their current status.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    }
+}
+
 fn restart_all_containers_tool() -> AnthropicTool {
     AnthropicTool {
         name: "restart_all_containers".to_string(),
@@ -616,7 +628,7 @@ fn restart_all_containers_tool() -> AnthropicTool {
 }
 
 fn lair_extra_tools() -> Vec<AnthropicTool> {
-    vec![message_child_tool(), create_pod_tool(), terminate_pod_tool(), restart_all_containers_tool()]
+    vec![list_pods_tool(), message_child_tool(), create_pod_tool(), terminate_pod_tool(), restart_all_containers_tool()]
 }
 
 fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_json::Value)
@@ -633,6 +645,7 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
         let state  = state.clone();
         Box::pin(async move {
             match name.as_str() {
+                "list_pods" => exec_list_pods(state.clone()).await,
                 "message_child" => exec_message_child(client, input).await,
                 "create_pod" => exec_create_pod(state, input).await,
                 "terminate_pod" => exec_terminate_pod(state, input).await,
@@ -641,6 +654,11 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
             }
         })
     }))
+}
+
+async fn exec_list_pods(state: Arc<AppState>) -> String {
+    let containers = state.containers.lock().unwrap().clone();
+    serde_json::to_string_pretty(&containers).unwrap_or_else(|e| format!("error: {e}"))
 }
 
 async fn exec_message_child(client: reqwest::Client, input: serde_json::Value) -> String {
