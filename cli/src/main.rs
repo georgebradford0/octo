@@ -73,6 +73,9 @@ enum Command {
         /// Reload all containers (lair + all managed children)
         #[arg(long, conflicts_with = "containers")]
         all: bool,
+        /// Path to a config.json to sync into lair-secrets (defaults to ~/.octo/config.json)
+        #[arg(long, value_name = "FILE")]
+        config: Option<std::path::PathBuf>,
     },
 
     /// Show logs for a container (all containers if no name given)
@@ -459,15 +462,24 @@ async fn main() -> Result<()> {
             PodsAction::Stop  { name } => containers::stop(&name).await?,
             PodsAction::Delete { name, yes } => containers::delete(&name, yes).await?,
         },
-        Command::Reload { containers, all } => {
+        Command::Reload { containers, all, config } => {
             use octo_k8s_ops::k8s;
             let client = k8s::build_client().await?;
 
-            // Sync ~/.octo/config.json into lair-secrets before restarting so
-            // pods pick up the latest model/endpoint/api-key on the new image.
+            // Sync config into lair-secrets before restarting so pods pick up
+            // the latest model/endpoint/api-key on the new image.
+            // If --config is given, load from that file; otherwise use ~/.octo/config.json.
+            let local = match config {
+                Some(path) => {
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
+                    serde_json::from_str::<octo_k8s_ops::Config>(&text)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON in config file {}: {e}", path.display()))?
+                }
+                None => octo_k8s_ops::read_config(),
+            };
             match k8s::read_lair_secrets(&client).await {
                 Ok(current) => {
-                    let local = octo_k8s_ops::read_config();
                     let api_key  = local.api_key .unwrap_or(current.api_key);
                     let model    = local.model   .or(current.model);
                     let base_url = local.base_url.or(current.base_url);
