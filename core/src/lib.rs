@@ -34,7 +34,7 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 // ── Data directory ────────────────────────────────────────────────────────────
 
@@ -209,7 +209,6 @@ pub enum ChatEvent {
     Error              { message: String },
     Interrupted        { cost_usd: f64 },
     InterruptAck,
-    Question           { question: String, #[serde(skip)] answer_tx: Option<oneshot::Sender<String>> },
     System             { text: String },
     /// Server → client push of the current child-container list. Lair sends this
     /// on every poller state change. Replaces the deprecated GET /containers.
@@ -366,9 +365,6 @@ pub fn tool_definitions() -> Vec<AnthropicTool> {
         AnthropicTool { name: "grep".into(),
             description: "Search file contents for a regex pattern. Returns matching lines with file:line numbers. Use context to include surrounding lines. Pass the returned line numbers to read_file offset+limit to read more of that section.".into(),
             input_schema: serde_json::json!({ "type": "object", "properties": { "pattern": { "type": "string" }, "path": { "type": "string" }, "context": { "type": "integer", "description": "number of lines to show before and after each match (like grep -C)" } }, "required": ["pattern"] }) },
-        AnthropicTool { name: "ask_user".into(),
-            description: "Pause and ask the user a clarifying question. Returns the user's answer.".into(),
-            input_schema: serde_json::json!({ "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] }) },
         AnthropicTool { name: "web_fetch".into(),
             description: "Fetch a URL and return its text content (HTML stripped). Truncated at 50 000 chars.".into(),
             input_schema: serde_json::json!({ "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }) },
@@ -574,19 +570,6 @@ async fn execute_tool_inner(
             {
                 Ok(o)  => String::from_utf8_lossy(&o.stdout).to_string(),
                 Err(e) => format!("error: {e}"),
-            }
-        }
-        "ask_user" => {
-            let question = input["question"].as_str().unwrap_or("").to_string();
-            if question.is_empty() { return "error: question is required".to_string(); }
-            let (otx, orx) = oneshot::channel::<String>();
-            tx.send(ChatEvent::Question { question, answer_tx: Some(otx) }).await.ok();
-            tokio::select! {
-                res = orx => match res {
-                    Ok(answer) => answer,
-                    Err(_)     => "error: question was cancelled".to_string(),
-                },
-                _ = cancel.cancelled() => "error: interrupted".to_string(),
             }
         }
         "web_fetch" => {

@@ -544,7 +544,6 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 - `glob(pattern)` — file-path search. Anchor from a known root; never start a path argument with `**`.
 - `edit_file(path, old_str, new_str)` — exact string replace; `old_str` must match exactly once. Prefer over `write_file` on existing files.
 - `write_file(path, content)` — new files only.
-- `ask_user(question)` — only when there's real ambiguity; don't ask in place of a sensible default.
 
 # When to delegate vs act
 - Anything inside a specific child's repo → delegate with `message_child`. Don't try to kubectl-exec or mirror the repo locally.
