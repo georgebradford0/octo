@@ -211,6 +211,21 @@ pub enum ChatEvent {
     InterruptAck,
     Question           { question: String, #[serde(skip)] answer_tx: Option<oneshot::Sender<String>> },
     System             { text: String },
+    /// Server → client push of the current child-container list. Lair sends this
+    /// on every poller state change. Replaces the deprecated GET /containers.
+    Containers         { containers: serde_json::Value },
+    /// Server → client liveness probe. Client must reply with a Pong within the
+    /// keepalive window or the server will drop the connection.
+    Ping               { id: u64 },
+    /// Client → server reply to a Ping. `id` echoes the Ping's id.
+    Pong               { id: u64 },
+    /// Client → server start-of-turn message. Carries the user's prompt.
+    UserMessage        { text: String },
+    /// Client → server interrupt of the current turn.
+    Interrupt,
+    /// Client → server request to scale a child Deployment to 1 replica.
+    /// Replaces the deprecated POST /containers/start.
+    StartContainer     { id: String },
 }
 
 // ── Branch ────────────────────────────────────────────────────────────────────

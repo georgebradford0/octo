@@ -44,7 +44,21 @@ private enum NoiseError: Error {
     case identityMismatch
     case badFrame(String)
     case ioError
+    case timedOut(String)
 }
+
+/// Soft cap for an individual encrypted frame. Mirrors core::noise::MAX_FRAME_SIZE
+/// in the Rust server. Frames larger than this are rejected as invalid.
+private let MAX_FRAME_SIZE: Int = 16 * 1024
+
+/// Maximum time to wait for the body of a frame after its 2-byte length prefix
+/// has already arrived. A peer that announces a length and stalls is buggy or
+/// hostile; bounding this prevents reader threads from leaking on half-open TCPs.
+private let FRAME_BODY_TIMEOUT_SECS: Int32 = 30
+
+/// Maximum time to spend on the entire 3-message Noise XX handshake. Mirrors the
+/// Rust HANDSHAKE_TIMEOUT.
+private let HANDSHAKE_TIMEOUT_SECS: TimeInterval = 10
 
 private func chachaEncrypt(key: Data, nonce n: UInt64, aad: Data, plain: Data) throws -> Data {
     let sym    = SymmetricKey(data: key)
@@ -160,16 +174,55 @@ private func fdReadFully(_ fd: Int32, _ count: Int) throws -> Data {
     return buf
 }
 
+/// Read exactly `count` bytes from `fd`, but fail if any single recv has to wait
+/// longer than `timeoutSecs` for data. Used for frame bodies — once the length
+/// prefix has arrived, the remaining bytes must follow promptly.
+private func fdReadFullyWithTimeout(_ fd: Int32, _ count: Int, _ timeoutSecs: Int32) throws -> Data {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSecs))
+    var buf = Data(count: count)
+    var off = 0
+    while off < count {
+        let remainingMs = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
+        if remainingMs == 0 {
+            throw NoiseError.timedOut("frame body read exceeded \(timeoutSecs)s with \(count - off)/\(count) bytes remaining")
+        }
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let pr = poll(&pfd, 1, remainingMs)
+        if pr == 0 {
+            throw NoiseError.timedOut("frame body read exceeded \(timeoutSecs)s with \(count - off)/\(count) bytes remaining")
+        }
+        if pr < 0 {
+            if errno == EINTR { continue }
+            throw NoiseError.ioError
+        }
+        let n = buf.withUnsafeMutableBytes { ptr in
+            Darwin.recv(fd, ptr.baseAddress!.advanced(by: off), count - off, 0)
+        }
+        if n <= 0 { throw NoiseError.ioError }
+        off += n
+    }
+    return buf
+}
+
 /// Write a 2-byte-length-framed message.
 private func fdWriteFrame(_ fd: Int32, _ data: Data) throws {
+    if data.count > MAX_FRAME_SIZE {
+        throw NoiseError.badFrame("frame size \(data.count) exceeds MAX_FRAME_SIZE (\(MAX_FRAME_SIZE))")
+    }
     try fdWriteAll(fd, Data([UInt8(data.count >> 8), UInt8(data.count & 0xff)]) + data)
 }
 
-/// Read a 2-byte-length-framed message.
+/// Read a 2-byte-length-framed message. The 2-byte length prefix may legitimately
+/// wait idle on a quiet channel (no application data flowing), so we don't bound
+/// it here — that's the job of app-level keepalive (Ping/Pong). Once the prefix
+/// arrives we DO bound the body read, since a stalled body is unambiguously bad.
 private func fdReadFrame(_ fd: Int32) throws -> Data {
     let lenBuf = try fdReadFully(fd, 2)
     let len    = Int(lenBuf[0]) << 8 | Int(lenBuf[1])
-    return try fdReadFully(fd, len)
+    if len > MAX_FRAME_SIZE {
+        throw NoiseError.badFrame("frame length \(len) exceeds MAX_FRAME_SIZE (\(MAX_FRAME_SIZE))")
+    }
+    return try fdReadFullyWithTimeout(fd, len, FRAME_BODY_TIMEOUT_SECS)
 }
 
 // MARK: - Handshake runner
@@ -499,19 +552,40 @@ final class NoiseConnection: NSObject {
 
         print("[noise-proxy] TCP connected to \(host):\(port); starting handshake…")
 
+        // Bound the handshake with SO_RCVTIMEO. Cleared immediately after — steady-state
+        // proxy reads must be allowed to wait idle on the length prefix (app-level
+        // Ping/Pong is what detects half-open connections, not socket-level timeouts).
+        var hsTv = timeval(tv_sec: __darwin_time_t(HANDSHAKE_TIMEOUT_SECS), tv_usec: 0)
+        _ = setsockopt(remoteFd, SOL_SOCKET, SO_RCVTIMEO,
+                       &hsTv, socklen_t(MemoryLayout<timeval>.size))
+        defer {
+            var clearTv = timeval(tv_sec: 0, tv_usec: 0)
+            _ = setsockopt(remoteFd, SOL_SOCKET, SO_RCVTIMEO,
+                           &clearTv, socklen_t(MemoryLayout<timeval>.size))
+        }
+
         do {
             let noise = try runHandshake(remoteFd: remoteFd, serverPub: serverPub)
             print("[noise-proxy] handshake complete; proxying data")
+            // Clear the handshake recv timeout now that handshake is done — long-idle
+            // reads on the length prefix are legitimate during steady-state proxy.
+            var clearTv = timeval(tv_sec: 0, tv_usec: 0)
+            _ = setsockopt(remoteFd, SOL_SOCKET, SO_RCVTIMEO,
+                           &clearTv, socklen_t(MemoryLayout<timeval>.size))
             let g = DispatchGroup()
+
+            // Plaintext buffer sized so post-encryption frame (with 16-byte ChaChaPoly
+            // tag) fits within MAX_FRAME_SIZE on the wire.
+            let plainBufSize = MAX_FRAME_SIZE - 64
 
             // local → encrypt → remote
             g.enter()
             DispatchQueue.global(qos: .utility).async {
                 defer { g.leave(); closeBoth() }
-                var buf = Data(count: 65000)
+                var buf = Data(count: plainBufSize)
                 while true {
                     let n = buf.withUnsafeMutableBytes {
-                        Darwin.recv(localFd, $0.baseAddress!, 65000, 0)
+                        Darwin.recv(localFd, $0.baseAddress!, plainBufSize, 0)
                     }
                     guard n > 0,
                           let enc = try? noise.encrypt(buf.prefix(n)),

@@ -1,7 +1,33 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
+
+/// Soft cap for an individual encrypted frame. The wire format uses a u16 length
+/// prefix (max 65535), but in practice our payloads are well under this — capping
+/// here lets us reject obvious garbage / oversized frames early instead of allocating
+/// up to 64KB per frame for an attacker's choice.
+pub const MAX_FRAME_SIZE: usize = 16 * 1024;
+
+/// Maximum time to wait for a single frame's bytes to arrive once we've started
+/// reading. Half-open TCP connections (NAT drops, dead peers) otherwise leak the
+/// reader task forever. 30s is generous for any legitimate frame.
+pub const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for the whole 3-message Noise XX handshake to complete.
+/// A legitimate handshake is sub-second on a healthy network; if we're 10s in
+/// without finishing, the peer is misbehaving or gone.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum number of concurrent Noise sessions accepted from a single source IP.
+/// Each session costs a tokio task plus a snow transport state, so an unbounded
+/// peer could exhaust resources. This is high enough to allow legitimate use
+/// (mobile opens one Noise session per local TCP fd, plus separate /stream WS).
+pub const MAX_CONNECTIONS_PER_IP: usize = 32;
 
 /// Returned when a connection closes before sending any handshake bytes.
 /// This is normal for TCP probes and reconnect races; not a real error.
@@ -76,10 +102,17 @@ pub fn load_or_generate_keypair(path: &str) -> (Vec<u8>, Vec<u8>) {
 
 pub async fn read_noise_frame(stream: &mut tokio::net::TcpStream) -> anyhow::Result<Vec<u8>> {
     let mut len_buf = [0u8; 2];
-    stream.read_exact(&mut len_buf).await?;
+    timeout(FRAME_READ_TIMEOUT, stream.read_exact(&mut len_buf))
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out reading frame length"))??;
     let len = u16::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_SIZE {
+        anyhow::bail!("frame length {len} exceeds MAX_FRAME_SIZE ({MAX_FRAME_SIZE})");
+    }
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
+    timeout(FRAME_READ_TIMEOUT, stream.read_exact(&mut buf))
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out reading {len}-byte frame body"))??;
     Ok(buf)
 }
 
@@ -90,15 +123,24 @@ pub async fn write_noise_frame(stream: &mut tokio::net::TcpStream, data: &[u8]) 
     Ok(())
 }
 
-pub async fn noise_handshake(
+/// Result of a successful Noise XX handshake on the responder side.
+/// `remote_static` is the client's 32-byte Curve25519 public key, captured from
+/// the handshake state before transitioning to transport mode. Used for
+/// per-client identity binding (logging, future allowlist enforcement).
+pub struct HandshakeResult {
+    pub transport:     snow::TransportState,
+    pub remote_static: Option<Vec<u8>>,
+}
+
+async fn noise_handshake_inner(
     stream: &mut tokio::net::TcpStream,
     static_private: &[u8],
-) -> anyhow::Result<snow::TransportState> {
+) -> anyhow::Result<HandshakeResult> {
     let peer = stream.peer_addr().ok();
     debug!("[noise] starting XX handshake peer={peer:?}");
     let builder = snow::Builder::new(NOISE_PATTERN.parse()?);
     let mut hs = builder.local_private_key(static_private).build_responder()?;
-    let mut payload = vec![0u8; 65535];
+    let mut payload = vec![0u8; MAX_FRAME_SIZE];
     // Use read() for the first 2-byte length prefix so we can distinguish a
     // clean close (0 bytes → probe) from an EOF mid-handshake (real error).
     let mut len_buf = [0u8; 2];
@@ -111,18 +153,39 @@ pub async fn noise_handshake(
         stream.read_exact(&mut len_buf[1..]).await?;
     }
     let msg1_len = u16::from_be_bytes(len_buf) as usize;
+    if msg1_len > MAX_FRAME_SIZE {
+        anyhow::bail!("handshake msg1 length {msg1_len} exceeds MAX_FRAME_SIZE");
+    }
     debug!("[noise] msg1 len={msg1_len} peer={peer:?}");
     let mut msg1 = vec![0u8; msg1_len];
     stream.read_exact(&mut msg1).await?;
     hs.read_message(&msg1, &mut payload)?;
-    let mut msg2 = vec![0u8; 65535];
+    let mut msg2 = vec![0u8; MAX_FRAME_SIZE];
     let n = hs.write_message(&[], &mut msg2)?;
     write_noise_frame(stream, &msg2[..n]).await?;
     debug!("[noise] msg2 sent ({n} bytes) peer={peer:?}");
     let msg3 = read_noise_frame(stream).await?;
     hs.read_message(&msg3, &mut payload)?;
-    info!("[noise] handshake complete peer={peer:?}");
-    Ok(hs.into_transport_mode()?)
+    let remote_static = hs.get_remote_static().map(|s| s.to_vec());
+    if let Some(ref rs) = remote_static {
+        info!("[noise] handshake complete peer={peer:?} client_pub={}", to_base32(rs));
+    } else {
+        info!("[noise] handshake complete peer={peer:?} client_pub=<absent>");
+    }
+    Ok(HandshakeResult {
+        transport: hs.into_transport_mode()?,
+        remote_static,
+    })
+}
+
+pub async fn noise_handshake(
+    stream: &mut tokio::net::TcpStream,
+    static_private: &[u8],
+) -> anyhow::Result<HandshakeResult> {
+    match timeout(HANDSHAKE_TIMEOUT, noise_handshake_inner(stream, static_private)).await {
+        Ok(res) => res,
+        Err(_)  => anyhow::bail!("noise handshake timed out after {HANDSHAKE_TIMEOUT:?}"),
+    }
 }
 
 pub async fn handle_noise_connection(
@@ -131,7 +194,8 @@ pub async fn handle_noise_connection(
     http_port: u16,
 ) -> anyhow::Result<()> {
     let peer = stream.peer_addr().ok();
-    let transport = noise_handshake(&mut stream, &static_private).await?;
+    let HandshakeResult { transport, remote_static: _ } =
+        noise_handshake(&mut stream, &static_private).await?;
     let transport = Arc::new(Mutex::new(transport));
     debug!("[noise] connecting to local HTTP port {http_port} for peer={peer:?}");
     let local = tokio::net::TcpStream::connect(format!("127.0.0.1:{http_port}")).await?;
@@ -139,9 +203,12 @@ pub async fn handle_noise_connection(
     let (mut local_read, mut local_write) = local.into_split();
     let transport_enc = transport.clone();
     let transport_dec = transport.clone();
+    // Plaintext buffer is sized so a full plaintext read encrypts to ≤ MAX_FRAME_SIZE
+    // (ChaChaPoly adds a 16-byte auth tag).
+    const PLAIN_BUF_SIZE: usize = MAX_FRAME_SIZE - 64;
     let task_a = tokio::spawn(async move {
-        let mut plain = vec![0u8; 65000];
-        let mut enc   = vec![0u8; 65535];
+        let mut plain = vec![0u8; PLAIN_BUF_SIZE];
+        let mut enc   = vec![0u8; MAX_FRAME_SIZE];
         loop {
             let n = local_read.read(&mut plain).await.unwrap_or(0);
             if n == 0 { break; }
@@ -156,13 +223,26 @@ pub async fn handle_noise_connection(
     });
     let task_b = tokio::spawn(async move {
         let mut len_buf = [0u8; 2];
-        let mut enc = vec![0u8; 65535];
-        let mut dec = vec![0u8; 65535];
+        let mut enc = vec![0u8; MAX_FRAME_SIZE];
+        let mut dec = vec![0u8; MAX_FRAME_SIZE];
         loop {
+            // Length prefix can legitimately wait idle on a quiet channel — no timeout here.
             if raw_read.read_exact(&mut len_buf).await.is_err() { break; }
             let len = u16::from_be_bytes(len_buf) as usize;
-            if len > enc.len() { break; }
-            if raw_read.read_exact(&mut enc[..len]).await.is_err() { break; }
+            if len > MAX_FRAME_SIZE {
+                warn!("[noise] dropping connection: frame length {len} exceeds MAX_FRAME_SIZE");
+                break;
+            }
+            // Once the length prefix arrives, the body must follow promptly.
+            // A peer that announces a length and stalls is buggy or hostile.
+            match timeout(FRAME_READ_TIMEOUT, raw_read.read_exact(&mut enc[..len])).await {
+                Ok(Ok(_))  => {}
+                Ok(Err(_)) => break,
+                Err(_)     => {
+                    warn!("[noise] dropping connection: timed out reading {len}-byte frame body");
+                    break;
+                }
+            }
             let dec_n = match transport_dec.lock().unwrap().read_message(&enc[..len], &mut dec) {
                 Ok(n)  => n,
                 Err(_) => break,
@@ -182,11 +262,49 @@ pub async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port
         .await.expect("failed to bind Noise port");
     info!("[noise] listening on 0.0.0.0:{noise_port} → 127.0.0.1:{http_port}");
     let static_private = Arc::new(static_private);
+    let per_ip_count: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let Ok((stream, peer)) = listener.accept().await else { continue };
+
+        // Reserve a slot for this peer IP, refusing if already at the limit. The
+        // slot is released by the RAII-style guard below when the task exits.
+        let peer_ip = peer.ip();
+        let admit = {
+            let mut counts = per_ip_count.lock().unwrap();
+            let count = counts.entry(peer_ip).or_insert(0);
+            if *count >= MAX_CONNECTIONS_PER_IP {
+                false
+            } else {
+                *count += 1;
+                true
+            }
+        };
+        if !admit {
+            warn!("[noise] rejecting connection from {peer}: per-IP limit ({MAX_CONNECTIONS_PER_IP}) reached");
+            drop(stream);
+            continue;
+        }
+
         info!("[noise] connection from {peer}");
         let priv_clone = static_private.clone();
+        let counts_clone = per_ip_count.clone();
         tokio::spawn(async move {
+            // Decrement the per-IP counter when this task ends, regardless of outcome.
+            struct ConnGuard {
+                counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+                ip:     IpAddr,
+            }
+            impl Drop for ConnGuard {
+                fn drop(&mut self) {
+                    let mut c = self.counts.lock().unwrap();
+                    if let Some(n) = c.get_mut(&self.ip) {
+                        *n = n.saturating_sub(1);
+                        if *n == 0 { c.remove(&self.ip); }
+                    }
+                }
+            }
+            let _guard = ConnGuard { counts: counts_clone, ip: peer_ip };
+
             if let Err(e) = handle_noise_connection(stream, priv_clone, http_port).await {
                 if e.is::<ProbeClosed>() {
                     debug!("[noise] probe closed (no handshake) from {peer}");
