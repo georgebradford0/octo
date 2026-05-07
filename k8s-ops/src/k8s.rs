@@ -225,6 +225,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     let workspace_pvc = format!("{}-workspace", p.name);
 
     let pod_spec = json!({
+        "serviceAccountName": LAIR_NAME,
         "imagePullSecrets": [{"name": GHCR_PULL_SECRET}],
         "containers": [{
             "name": "octo",
