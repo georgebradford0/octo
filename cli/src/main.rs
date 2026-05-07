@@ -496,16 +496,14 @@ async fn main() -> Result<()> {
             if updated.is_empty() {
                 println!("Nothing restarted.");
             } else {
-                println!(
-                    "Restarting {} with image {} ...",
-                    updated.join(", "),
-                    k8s::IMAGE,
-                );
+                println!("Restarting {} ...", updated.join(", "));
                 for name in &updated {
-                    print!("  Waiting for {name} to be ready...");
+                    let old_ver = k8s::get_deployment_version(&client, name).await
+                        .unwrap_or_else(|| "unknown".to_string());
+                    print!("  {name}: {old_ver} → {} ... ", k8s::IMAGE_VERSION);
                     std::io::Write::flush(&mut std::io::stdout())?;
                     k8s::wait_for_deployment_ready(&client, name, 120).await?;
-                    println!(" ready.");
+                    println!("ready.");
                 }
             }
         }

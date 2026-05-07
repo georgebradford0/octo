@@ -20,7 +20,9 @@ pub const LAIR_NOISE_PORT: u16  = 30900;
 
 const NODEPORT_MIN:  u16  = 30100;
 const NODEPORT_MAX:  u16  = 30199;
-pub const IMAGE:     &str = "ghcr.io/georgebradford0/lair:latest";
+pub const IMAGE:         &str = "ghcr.io/georgebradford0/lair:latest";
+pub const IMAGE_VERSION: &str = "0.2.31";
+const VERSION_ANNOTATION: &str = "octo.image-version";
 const ENTRYPOINT:    &str = "/usr/local/bin/docker-entrypoint-server.sh";
 const LAIR_NAME:   &str = "lair";
 
@@ -31,6 +33,14 @@ pub struct ChildInfo {
     pub git_url:    String,
     pub status:     String,
     pub noise_port: u16,
+}
+
+/// Read the `octo.image-version` annotation from a deployment, if present.
+pub async fn get_deployment_version(client: &Client, name: &str) -> Option<String> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
+    deployments.get(name).await.ok()
+        .and_then(|d| d.metadata.annotations)
+        .and_then(|a| a.get(VERSION_ANNOTATION).cloned())
 }
 
 pub async fn build_client() -> anyhow::Result<Client> {
@@ -318,6 +328,7 @@ pub async fn restart_deployments(client: &Client, names: &[&str]) -> anyhow::Res
         format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
     };
     let patch = json!({
+        "metadata": { "annotations": { VERSION_ANNOTATION: IMAGE_VERSION } },
         "spec": { "template": { "metadata": { "annotations": {
             "kubectl.kubernetes.io/restartedAt": now
         }}}}
@@ -392,6 +403,7 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
     let mut updated = Vec::new();
     for (name, container_name) in &targets {
         let patch = json!({
+            "metadata": { "annotations": { VERSION_ANNOTATION: IMAGE_VERSION } },
             "spec": { "template": {
                 "metadata": { "annotations": { "kubectl.kubernetes.io/restartedAt": now } },
                 "spec": { "containers": [{ "name": container_name, "image": IMAGE }] }
