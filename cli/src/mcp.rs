@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 
 const MCP_PATH: &str = "/data/mcp.json";
 
+/// Expand a `${VAR}` reference from the host environment.
+/// If the variable is not set, warn and return the original string unexpanded.
+fn expand_host_var(v: &str) -> String {
+    if v.starts_with("${") && v.ends_with('}') {
+        let var = &v[2..v.len() - 1];
+        match std::env::var(var) {
+            Ok(val) => val,
+            Err(_) => {
+                eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded");
+                v.to_string()
+            }
+        }
+    } else {
+        v.to_string()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct McpServerConfig {
     name:    String,
@@ -80,7 +97,7 @@ pub async fn add(
     for pair in env_pairs {
         let (k, v) = pair.split_once('=')
             .with_context(|| format!("invalid env pair '{pair}': expected KEY=VALUE"))?;
-        env.insert(k.to_string(), v.to_string());
+        env.insert(k.to_string(), expand_host_var(v));
     }
 
     configs.push(McpServerConfig {
@@ -177,34 +194,16 @@ pub async fn import_from_file(pod: &str, path: &std::path::Path) -> Result<()> {
     }
 
     println!("Importing {} MCP server(s) into '{pod}'...", entries.len());
-    let mut failed = 0usize;
-    for entry in &entries {
-        let env_pairs: Vec<String> = entry.env.iter()
-            .map(|(k, v)| {
-                let resolved = if v.starts_with("${") && v.ends_with('}') {
-                    let var = &v[2..v.len() - 1];
-                    match std::env::var(var) {
-                        Ok(val) => val,
-                        Err(_) => {
-                            eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded");
-                            v.clone()
-                        }
-                    }
-                } else {
-                    v.clone()
-                };
-                format!("{k}={resolved}")
-            })
-            .collect();
-        if let Err(e) = add(pod, &entry.name, &entry.command, &entry.args, &env_pairs).await {
-            eprintln!("✗ '{}': {e}", entry.name);
-            failed += 1;
-        }
-    }
-
-    if failed > 0 {
-        anyhow::bail!("{failed} of {} server(s) failed to import", entries.len());
-    }
+    // Expand ${VAR} references from the host environment before writing to the pod,
+    // then write entries directly to preserve all fields (url, headers, etc.).
+    let resolved: Vec<McpServerConfig> = entries.into_iter().map(|mut e| {
+        e.env = e.env.into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
+        e.headers = e.headers.into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
+        e
+    }).collect();
+    existing.extend(resolved);
+    write_config(&pod_name, &existing).await?;
+    println!("✓ imported successfully.");
     Ok(())
 }
 
