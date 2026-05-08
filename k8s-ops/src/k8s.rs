@@ -39,6 +39,7 @@ pub fn effective_image() -> String {
 }
 const ENTRYPOINT:    &str = "/usr/local/bin/docker-entrypoint-server.sh";
 const LAIR_NAME:   &str = "lair";
+const CHILD_NAME:  &str = "child";
 
 // ── Existing child-management types and functions ─────────────────────────────
 
@@ -204,7 +205,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     }
 
     // Pod-specific vars only — shared config (API keys, model, tokens) comes
-    // from lair-secrets via envFrom so it never needs to be threaded through here.
+    // from child-secrets via envFrom so it never needs to be threaded through here.
     let mut env = vec![
         json!({"name": "NOISE_PORT",        "value": "9000"}),
         json!({"name": "PUBLIC_PORT",       "value": p.noise_port.to_string()}),
@@ -236,7 +237,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
     let workspace_pvc = format!("{}-workspace", p.name);
 
     let pod_spec = json!({
-        "serviceAccountName": LAIR_NAME,
+        "serviceAccountName": CHILD_NAME,
         "imagePullSecrets": [{"name": GHCR_PULL_SECRET}],
         "containers": [{
             "name": "octo",
@@ -244,7 +245,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
             "imagePullPolicy": pull_policy,
             "command": [ENTRYPOINT],
             "env": env,
-            "envFrom": [{"secretRef": {"name": "lair-secrets"}}],
+            "envFrom": [{"secretRef": {"name": "child-secrets"}}],
             "ports": [
                 {"containerPort": 8000, "name": "http"},
                 {"containerPort": 9000, "name": "noise"}
@@ -415,23 +416,37 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
         format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
     };
 
-    // Collect: all managed children + lair.
-    let mut targets: Vec<(String, &str)> = deployments
+    // Collect: all managed children, then lair. (false = lair, true = child)
+    let mut targets: Vec<(String, &str, bool)> = deployments
         .list(&ListParams::default().labels("octo.managed=1"))
         .await
         .context("list managed deployments")?
         .iter()
         .filter_map(|d| d.metadata.name.clone())
-        .map(|n| (n, "octo"))
+        .map(|n| (n, "octo", true))
         .collect();
-    targets.push((LAIR_NAME.to_string(), LAIR_NAME));
+    targets.push((LAIR_NAME.to_string(), LAIR_NAME, false));
 
     let mut updated = Vec::new();
-    for (name, container_name) in &targets {
+    for (name, container_name, is_child) in &targets {
+        // Children additionally get migrated to the dedicated `child` SA and
+        // `child-secrets` envFrom on every reload, so existing pre-Phase-1
+        // deployments transition without a destroy/recreate. Lair keeps its
+        // original SA/secret.
+        let mut spec = json!({
+            "containers": [{
+                "name": container_name,
+                "image": effective_image(),
+            }]
+        });
+        if *is_child {
+            spec["serviceAccountName"] = json!(CHILD_NAME);
+            spec["containers"][0]["envFrom"] = json!([{"secretRef": {"name": "child-secrets"}}]);
+        }
         let patch = json!({
             "spec": { "template": {
                 "metadata": { "annotations": { "kubectl.kubernetes.io/restartedAt": now } },
-                "spec": { "containers": [{ "name": container_name, "image": effective_image() }] }
+                "spec": spec
             }}
         });
         match deployments.patch(name, &PatchParams::default(), &Patch::Strategic(patch)).await {
@@ -579,6 +594,88 @@ pub async fn upsert_secret(
     }))?;
     secrets.patch("lair-secrets", &PatchParams::apply("octo").force(), &Patch::Apply(secret))
         .await.context("upsert secret")?;
+    Ok(())
+}
+
+/// Create or update the `child-secrets` Secret. Subset of lair-secrets — children
+/// get only what they need to run their own loop and use `gh` on the command line.
+/// Notably excludes NOISE_PRIVATE_KEY (each child has its own per-pod keypair) and
+/// MCP_CONFIG_JSON (lair's MCP servers are not inherited; children configure MCP
+/// at runtime).
+pub async fn upsert_child_secret(
+    client:         &Client,
+    api_key:        &str,
+    gh_token:       Option<&str>,
+    model:          Option<&str>,
+    base_url:       Option<&str>,
+    openai_api_key: Option<&str>,
+) -> anyhow::Result<()> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
+    let mut string_data = serde_json::json!({
+        "ANTHROPIC_API_KEY": api_key,
+    });
+    if let Some(gh) = gh_token { string_data["GH_TOKEN"]       = json!(gh); }
+    if let Some(m)  = model    { string_data["MODEL"]          = json!(m);  }
+    if let Some(u)  = base_url { string_data["OPENAI_BASE_URL"] = json!(u); }
+    if let Some(k)  = openai_api_key { string_data["OPENAI_API_KEY"] = json!(k); }
+    let secret: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind":       "Secret",
+        "metadata":   {"name": "child-secrets", "namespace": NAMESPACE},
+        "stringData": string_data
+    }))?;
+    secrets.patch("child-secrets", &PatchParams::apply("octo").force(), &Patch::Apply(secret))
+        .await.context("upsert child-secrets")?;
+    Ok(())
+}
+
+/// Subset of lair-secrets that children receive via `child-secrets`.
+pub struct ChildSecrets {
+    pub api_key:        String,
+    pub gh_token:       Option<String>,
+    pub model:          Option<String>,
+    pub base_url:       Option<String>,
+    pub openai_api_key: Option<String>,
+}
+
+/// Read all current values from the `child-secrets` Secret.
+pub async fn read_child_secrets(client: &Client) -> anyhow::Result<ChildSecrets> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
+    let secret = secrets.get("child-secrets").await.context("get child-secrets")?;
+    let data = secret.data.unwrap_or_default();
+
+    let read = |key: &str| -> anyhow::Result<String> {
+        let bytes = data.get(key)
+            .ok_or_else(|| anyhow::anyhow!("child-secrets missing key '{key}'"))?
+            .clone().0;
+        String::from_utf8(bytes).context("secret value is not UTF-8")
+    };
+    let read_opt = |key: &str| -> Option<String> {
+        data.get(key).and_then(|b| String::from_utf8(b.clone().0).ok())
+            .filter(|s| !s.is_empty())
+    };
+
+    Ok(ChildSecrets {
+        api_key:        read("ANTHROPIC_API_KEY")?,
+        gh_token:       read_opt("GH_TOKEN"),
+        model:          read_opt("MODEL"),
+        base_url:       read_opt("OPENAI_BASE_URL"),
+        openai_api_key: read_opt("OPENAI_API_KEY"),
+    })
+}
+
+/// Ensure a dedicated `child` ServiceAccount exists. Granted no Role/ClusterRole —
+/// children should not need any k8s API access. Version stamping is done by lair
+/// on the child's behalf via the `/child-version` endpoint.
+pub async fn ensure_child_rbac(client: &Client) -> anyhow::Result<()> {
+    let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), NAMESPACE);
+    let sa: ServiceAccount = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {"name": CHILD_NAME, "namespace": NAMESPACE}
+    }))?;
+    sa_api.patch(CHILD_NAME, &PatchParams::apply("octo").force(), &Patch::Apply(sa))
+        .await.context("ensure child ServiceAccount")?;
     Ok(())
 }
 

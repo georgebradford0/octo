@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 octo-core    = { path = "../core" }
-octo-k8s-ops = { path = "../k8s-ops" }
 axum           = { version = "0.7",  features = ["ws"] }
 tokio          = { version = "1",    features = ["full"] }
 tokio-util     = { version = "0.7",  features = ["rt"] }

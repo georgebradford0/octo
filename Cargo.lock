@@ -1778,7 +1778,6 @@ dependencies = [
  "git2",
  "hex",
  "octo-core",
- "octo-k8s-ops",
  "openssl",
  "reqwest",
  "serde",

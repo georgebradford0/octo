@@ -12,7 +12,7 @@ fn mask(s: &str) -> String {
     format!("{}...{}", &s[..4], &s[s.len()-4..])
 }
 
-/// Validate the effective config that will be written to lair-secrets.
+/// Validate the effective config that will be written to lair-secrets / child-secrets.
 /// Runs before any cluster mutation in both `init` and `reload`.
 fn validate_resolved_config(
     api_key:        &str,
@@ -558,7 +558,16 @@ async fn main() -> Result<()> {
                         base_url.as_deref(),
                         openai_api_key.as_deref(),
                     ).await?;
-                    println!("Config synced to lair-secrets.");
+                    k8s::ensure_child_rbac(&client).await?;
+                    k8s::upsert_child_secret(
+                        &client,
+                        &api_key,
+                        current.gh_token.as_deref(),
+                        model.as_deref(),
+                        base_url.as_deref(),
+                        openai_api_key.as_deref(),
+                    ).await?;
+                    println!("Config synced to lair-secrets and child-secrets.");
                 }
                 Err(e) => eprintln!("Warning: could not sync config ({e}); proceeding with reload."),
             }

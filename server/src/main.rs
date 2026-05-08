@@ -29,7 +29,6 @@ use octo_core::{
     ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
     KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
 };
-use octo_k8s_ops::k8s;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
@@ -744,19 +743,26 @@ async fn main() {
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
-    // Stamp our version onto the deployment annotation so `octo reload`
-    // can display the version transition for child pods.
-    if let Ok(deployment_name) = std::env::var("DEPLOYMENT_NAME") {
+    // Children no longer have k8s API access, so stamping the deployment's
+    // `octo.image-version` annotation is delegated to lair: we POST our name
+    // and compiled version to lair's `/child-version` endpoint and lair patches
+    // the annotation. Best-effort — log on failure but don't fail boot.
+    if let (Ok(deployment_name), Ok(lair_url_for_stamp)) = (
+        std::env::var("DEPLOYMENT_NAME"),
+        std::env::var("LAIR_URL"),
+    ) {
         tokio::spawn(async move {
-            match k8s::build_client().await {
-                Ok(client) => {
-                    if let Err(e) = k8s::stamp_deployment_version(&client, &deployment_name, env!("CARGO_PKG_VERSION")).await {
-                        warn!("[server] could not stamp version annotation: {e}");
-                    } else {
-                        info!("[server] stamped version {} on deployment/{deployment_name}", env!("CARGO_PKG_VERSION"));
-                    }
+            let url = format!("{}/child-version", lair_url_for_stamp.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "name":    deployment_name,
+                "version": env!("CARGO_PKG_VERSION"),
+            });
+            match reqwest::Client::new().post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("[server] reported version {} to lair (deployment/{deployment_name})", env!("CARGO_PKG_VERSION"));
                 }
-                Err(e) => warn!("[server] k8s client unavailable, skipping version stamp: {e}"),
+                Ok(resp) => warn!("[server] lair rejected version report: {}", resp.status()),
+                Err(e)   => warn!("[server] could not report version to lair: {e}"),
             }
         });
     }

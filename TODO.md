@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] Change to focus on child pods as agents and not specifically for coding, create naming conventions for pods that are coding specific, easy to create and breakdown, etc
 - [ ] Bug in chat that shows duplicate messages when returning from foreground
 - [ ] check if api keys used for starting up lair are visible in deployment data, move to secrets
 - [ ] Setup background tasks

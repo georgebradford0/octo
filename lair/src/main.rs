@@ -212,6 +212,31 @@ async fn info_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
     Json(serde_json::json!({ "pubkey": state.pubkey_b32 }))
 }
 
+#[derive(Deserialize)]
+struct ChildVersion { name: String, version: String }
+
+/// Children call this on startup to report their compiled version. Lair stamps
+/// the `octo.image-version` annotation on their Deployment so `octo reload`
+/// can show the version transition. Cluster-internal endpoint — children can
+/// only reach it via the in-cluster `lair:8000` Service. Only deployments
+/// labelled `octo.managed=1` are accepted.
+async fn child_version_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body):   Json<ChildVersion>,
+) -> StatusCode {
+    let known = state.containers_rx.borrow().iter().any(|c| c.name == body.name);
+    if !known {
+        warn!("[lair/child-version] unknown deployment '{}'", body.name);
+        return StatusCode::NOT_FOUND;
+    }
+    if let Err(e) = k8s::stamp_deployment_version(&state.kube_client, &body.name, &body.version).await {
+        error!("[lair/child-version] stamp failed: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    info!("[lair/child-version] stamped deployment/{} version={}", body.name, body.version);
+    StatusCode::OK
+}
+
 async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cost = *state.last_cost_usd.lock().unwrap();
     let msgs = messages_to_history(&state.messages.lock().unwrap(), cost);
@@ -1131,6 +1156,7 @@ async fn main() {
         .route("/stream",           get(stream_handler))
         .route("/interrupt",        post(interrupt_handler))
         .route("/clear",            post(clear_handler))
+        .route("/child-version",    post(child_version_handler))
         .with_state(state)
         .layer(cors);
 
