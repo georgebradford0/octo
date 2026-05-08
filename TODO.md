@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] Add long press on agents in sidebar to terminate
 - [ ] Setup push notifications on mobile to let user know when something is finished.
 - [ ] Change to focus on child pods as agents and not specifically for coding, create naming conventions for pods that are coding specific, easy to create and breakdown, etc
 - [ ] Bug in chat that shows duplicate messages when returning from foreground
