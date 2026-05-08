@@ -1650,7 +1650,6 @@ function AppInner() {
               <Text style={[s.connPillLabel, { color: statusColor(chatStatus) }]}>{chatStatus === 'ready' ? 'live' : chatStatus}</Text>
             </View>
           </View>
-          <Text style={s.headerBrand}>octo</Text>
           <View style={s.headerRight}>
             <TouchableOpacity
               style={s.clearBtn}
@@ -1839,7 +1838,6 @@ const s = StyleSheet.create({
   header:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   headerLeft:      { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
   headerRight:     { flex: 1, alignItems: 'flex-end' },
-  headerBrand:     { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 2, fontFamily: NUNITO, textAlign: 'center', flex: 1 },
   backBtn:         { paddingRight: 4, paddingVertical: 2 },
   backBtnText:     { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300', fontFamily: ARIMO },
   clearBtn:        { paddingVertical: 4, paddingHorizontal: 2 },

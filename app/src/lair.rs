@@ -293,6 +293,10 @@ fn spawn_turn(state: Arc<AppState>, text: String) {
             }
         }
         state.is_streaming.store(false, Ordering::Relaxed);
+        // Drop the per-turn buffer so a between-turns reconnect doesn't replay
+        // the just-finished turn on top of /history (would duplicate the last
+        // assistant message client-side).
+        state.stream_state.lock().unwrap().buffer.clear();
         info!("[lair/stream] turn complete, is_streaming=false");
     });
 }
@@ -302,13 +306,17 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // Atomically snapshot the per-turn buffer (events from any in-flight turn)
-    // and register as a subscriber so no events are lost in the gap.
+    // and register as a subscriber so no events are lost in the gap. The buffer
+    // is only forwarded if a turn is genuinely in flight — between turns the
+    // canonical state lives in /history, and replaying the just-finished
+    // turn's events would duplicate the last assistant message client-side.
     let (sub_tx, mut sub_rx) = mpsc::unbounded_channel::<String>();
     let (replay, resumed) = {
         let mut ss = state.stream_state.lock().unwrap();
-        let replay = ss.buffer.clone();
         ss.subs.push(sub_tx);
-        (replay, state.is_streaming.load(Ordering::Relaxed))
+        let resumed = state.is_streaming.load(Ordering::Relaxed);
+        let replay = if resumed { ss.buffer.clone() } else { Vec::new() };
+        (replay, resumed)
     };
 
     // Greet the client. `resumed` indicates whether they're joining an in-flight
