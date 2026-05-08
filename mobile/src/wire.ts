@@ -34,7 +34,6 @@ export type ClientFrame =
   | { type: 'pong';            id: number }
   | { type: 'start_container'; id: string }
   | { type: 'terminate_agent'; id: string }
-  | { type: 'register_push_token'; token: string; platform: 'ios' | 'android' }
   // Legacy: child server's "watch" mode and the original first-frame `{text}`
   // shape are still accepted server-side; remove these when the persistent
   // /stream rewrite lands.

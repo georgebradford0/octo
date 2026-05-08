@@ -8,7 +8,6 @@ use clap::{Parser, ValueEnum};
 mod bootstrap;
 mod lair;
 mod agent;
-mod push;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Role {

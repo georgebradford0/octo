@@ -2,13 +2,8 @@
 //!
 //! Both lair (parent) and agent (child) expose this tool so the model can fan
 //! off long-running work without blocking the current chat turn. The spawn
-//! function is generic over a "deliver" closure: lair fans out a `system`
-//! ChatEvent over its /stream and (optionally) fires a webhook for push;
-//! agents do the same against their own /stream.
-//!
-//! The webhook URL is read from `OCTO_PUSH_WEBHOOK_URL`. The body shape is
-//! intentionally generic — point it at ntfy/Pushover/Slack/Discord/Apns2-bridge
-//! and let the receiver handle delivery.
+//! function is generic over a "deliver" closure: each role fans the completion
+//! event out to its own /stream subscribers.
 
 use crate::{
     send_message, AnthropicTool, ApiMessage, ChatEvent, ContentBlock,
@@ -16,7 +11,7 @@ use crate::{
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Build the AnthropicTool spec for `run_background_task`.
 pub fn run_background_task_tool() -> AnthropicTool {
@@ -25,8 +20,7 @@ pub fn run_background_task_tool() -> AnthropicTool {
         description: "Spawn a long-running task in the background and return immediately. \
                       The task runs as an isolated agentic loop with the same tools you have, \
                       starting from `task_description` as its first user message. \
-                      When it finishes, the user is notified in-app via a system message and \
-                      (if configured) via a push webhook. \
+                      When it finishes, the user is notified in-app via a system message. \
                       Use this for work that would otherwise tie up the current turn for minutes \
                       — long builds, big test suites, repo-wide refactors, multi-step research. \
                       Do not use it for trivially short tasks; the user prefers a direct reply."
@@ -129,9 +123,6 @@ where
             }
         };
 
-        // Fire the webhook (best-effort) before delivering in-app so a slow webhook
-        // doesn't block the system event the user sees in their open chat.
-        push_webhook(&outcome).await;
         deliver(outcome);
     });
 }
@@ -149,35 +140,5 @@ pub fn completion_chat_event(outcome: &BackgroundTaskResult) -> ChatEvent {
             "{prefix} background task {} {}: {preview}{truncated}",
             outcome.task_id, outcome.status,
         ),
-    }
-}
-
-/// POST a generic JSON payload to `OCTO_PUSH_WEBHOOK_URL` if it's set. Failures
-/// are logged but never propagated — push delivery is best-effort.
-async fn push_webhook(outcome: &BackgroundTaskResult) {
-    let url = match std::env::var("OCTO_PUSH_WEBHOOK_URL") {
-        Ok(u) if !u.trim().is_empty() => u,
-        _ => return,
-    };
-    let title = format!("octo: background task {}", outcome.status);
-    let preview: String = outcome.summary.chars().take(280).collect();
-    let body = json!({
-        "task_id":    outcome.task_id,
-        "status":     outcome.status,
-        "title":      title,
-        "message":    preview,
-        "cost_usd":   outcome.cost_usd,
-        "task_description": outcome.task_description,
-    });
-    match crate::http_client_public().post(&url).json(&body).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                warn!("[background/{}] webhook returned HTTP {status}", outcome.task_id);
-            } else {
-                info!("[background/{}] webhook delivered ({status})", outcome.task_id);
-            }
-        }
-        Err(e) => warn!("[background/{}] webhook error: {e}", outcome.task_id),
     }
 }

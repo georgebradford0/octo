@@ -47,10 +47,6 @@ fn http_client() -> &'static reqwest::Client {
     })
 }
 
-/// Public accessor used by sibling modules (e.g. background.rs) that need a
-/// pooled HTTP client without having to maintain their own.
-pub(crate) fn http_client_public() -> &'static reqwest::Client { http_client() }
-
 use serde::{Deserialize, Serialize};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -1641,8 +1637,8 @@ fn background_task_note() -> &'static str {
      repo-wide refactors. The task runs as an isolated agentic loop with the same tools you \
      have, starting from `task_description` as its first user message; it does not inherit \
      conversation history, so make the description self-contained. The user is notified \
-     in-app and (if configured) via push when it completes. Do not use it for trivially short \
-     tasks — the user prefers a direct reply."
+     in-app via a system message when it completes. Do not use it for trivially short tasks \
+     — the user prefers a direct reply."
 }
 
 pub fn build_system_prompt(repo_path: &str) -> String {

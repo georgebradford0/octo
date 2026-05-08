@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] Look into a setup for push notifications that can easily use relay server for auth but cannot be spammed easily
 - [ ] Check endpoints used for both lair and agents such as /stream, /branches, etc and see why they are necessary
 - [ ] Check if api keys used for starting up lair are visible in deployment data and if so address this
 - [ ] Client-key allowlist + first-connection ack UI — `noise_handshake` already captures the client static key from snow's `get_remote_static()` and logs it, but it's never checked. Persist a `known_clients.json` on lair, gate new client pubkeys behind a first-connection ack flow in the mobile UI (approve / reject), and reject handshakes from unknown keys after the first run. Replaces today's QR-only TOFU model where anyone with the QR can connect indefinitely.

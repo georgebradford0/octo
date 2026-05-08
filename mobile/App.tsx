@@ -25,7 +25,6 @@ import Reanimated, { useAnimatedStyle } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
 import NoiseConnection from './src/NativeNoiseConnection'
-import NativePush from './src/NativePush'
 import {
   type ClientFrame,
   type ContainerInfo as WireContainerInfo,
@@ -1535,45 +1534,6 @@ function AppInner() {
     }
     setScanning(true)
   }, [])
-
-  // ── Push notifications ────────────────────────────────────────────────────
-  // We ask for permission once a server connection exists (in-context, after
-  // the user has just bonded with a server), then send the APNs device token
-  // to lair over /stream so it can deliver run_background_task completions.
-
-  const [pushToken, setPushToken] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (Platform.OS !== 'ios') return
-    if (!NativePush) return
-    if (!conn || pushToken) return
-    let cancelled = false
-    NativePush.requestPermissionAndRegister()
-      .then(token => {
-        if (cancelled) return
-        if (token) { log('[push] APNs token acquired'); setPushToken(token) }
-        else       { log('[push] user declined notification permission') }
-      })
-      .catch(e => logE(`[push] registration failed: ${String((e as Error)?.message ?? e)}`))
-    return () => { cancelled = true }
-  }, [conn, pushToken])
-
-  useEffect(() => {
-    if (!masterBaseUrl || !pushToken) return
-    let cancelled = false
-    let attempts  = 0
-    const send = () => {
-      if (cancelled) return
-      if (masterSendFrameRef.current({ type: 'register_push_token', token: pushToken, platform: 'ios' })) {
-        log('[push] register_push_token sent to lair')
-        return
-      }
-      if (attempts++ > 20) { logE('[push] master WS never ready — register_push_token not sent'); return }
-      setTimeout(send, 500)
-    }
-    send()
-    return () => { cancelled = true }
-  }, [masterBaseUrl, pushToken])
 
   const handleLogout = useCallback(async () => {
     setShowSidebar(false)

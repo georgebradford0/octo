@@ -87,12 +87,6 @@ struct AppState {
     messages:             Arc<Mutex<Vec<ApiMessage>>>,
     last_cost_usd:        Mutex<Option<f64>>,
     system:               String,
-    /// Persistent device-token registry. Mobile clients hand us their APNs
-    /// token over /stream after the Noise tunnel comes up.
-    push_registry:        Arc<crate::push::PushTokenRegistry>,
-    /// Configured iff APNS_KEY_P8 + KEY_ID + TEAM_ID + BUNDLE_ID are set.
-    /// `None` means push is disabled (we still fan a `system` event in-app).
-    apns_sender:          Option<Arc<crate::push::ApnsSender>>,
     /// Watch channel published by the K8s poller. Each /stream WS subscribes
     /// and re-sends a `containers` event whenever the list changes.
     containers_tx:        watch::Sender<Vec<ContainerInfo>>,
@@ -482,15 +476,6 @@ async fn handle_client_frame(raw: &str, state: &Arc<AppState>) {
                     buffer_and_fanout(&state.stream_state, json);
                 }
             });
-        }
-        "register_push_token" => {
-            let token    = v.get("token")   .and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            let platform = v.get("platform").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            if token.is_empty() || !matches!(platform.as_str(), "ios" | "android") {
-                warn!("[lair/stream] register_push_token: missing/invalid token or platform");
-                return;
-            }
-            state.push_registry.register(&platform, &token);
         }
         "pong" => {
             // App-level keepalive ack — handled per-WS in the future ping/pong work.
@@ -966,23 +951,6 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         if let Some(json) = chat_event_to_wire_json(&event) {
             buffer_and_fanout(&stream_state_arc.stream_state, json.to_string());
         }
-        // Push to iOS devices (if APNs configured). Webhook is fired separately
-        // by `spawn_background_task` itself before this callback runs.
-        if let Some(sender) = stream_state_arc.apns_sender.clone() {
-            let registry = stream_state_arc.push_registry.clone();
-            let title = match outcome.status {
-                "done" => "octo: task complete".to_string(),
-                _      => "octo: task failed".to_string(),
-            };
-            let body = if outcome.summary.is_empty() {
-                format!("Task {} {}", outcome.task_id, outcome.status)
-            } else {
-                outcome.summary.clone()
-            };
-            tokio::spawn(async move {
-                crate::push::push_to_ios(&sender, &registry, &title, &body).await;
-            });
-        }
     });
 
     format!("Background task {task_id} started. The user will be notified when it completes.")
@@ -1108,19 +1076,10 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let poll_trigger = Arc::new(Notify::new());
     let (containers_tx, containers_rx) = watch::channel(Vec::<ContainerInfo>::new());
 
-    let push_registry = Arc::new(crate::push::PushTokenRegistry::load(&dir));
-    let apns_sender = match crate::push::ApnsSender::from_env() {
-        Ok(Some(s)) => Some(Arc::new(s)),
-        Ok(None)    => { info!("[lair] APNs not configured — push disabled (set APNS_KEY_P8/KEY_ID/TEAM_ID/BUNDLE_ID to enable)"); None }
-        Err(e)      => { error!("[lair] APNs setup error — push disabled: {e}"); None }
-    };
-
     let state = Arc::new(AppState {
         messages:              Arc::new(Mutex::new(messages)),
         last_cost_usd:         Mutex::new(None),
         system:                build_system_prompt(),
-        push_registry,
-        apns_sender,
         containers_tx,
         containers_rx,
         poll_trigger:          poll_trigger.clone(),
