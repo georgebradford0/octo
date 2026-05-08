@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Animated,
   AppState,
+  Easing,
   FlatList,
   Image,
   NativeModules,
@@ -337,30 +338,46 @@ function renderText(text: string, baseStyle: object) {
 
 
 
-// ── PendingEllipsis ───────────────────────────────────────────────────────────
+// ── OrbitingArc ───────────────────────────────────────────────────────────────
+// A quarter-circle arc that revolves continuously. Implemented as the border
+// of an empty rounded-square View: only the top edge is colored, the others
+// are transparent, so the visible stroke is the top quadrant of the ring.
+// Rotating the whole View carries the arc around the perimeter — a classic
+// native-only spinner shape, visually heavier than a single dot.
 
-function PendingEllipsis() {
-  const dots = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current]
+function OrbitingArc({ size = 48, thickness = 3, durationMs = 1100 }: {
+  size?:        number
+  thickness?:   number
+  durationMs?:  number
+}) {
+  const rotate = useRef(new Animated.Value(0)).current
   useEffect(() => {
-    const anims = dots.map((dot, i) =>
-      Animated.loop(Animated.sequence([
-        Animated.delay(i * 150),
-        Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: true }),
-        Animated.timing(dot, { toValue: 0, duration: 300, useNativeDriver: true }),
-        Animated.delay((dots.length - i - 1) * 150),
-      ]))
+    const loop = Animated.loop(
+      Animated.timing(rotate, {
+        toValue: 1,
+        duration: durationMs,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
     )
-    anims.forEach(a => a.start())
-    return () => anims.forEach(a => a.stop())
-  }, [])
+    loop.start()
+    return () => loop.stop()
+  }, [durationMs])
+  const spin = rotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] })
   return (
-    <View style={s.messageWrap}>
-      <View style={s.pendingPill}>
-        {dots.map((dot, i) => (
-          <Animated.Text key={i} style={[s.cursor, { opacity: dot }]}>●</Animated.Text>
-        ))}
-      </View>
-    </View>
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        s.orbitArc,
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          borderWidth: thickness,
+          transform: [{ rotate: spin }],
+        },
+      ]}
+    />
   )
 }
 
@@ -1094,7 +1111,6 @@ const ChatPane = memo(function ChatPane({
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
           automaticallyAdjustKeyboardInsets={false}
-          ListFooterComponent={isPending ? <PendingEllipsis /> : null}
         />
 
 
@@ -1112,42 +1128,48 @@ const ChatPane = memo(function ChatPane({
           </ScrollView>
         )}
         <View style={s.inputFloat} onLayout={e => setInputAreaH(e.nativeEvent.layout.height)}>
-          {isPending ? (
-            <TouchableOpacity
-              style={[s.inputStopBtn, stopSent && { opacity: 0.4 }]}
-              disabled={stopSent}
-              onPress={() => {
-                if (!sendFrame({ type: 'interrupt' })) return
-                setStopSent(true)
-                // If no ack arrives within 3 s, re-enable so the user can retry
-                if (stopAckTimerRef.current) clearTimeout(stopAckTimerRef.current)
-                stopAckTimerRef.current = setTimeout(() => {
-                  stopAckTimerRef.current = null
-                  setStopSent(false)
-                }, 3000)
-                const toolId = lastToolIdRef.current
-                if (toolId) {
-                  setMessages(prev => withPrevRoles(prev.map(m =>
-                    m.id === toolId ? { ...m, role: 'interrupted' as const } : m
-                  )))
-                  lastToolIdRef.current = null
-                }
-              }}
-              activeOpacity={0.7}
-            >
-              <Text style={s.stopBtnText}>■  stop</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={s.inputRow}>
-              <TextInput
-                style={s.input}
-                value={input}
-                onChangeText={setInput}
-                placeholder="message…"
-                placeholderTextColor={C.textMuted}
-                multiline
-                blurOnSubmit={false}
-              />
+          <View style={s.inputRow}>
+            <TextInput
+              style={s.input}
+              value={input}
+              onChangeText={setInput}
+              placeholder="message…"
+              placeholderTextColor={C.textMuted}
+              multiline
+              blurOnSubmit={false}
+            />
+            {isPending ? (
+              // Streaming: send → stop button at the center of a moving-circle
+              // (single dot orbiting). Tapping issues an interrupt and locks
+              // the button at reduced opacity until the server's
+              // interrupt_ack (or the 3 s timeout fallback in stopAckTimerRef).
+              <View style={s.inputBtnSlot}>
+                <OrbitingArc size={48} thickness={3} />
+                <TouchableOpacity
+                  style={[s.stopBtnInline, stopSent && { opacity: 0.4 }]}
+                  disabled={stopSent}
+                  onPress={() => {
+                    if (!sendFrame({ type: 'interrupt' })) return
+                    setStopSent(true)
+                    if (stopAckTimerRef.current) clearTimeout(stopAckTimerRef.current)
+                    stopAckTimerRef.current = setTimeout(() => {
+                      stopAckTimerRef.current = null
+                      setStopSent(false)
+                    }, 3000)
+                    const toolId = lastToolIdRef.current
+                    if (toolId) {
+                      setMessages(prev => withPrevRoles(prev.map(m =>
+                        m.id === toolId ? { ...m, role: 'interrupted' as const } : m
+                      )))
+                      lastToolIdRef.current = null
+                    }
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={s.stopBtnInlineIcon}>■</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
               <TouchableOpacity
                 style={[s.sendBtn, !input.trim() && s.sendBtnDisabled]}
                 onPress={() => sendMessageRef.current()}
@@ -1156,8 +1178,8 @@ const ChatPane = memo(function ChatPane({
               >
                 <Text style={s.sendBtnIcon}>↑</Text>
               </TouchableOpacity>
-            </View>
-          )}
+            )}
+          </View>
         </View>
 
         {showScrollBtn && (
@@ -1809,8 +1831,6 @@ const s = StyleSheet.create({
   inlineCode:        { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, color: C.textPrimary, backgroundColor: C.surface, paddingHorizontal: 3, paddingVertical: 1, borderRadius: 3 },
   codeBlock:         { backgroundColor: C.surface, borderRadius: 6, padding: 10, marginVertical: 4 },
   codeBlockText:     { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 12, color: C.textPrimary, lineHeight: 18 },
-  cursor:            { color: C.textMuted, fontSize: 14, fontFamily: ARIMO },
-  pendingPill:       { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.surface, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' },
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
   toolAccent:        { borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 8 },
@@ -1831,8 +1851,16 @@ const s = StyleSheet.create({
   sendBtn:      { width: 48, height: 48, borderRadius: 24, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center', marginBottom: 4, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
   sendBtnDisabled: { backgroundColor: C.inputBorder },
   sendBtnIcon:  { fontSize: 22, color: '#fff', fontWeight: '700', lineHeight: 26 },
-  inputStopBtn: { backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, minHeight: 56, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
-  stopBtnText:  { fontSize: 14, color: C.red, fontWeight: '600', fontFamily: ARIMO },
+  // Streaming-state stop button — same footprint as sendBtn so the layout
+  // doesn't shift between idle and streaming. An OrbitingDot sits behind
+  // the stop button and circles around its perimeter.
+  inputBtnSlot:       { width: 48, height: 48, marginBottom: 4, alignItems: 'center', justifyContent: 'center' },
+  // Only the top edge is colored; the others are transparent. With a circular
+  // borderRadius this renders as a ~90° arc, which appears to travel around
+  // the button's perimeter when the View itself is rotated.
+  orbitArc:           { position: 'absolute', borderColor: 'transparent', borderTopColor: C.accent },
+  stopBtnInline:      { width: 36, height: 36, borderRadius: 18, backgroundColor: C.red, alignItems: 'center', justifyContent: 'center' },
+  stopBtnInlineIcon:  { fontSize: 14, color: '#fff', fontWeight: '700', lineHeight: 16 },
 
   // Header hamburger + right buttons
   headerRight:              { flexDirection: 'row', alignItems: 'center', gap: 8 },
