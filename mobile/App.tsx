@@ -813,6 +813,10 @@ const ChatPane = memo(function ChatPane({
         // `done`/`interrupted`/`error` at turn end), so loadHistory no longer
         // needs to drive it from `is_streaming`.
         setTimeout(() => {
+          // Only re-pin to the bottom if the user was already there. Otherwise
+          // the user is reading earlier content and an autoscroll on every
+          // history reconcile (e.g. end-of-turn) would yank them away.
+          if (!isAtBottomRef.current) return
           const offset = Math.max(0, contentHeightRef.current - listHeightRef.current)
           listRef.current?.scrollToOffset({ offset, animated: false })
         }, 50)
