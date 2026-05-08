@@ -52,10 +52,6 @@ RUN apt-get update && apt-get install -y ca-certificates curl git gpg && \
 
 COPY --from=builder /build/target/release/octo-app /usr/local/bin/octo-app
 
-COPY app/docker-entrypoint.sh         /usr/local/bin/docker-entrypoint.sh
-COPY app/docker-entrypoint-server.sh  /usr/local/bin/docker-entrypoint-server.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-server.sh
-
 LABEL org.opencontainers.image.source=https://github.com/georgebradford0/octo
 
 ENV HOME=/root
@@ -63,4 +59,6 @@ ENV OCTO_SKIP_SHELL_ENV=1
 ENV OCTO_DATA_DIR=/data
 ENV NOISE_KEY_FILE=/data/noise_key.bin
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Default ENTRYPOINT runs the parent (lair) role. Child Deployments override
+# this with `command: ["/usr/local/bin/octo-app", "--role", "server"]`.
+ENTRYPOINT ["/usr/local/bin/octo-app", "--role", "lair"]

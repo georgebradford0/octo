@@ -1592,39 +1592,73 @@ pub fn build_ephemeral_system_prompt() -> &'static str {
      text summary before stopping. Never end on a tool_use turn."
 }
 
-pub fn build_system_prompt(repo_path: &str) -> String {
-    let tool_guidance = "\n\nTool use guidelines (IMPORTANT — follow to minimise token cost):\
-        \n- To modify an existing file use edit_file (str_replace). Never read the whole file just to rewrite it.\
-        \n- Use read_file with offset+limit to read only the section you need.\
-        \n- Use grep to locate the exact lines before reading or editing.\
-        \n- Use write_file only for creating new files.\
-        \n- NEVER use a leading '**' glob in any path argument (e.g. **/dir/file). Always anchor paths from a known root.\
-        \n- Be concise and precise.\
-        \n- Only run git commit when the user explicitly instructs you to.\
-        \n\nResponse style: answers should be concise but informative — get to the point without unnecessary padding, but include all details that are genuinely useful.\
-        \n\nVerbosity rules (CRITICAL):\
-        \n- Do NOT narrate tool calls. Never say what you are about to do before calling a tool.\
-        \n- Do NOT summarise tool results in prose after they return. Let the results speak for themselves.\
-        \n- Only write prose when you have a direct answer or question for the user.\
-        \n- Never use filler phrases like \"I'll now...\", \"Let me...\", \"I've completed...\", \"Sure!\" etc.\
-        \n- Never pad responses.";
+/// Tool-use + verbosity guidelines appended to every system prompt regardless
+/// of role / repo state.
+fn shared_tool_guidance() -> &'static str {
+    "\n\nTool use guidelines (IMPORTANT — follow to minimise token cost):\
+     \n- To modify an existing file use edit_file (str_replace). Never read the whole file just to rewrite it.\
+     \n- Use read_file with offset+limit to read only the section you need.\
+     \n- Use grep to locate the exact lines before reading or editing.\
+     \n- Use write_file only for creating new files.\
+     \n- NEVER use a leading '**' glob in any path argument (e.g. **/dir/file). Always anchor paths from a known root.\
+     \n- Be concise and precise.\
+     \n- Only run git commit when the user explicitly instructs you to.\
+     \n\nResponse style: answers should be concise but informative — get to the point without unnecessary padding, but include all details that are genuinely useful.\
+     \n\nVerbosity rules (CRITICAL):\
+     \n- Do NOT narrate tool calls. Never say what you are about to do before calling a tool.\
+     \n- Do NOT summarise tool results in prose after they return. Let the results speak for themselves.\
+     \n- Only write prose when you have a direct answer or question for the user.\
+     \n- Never use filler phrases like \"I'll now...\", \"Let me...\", \"I've completed...\", \"Sure!\" etc.\
+     \n- Never pad responses."
+}
 
-    let parent_tool_note = if std::env::var("LAIR_URL").is_ok() {
+/// Optional `message_lair` tool note. Appended only when `LAIR_URL` is set.
+fn parent_tool_note() -> &'static str {
+    if std::env::var("LAIR_URL").is_ok() {
         "\n\nYou have a message_lair(text) tool available. Use it to send a message to the parent \
          (lair) container's agent and receive a response — for example to request secrets, \
          configuration, or to hand off a task."
     } else {
         ""
-    };
+    }
+}
 
+pub fn build_system_prompt(repo_path: &str) -> String {
     let claude_md = std::fs::read_to_string(format!("{}/CLAUDE.md", repo_path))
         .map(|s| format!("\n\n# Project instructions (CLAUDE.md)\n{}", s))
         .unwrap_or_default();
+
+    let tool_guidance    = shared_tool_guidance();
+    let parent_tool_note = parent_tool_note();
 
     format!(
         "You are an AI assistant helping manage the git repository at {repo_path}.\
          You can inspect code, answer questions, and help coordinate work across branches.\
          Any path preceded by '@' (e.g. @src/main.rs) is a reference to a file path in the git repository.{claude_md}{tool_guidance}{parent_tool_note}"
+    )
+}
+
+/// System prompt for a child container running as a general-purpose agent
+/// (no git repo bound to the workspace). Operators can set `AGENT_PURPOSE`
+/// to give the agent a specific mission; otherwise it boots with a generic
+/// description and waits for instructions.
+pub fn build_agent_system_prompt(workspace: &str) -> String {
+    let purpose = std::env::var("AGENT_PURPOSE")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    let purpose_block = match purpose {
+        Some(p) => format!("\n\n# Purpose\n{p}"),
+        None    => String::new(),
+    };
+    let tool_guidance    = shared_tool_guidance();
+    let parent_tool_note = parent_tool_note();
+
+    format!(
+        "You are an AI agent running in a containerized workspace at {workspace}.\
+         You have bash, file-system, and (when configured) MCP-server tools available.\
+         You are not bound to any specific git repository — treat the workspace as scratch \
+         space unless the user gives you something else to work on.{purpose_block}{tool_guidance}{parent_tool_note}"
     )
 }
 

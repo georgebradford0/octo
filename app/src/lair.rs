@@ -937,16 +937,11 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         hex::encode(&combined)
     };
     let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
+    let public_port: u16 = std::env::var("PUBLIC_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(noise_port);
     let http_port:  u16 = 8000;
-    let public_host = std::env::var("PUBLIC_HOST")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            std::net::UdpSocket::bind("0.0.0.0:0")
-                .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
-                .map(|a| a.ip().to_string())
-                .unwrap_or_else(|_| "127.0.0.1".to_string())
-        });
+    let public_host = crate::bootstrap::resolve_public_host("lair").await?;
+    crate::bootstrap::run_startup_script("lair").await?;
+
     let lair_name = std::env::var("LAIR_NAME").unwrap_or_else(|_| "lair".to_string());
     let lair_url  = format!("http://{}:{}", lair_name, http_port);
 
@@ -993,9 +988,9 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         containers_tx,
         containers_rx,
         poll_trigger:          poll_trigger.clone(),
-        pubkey_b32,
+        pubkey_b32:            pubkey_b32.clone(),
         noise_private_key_hex,
-        public_host,
+        public_host:           public_host.clone(),
         lair_url,
         kube_client,
         mcp_pool,
@@ -1027,6 +1022,10 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("failed to bind HTTP port {addr}: {e}"))?;
     info!("[lair] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port})");
+
+    // Listener is bound; the Noise port is reachable. Print the QR now so the
+    // user never scans before the server can accept the connection.
+    crate::bootstrap::print_qr("lair", &public_host, public_port, &pubkey_b32);
 
     axum::serve(listener, app).await
         .map_err(|e| anyhow::anyhow!("axum serve error: {e}"))?;

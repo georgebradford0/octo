@@ -23,8 +23,8 @@ use axum::{
 };
 use octo_core::{
     self,
-    build_ephemeral_system_prompt, build_system_prompt, build_tools_with_mcp,
-    chain_executor_with_mcp, data_dir, effective_repo, get_branches_for_repo,
+    build_agent_system_prompt, build_ephemeral_system_prompt, build_system_prompt,
+    build_tools_with_mcp, chain_executor_with_mcp, data_dir, get_branches_for_repo,
     init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config, resolve_api_key,
     resolve_model, run_noise_proxy, send_message, to_base32, write_config, ApiMessage, AnthropicTool,
     ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
@@ -376,13 +376,15 @@ async fn clear_handler(State(state): State<Arc<AppState>>) -> StatusCode {
 #[derive(Deserialize)]
 struct CompletionQuery { dir_part: Option<String>, file_part: Option<String> }
 
-async fn get_completions_handler(Query(p): Query<CompletionQuery>) -> Json<Vec<String>> {
-    let repo      = effective_repo();
+async fn get_completions_handler(
+    State(state): State<Arc<AppState>>,
+    Query(p):     Query<CompletionQuery>,
+) -> Json<Vec<String>> {
     let dir_part  = p.dir_part.unwrap_or_default();
     let file_part = p.file_part.unwrap_or_default();
     let mut seen    = std::collections::HashSet::new();
     let mut results = Vec::new();
-    let search_dir  = PathBuf::from(&repo).join(&dir_part);
+    let search_dir  = PathBuf::from(&state.cwd).join(&dir_part);
     if let Ok(entries) = fs::read_dir(&search_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -397,9 +399,13 @@ async fn get_completions_handler(Query(p): Query<CompletionQuery>) -> Json<Vec<S
     Json(results)
 }
 
-async fn get_branches_handler() -> impl IntoResponse {
-    let repo = effective_repo();
-    match get_branches_for_repo(&repo) {
+async fn get_branches_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // No-repo agents have no branches — return [] rather than 500. The mobile
+    // UI hides the branch picker in that case.
+    if !PathBuf::from(&state.cwd).join(".git").is_dir() {
+        return Json(Vec::<octo_core::Branch>::new()).into_response();
+    }
+    match get_branches_for_repo(&state.cwd) {
         Ok(b)  => Json(b).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -565,16 +571,36 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         load_or_generate_keypair(&key_file)
     };
 
-    let noise_port: u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
-    let http_port:  u16 = 8000;
-    let lair_url = std::env::var("LAIR_URL").unwrap_or_default();
+    let noise_port:  u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
+    let public_port: u16 = std::env::var("PUBLIC_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(noise_port);
+    let http_port:   u16 = 8000;
+    let lair_url    = std::env::var("LAIR_URL").unwrap_or_default();
+    let public_host = crate::bootstrap::resolve_public_host("server").await?;
+    let pubkey_b32  = to_base32(&static_public);
 
-    info!("[server] noise_pubkey={} noise_port={noise_port} http_port={http_port}", to_base32(&static_public));
+    info!("[server] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port}");
     if lair_url.is_empty() {
         info!("[server] LAIR_URL not set — message_lair tool disabled");
     } else {
         info!("[server] LAIR_URL={lair_url} — message_lair tool enabled");
     }
+
+    crate::bootstrap::run_startup_script("server").await?;
+
+    // Workspace + optional git repo. With GIT_URL set, behaviour matches the
+    // old shell entrypoint exactly (clone-or-fetch, set git user, install a
+    // credential helper). Without it, the workspace is just `mkdir -p` and
+    // the agent runs there as a generic agent — see `build_agent_system_prompt`.
+    let workspace = std::path::PathBuf::from(
+        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/workspace".to_string())
+    );
+    let git_url  = std::env::var("GIT_URL").ok();
+    let gh_token = std::env::var("GH_TOKEN").ok();
+    let has_repo = crate::bootstrap::ensure_workspace(
+        &workspace,
+        git_url.as_deref(),
+        gh_token.as_deref(),
+    ).await?;
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
@@ -602,10 +628,18 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         });
     }
 
-    let repo     = effective_repo();
-    let system   = build_system_prompt(&repo);
-    let messages = load_messages();
-    info!("[server] loaded {} message(s) from history, repo={repo}", messages.len());
+    let cwd       = workspace.to_string_lossy().to_string();
+    let system    = if has_repo {
+        build_system_prompt(&cwd)
+    } else {
+        build_agent_system_prompt(&cwd)
+    };
+    let messages  = load_messages();
+    info!(
+        "[server] loaded {} message(s) from history, cwd={cwd} (repo={})",
+        messages.len(),
+        if has_repo { "yes" } else { "no" },
+    );
 
     let mcp_pool = init_mcp_pool().await;
 
@@ -613,7 +647,7 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         messages:      Arc::new(Mutex::new(messages)),
         last_cost_usd: Mutex::new(None),
         system,
-        cwd: repo.clone(),
+        cwd,
         stream_state:  Mutex::new(StreamState { buffer: Vec::new(), subs: Vec::new() }),
         is_streaming:  AtomicBool::new(false),
         cancel:        Mutex::new(CancellationToken::new()),
@@ -641,7 +675,11 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{http_port}");
     let listener = tokio::net::TcpListener::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("failed to bind HTTP port {addr}: {e}"))?;
-    info!("[server] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port}, repo: {repo})");
+    info!("[server] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port}, cwd: {})", state.cwd);
+
+    // Listener is bound; the Noise port is reachable. Print the QR now so the
+    // user never scans before the server can accept the connection.
+    crate::bootstrap::print_qr("server", &public_host, public_port, &pubkey_b32);
 
     if let Ok(prompt) = std::env::var("STARTUP_PROMPT") {
         if !prompt.is_empty() {

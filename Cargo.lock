@@ -1729,6 +1729,7 @@ dependencies = [
  "octo-core",
  "octo-k8s-ops",
  "openssl",
+ "qrcode",
  "reqwest",
  "serde",
  "serde_json",

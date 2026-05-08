@@ -16,7 +16,9 @@ One image, one binary, two roles. Both parent (lair) and child (server) containe
 |-------|---------|
 | `ghcr.io/georgebradford0/lair` | lair (parent) and all child containers |
 
-The image's default ENTRYPOINT is `/usr/local/bin/docker-entrypoint.sh` (lair role). Child Deployments override it with `command: ["/usr/local/bin/docker-entrypoint-server.sh"]` in the pod spec. Each child gets its own Deployment, two PVCs (`{name}-data`, `{name}-workspace`), a ClusterIP Service (port 8000), and a NodePort Service (port 9000, assigned from range 30100–30199).
+The image's ENTRYPOINT is `["/usr/local/bin/octo-app", "--role", "lair"]`. Child Deployments override it with `command: ["/usr/local/bin/octo-app", "--role", "server"]` in the pod spec. There are no shell entrypoint scripts — `app/src/bootstrap.rs` does the public-IP detection, optional git clone, STARTUP_SCRIPT execution, and post-listen QR rendering directly in Rust. Each child gets its own Deployment, two PVCs (`{name}-data`, `{name}-workspace`), a ClusterIP Service (port 8000), and a NodePort Service (port 9000, assigned from range 30100–30199).
+
+A child container is **not** required to clone a git repo. If `GIT_URL` is set the workspace is populated from that repo (with `GH_TOKEN` for HTTPS); if unset, the workspace is just `mkdir -p /workspace` and the agent runs there as a general-purpose agent. Set `AGENT_PURPOSE` (env var) to give a no-repo agent a specific mission in its system prompt.
 
 Build and push from the **repo root** (replace `X.Y.Z` with the new version). Always use `buildx` with `--platform` so both `linux/amd64` and `linux/arm64` are included in the manifest:
 

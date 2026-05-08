@@ -37,7 +37,10 @@ pub fn effective_image() -> String {
         IMAGE.to_string()
     }
 }
-const ENTRYPOINT:    &str = "/usr/local/bin/docker-entrypoint-server.sh";
+/// Child Deployments override the image's default ENTRYPOINT (which runs the
+/// lair role) with this `command:` so the same `octo-app` binary boots in the
+/// `server` role instead.
+const CHILD_COMMAND: &[&str] = &["/usr/local/bin/octo-app", "--role", "server"];
 const LAIR_NAME:   &str = "lair";
 const CHILD_NAME:  &str = "child";
 
@@ -243,7 +246,7 @@ async fn create_deployment(client: &Client, p: &CreateChildParams<'_>) -> anyhow
             "name": "octo",
             "image": effective_image(),
             "imagePullPolicy": pull_policy,
-            "command": [ENTRYPOINT],
+            "command": CHILD_COMMAND,
             "env": env,
             "envFrom": [{"secretRef": {"name": "child-secrets"}}],
             "ports": [
@@ -429,10 +432,11 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
 
     let mut updated = Vec::new();
     for (name, container_name, is_child) in &targets {
-        // Children additionally get migrated to the dedicated `child` SA and
-        // `child-secrets` envFrom on every reload, so existing pre-Phase-1
-        // deployments transition without a destroy/recreate. Lair keeps its
-        // original SA/secret.
+        // Children additionally get migrated to the dedicated `child` SA,
+        // `child-secrets` envFrom, and the merged `octo-app --role server`
+        // command on every reload, so existing pre-merge deployments
+        // transition without a destroy/recreate. Lair keeps its own SA/secret
+        // and runs the image's default ENTRYPOINT.
         let mut spec = json!({
             "containers": [{
                 "name": container_name,
@@ -442,6 +446,7 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
         if *is_child {
             spec["serviceAccountName"] = json!(CHILD_NAME);
             spec["containers"][0]["envFrom"] = json!([{"secretRef": {"name": "child-secrets"}}]);
+            spec["containers"][0]["command"] = json!(CHILD_COMMAND);
         }
         let patch = json!({
             "spec": { "template": {

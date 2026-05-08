@@ -4,6 +4,7 @@
 
 use clap::{Parser, ValueEnum};
 
+mod bootstrap;
 mod lair;
 mod server;
 
