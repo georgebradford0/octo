@@ -568,15 +568,15 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 - A path prefixed with `@` (e.g. `@k8s/child.rs`) is a file reference inside a repo — treat it as a path.
 
 # Orchestration tools (lair-specific)
-- **`list_pods`** — all known children and their status. Cheap; call before guessing a name.
-- **`create_pod`** — args: `git_url?`, `name?`, `noise_port?`, `startup_script?`, `startup_prompt?`.
+- **`list_agents`** — all known children and their status. Cheap; call before guessing a name.
+- **`create_agent`** — args: `git_url?`, `name?`, `noise_port?`, `startup_script?`, `startup_prompt?`.
   - Omit `git_url` for a repo-less workload (default name `lair-workload`); otherwise default name is `lair-<repo-slug>`.
   - `noise_port` auto-assigns from 30100–30199 if omitted.
   - `startup_script` runs before the child's server boots — good for `apt-get`, package installs, git config.
   - `startup_prompt` is sent as the child's first user message once it's ready and triggers a full agentic loop.
   - **Both fields are stored as plaintext env vars on the Deployment spec.** Never put API keys, tokens, or other secrets in them. If the user asks you to, push back and suggest a safer route (MCP env, runtime secret, or having the child call `message_lair` to ask for the value).
 - **`message_child(container_name, text)`** — send a message to a child's agent and wait for its reply. Use this to delegate work or get status. The child has its own shell, repo, and tools.
-- **`terminate_pod(name)`** — *destructive.* Deletes the Deployment, both Services, and both PVCs (`<name>-data`, `<name>-workspace`). All workspace state is lost. Confirm with the user before calling unless the request was unambiguous and explicit.
+- **`terminate_agent(name)`** — *destructive.* Deletes the Deployment, both Services, and both PVCs (`<name>-data`, `<name>-workspace`). All workspace state is lost. Confirm with the user before calling unless the request was unambiguous and explicit.
 - **`restart_all_containers`** — rollout-restarts every managed Deployment and lair itself. Use only after a new image push; not for routine flakes.
 
 # General tools (shared with children)
@@ -601,7 +601,7 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 
 # Safety
 - Never commit or push git changes unless the user explicitly asked.
-- Confirm before `terminate_pod` or `restart_all_containers` unless the user just told you to.
+- Confirm before `terminate_agent` or `restart_all_containers` unless the user just told you to.
 - If a request would put a secret into plaintext Deployment config (`startup_script`, `startup_prompt`, env), flag it and offer a safer alternative.
 - Trust your judgment on small choices; only ask when ambiguity would actually change the outcome."#
         .to_string()
@@ -632,9 +632,9 @@ fn message_child_tool() -> AnthropicTool {
     }
 }
 
-fn create_pod_tool() -> AnthropicTool {
+fn create_agent_tool() -> AnthropicTool {
     AnthropicTool {
-        name: "create_pod".to_string(),
+        name: "create_agent".to_string(),
         description: "Create and start a new octo child for a Git repository on Kubernetes. \
                        Handles port assignment (NodePorts 30100–30199), PVCs, Deployment, and Services."
             .to_string(),
@@ -667,9 +667,9 @@ fn create_pod_tool() -> AnthropicTool {
     }
 }
 
-fn terminate_pod_tool() -> AnthropicTool {
+fn terminate_agent_tool() -> AnthropicTool {
     AnthropicTool {
-        name: "terminate_pod".to_string(),
+        name: "terminate_agent".to_string(),
         description: "Permanently terminate a child and delete all its Kubernetes resources \
                        (Deployment, Services, PVCs). Irreversible — all PVC data is lost."
             .to_string(),
@@ -686,9 +686,9 @@ fn terminate_pod_tool() -> AnthropicTool {
     }
 }
 
-fn list_pods_tool() -> AnthropicTool {
+fn list_agents_tool() -> AnthropicTool {
     AnthropicTool {
-        name: "list_pods".to_string(),
+        name: "list_agents".to_string(),
         description: "List all known child containers and their current status.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -714,7 +714,7 @@ fn restart_all_containers_tool() -> AnthropicTool {
 }
 
 fn lair_extra_tools() -> Vec<AnthropicTool> {
-    vec![list_pods_tool(), message_child_tool(), create_pod_tool(), terminate_pod_tool(), restart_all_containers_tool()]
+    vec![list_agents_tool(), message_child_tool(), create_agent_tool(), terminate_agent_tool(), restart_all_containers_tool()]
 }
 
 fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_json::Value)
@@ -731,10 +731,10 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
         let state  = state.clone();
         Box::pin(async move {
             match name.as_str() {
-                "list_pods" => exec_list_pods(state.clone()).await,
+                "list_agents" => exec_list_agents(state.clone()).await,
                 "message_child" => exec_message_child(client, input).await,
-                "create_pod" => exec_create_pod(state, input).await,
-                "terminate_pod" => exec_terminate_pod(state, input).await,
+                "create_agent" => exec_create_agent(state, input).await,
+                "terminate_agent" => exec_terminate_agent(state, input).await,
                 "restart_all_containers" => exec_restart_all_containers(state).await,
                 other => format!("unknown tool: {other}"),
             }
@@ -742,7 +742,7 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
     }))
 }
 
-async fn exec_list_pods(state: Arc<AppState>) -> String {
+async fn exec_list_agents(state: Arc<AppState>) -> String {
     let containers = state.containers_rx.borrow().clone();
     serde_json::to_string_pretty(&containers).unwrap_or_else(|e| format!("error: {e}"))
 }
@@ -787,7 +787,7 @@ async fn exec_message_child(client: reqwest::Client, input: serde_json::Value) -
     }
 }
 
-async fn exec_create_pod(state: Arc<AppState>, input: serde_json::Value) -> String {
+async fn exec_create_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
     let git_url = input.get("git_url").and_then(|v| v.as_str()).map(str::to_string);
 
     let child_name = input.get("name").and_then(|v| v.as_str())
@@ -822,7 +822,7 @@ async fn exec_create_pod(state: Arc<AppState>, input: serde_json::Value) -> Stri
         },
     };
 
-    info!("[lair/create_pod] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
+    info!("[lair/create_agent] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
 
     let params = k8s::CreateChildParams {
         name:              &child_name,
@@ -837,33 +837,33 @@ async fn exec_create_pod(state: Arc<AppState>, input: serde_json::Value) -> Stri
 
     match k8s::create_child_resources(&state.kube_client, &params).await {
         Ok(_) => {
-            info!("[lair/create_pod] created {child_name}");
+            info!("[lair/create_agent] created {child_name}");
             tokio::time::sleep(Duration::from_secs(3)).await;
             state.poll_trigger.notify_one();
             format!("Created child '{child_name}' on NodePort {noise_port}.")
         }
         Err(e) => {
-            error!("[lair/create_pod] failed: {e:#}");
+            error!("[lair/create_agent] failed: {e:#}");
             format!("error: {e:#}")
         }
     }
 }
 
-async fn exec_terminate_pod(state: Arc<AppState>, input: serde_json::Value) -> String {
+async fn exec_terminate_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
     let name = match input.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return "error: missing 'name' field".to_string(),
     };
 
-    info!("[lair/terminate_pod] terminating '{name}'");
+    info!("[lair/terminate_agent] terminating '{name}'");
     match k8s::delete_child_resources(&state.kube_client, &name).await {
         Ok(_) => {
-            info!("[lair/terminate_pod] '{name}' deleted, triggering re-poll");
+            info!("[lair/terminate_agent] '{name}' deleted, triggering re-poll");
             state.poll_trigger.notify_one();
             format!("Terminated '{name}' and deleted all resources.")
         }
         Err(e) => {
-            error!("[lair/terminate_pod] failed to delete '{name}': {e}");
+            error!("[lair/terminate_agent] failed to delete '{name}': {e}");
             format!("error: {e}")
         }
     }
