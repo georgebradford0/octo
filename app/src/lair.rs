@@ -880,10 +880,9 @@ async fn exec_restart_all_containers(state: Arc<AppState>) -> String {
     }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Entry ─────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
         .with_target(false)
@@ -895,7 +894,6 @@ async fn main() {
 
     init_shell_env();
 
-    let args: Vec<String> = std::env::args().collect();
     let is_dev   = std::env::var("OCTO_DEV").as_deref() == Ok("1");
     let key_file = std::env::var("NOISE_KEY_FILE").unwrap_or_else(|_| NOISE_KEY_FILE.to_string());
 
@@ -909,7 +907,7 @@ async fn main() {
             }
         });
 
-    if args.get(1).map(|s| s.as_str()) == Some("--print-pubkey") {
+    if print_pubkey {
         let pubkey = if is_dev {
             DEV_PUBKEY_BASE32.to_string()
         } else if let Some((_, public)) = &injected_keypair {
@@ -919,7 +917,7 @@ async fn main() {
             to_base32(&public)
         };
         println!("{pubkey}");
-        return;
+        return Ok(());
     }
 
     let (static_private, static_public) = if is_dev {
@@ -954,13 +952,9 @@ async fn main() {
 
     info!("[lair] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port} public_host={public_host}");
 
-    let kube_client = match k8s::build_client().await {
-        Ok(c) => { info!("[lair] K8s client initialized"); c }
-        Err(e) => {
-            error!("[lair] failed to initialize K8s client: {e}");
-            std::process::exit(1);
-        }
-    };
+    let kube_client = k8s::build_client().await
+        .map_err(|e| anyhow::anyhow!("failed to initialize K8s client: {e}"))?;
+    info!("[lair] K8s client initialized");
 
     // Stamp our own version onto the deployment annotation so `octo reload`
     // can display the version transition without the CLI hardcoding it.
@@ -1030,8 +1024,11 @@ async fn main() {
         .layer(cors);
 
     let addr = format!("0.0.0.0:{http_port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind HTTP port");
+    let listener = tokio::net::TcpListener::bind(&addr).await
+        .map_err(|e| anyhow::anyhow!("failed to bind HTTP port {addr}: {e}"))?;
     info!("[lair] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port})");
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await
+        .map_err(|e| anyhow::anyhow!("axum serve error: {e}"))?;
+    Ok(())
 }

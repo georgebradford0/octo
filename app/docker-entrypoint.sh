@@ -34,7 +34,7 @@ if [ -n "$STARTUP_SCRIPT" ]; then
 fi
 
 # ── Noise key ─────────────────────────────────────────────────────────────────
-NOISE_PUBKEY=$(octo-lair --print-pubkey)
+NOISE_PUBKEY=$(octo-app --role lair --print-pubkey)
 echo "[octo-lair] Noise public key: ${NOISE_PUBKEY}"
 
 # ── QR code ───────────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ PIPE=$(mktemp -t octo-pipe-XXXXXX)
 rm -f "$PIPE"
 mkfifo "$PIPE"
 
-octo-lair 2>&1 | tee "$PIPE" &
+octo-app --role lair 2>&1 | tee "$PIPE" &
 SERVER_PID=$!
 
 QR_PRINTED=0

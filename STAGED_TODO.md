@@ -1,4 +1,4 @@
 # TODO
 
-- [ ] Add long press on agents in sidebar to terminate
-- [ ] Setup background tasks
+- [ ] Add long press on options in sidebar of mobile to terminate a pod
+- [ ] Setup background tasks such that a long running task can be run in background and then user be notified when it is finished.  At the same time, setup push notifications so when a background task completes user can be notified via push that task has completed.

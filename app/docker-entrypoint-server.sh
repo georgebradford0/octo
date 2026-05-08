@@ -22,7 +22,7 @@ NOISE_PORT="${NOISE_PORT:-9000}"
 # base32-encoded public key.  The key file is persisted across container
 # restarts so the client only needs to re-scan the QR if the volume is lost.
 mkdir -p /etc/octo
-NOISE_PUBKEY=$(octo-server --print-pubkey)
+NOISE_PUBKEY=$(octo-app --role server --print-pubkey)
 echo "[octo] Noise public key: ${NOISE_PUBKEY}"
 
 # ── Git clone (optional) ─────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ mkfifo "$PIPE"
 
 cd "$WORKSPACE"
 
-octo-server 2>&1 | tee "$PIPE" &
+octo-app --role server 2>&1 | tee "$PIPE" &
 SERVER_PID=$!
 
 # Read lines from the pipe; forward each one and trigger QR on sentinel.

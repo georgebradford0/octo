@@ -7,30 +7,28 @@ ENV OPENSSL_NO_VENDOR=1
 
 WORKDIR /build
 
-# Workspace manifest includes all three crates so both binaries are built here.
-RUN printf '[workspace]\nmembers = ["core", "lair", "server", "k8s-ops"]\nresolver = "2"\n' > Cargo.toml
+# Workspace manifest includes the crates needed to build the merged app binary.
+# tests/ and cli/ are not built inside the image — they're for local use only.
+RUN printf '[workspace]\nmembers = ["core", "app", "k8s-ops"]\nresolver = "2"\n' > Cargo.toml
 
 COPY Cargo.lock ./
 COPY core/Cargo.toml    core/
-COPY lair/Cargo.toml  lair/
-COPY server/Cargo.toml  server/
+COPY app/Cargo.toml     app/
 COPY k8s-ops/Cargo.toml k8s-ops/
 
 # Stub sources for dep-caching layer.
-RUN mkdir -p core/src lair/src server/src k8s-ops/src && \
+RUN mkdir -p core/src app/src k8s-ops/src && \
     echo '' > core/src/lib.rs && \
-    echo 'fn main() {}' > lair/src/main.rs && \
-    echo 'fn main() {}' > server/src/main.rs && \
+    echo 'fn main() {}' > app/src/main.rs && \
     echo '' > k8s-ops/src/lib.rs
 
 RUN cargo fetch
 
 COPY core/src    core/src
-COPY lair/src  lair/src
-COPY server/src  server/src
+COPY app/src     app/src
 COPY k8s-ops/src k8s-ops/src
 
-RUN cargo build --release -p octo-lair -p octo-server
+RUN cargo build --release -p octo-app
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -52,11 +50,10 @@ RUN apt-get update && apt-get install -y ca-certificates curl git gpg && \
     # uvx (via uv)
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
 
-COPY --from=builder /build/target/release/octo-lair /usr/local/bin/octo-lair
-COPY --from=builder /build/target/release/octo-server /usr/local/bin/octo-server
+COPY --from=builder /build/target/release/octo-app /usr/local/bin/octo-app
 
-COPY lair/docker-entrypoint.sh        /usr/local/bin/docker-entrypoint.sh
-COPY server/docker-entrypoint.sh        /usr/local/bin/docker-entrypoint-server.sh
+COPY app/docker-entrypoint.sh         /usr/local/bin/docker-entrypoint.sh
+COPY app/docker-entrypoint-server.sh  /usr/local/bin/docker-entrypoint-server.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint-server.sh
 
 LABEL org.opencontainers.image.source=https://github.com/georgebradford0/octo

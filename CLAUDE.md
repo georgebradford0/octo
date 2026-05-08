@@ -10,13 +10,13 @@ Do **not** commit debug/diagnostic logging (`println!`, `console.log`, etc. adde
 
 ## Docker images
 
-There is one image used for both parent and child containers:
+One image, one binary, two roles. Both parent (lair) and child (server) containers run the same `octo-app` binary; the entrypoint scripts pass `--role lair` or `--role server` to pick which path runs.
 
 | Image | Used by |
 |-------|---------|
 | `ghcr.io/georgebradford0/lair` | lair (parent) and all child containers |
 
-Child Deployments use the same image with `command: ["/usr/local/bin/docker-entrypoint-server.sh"]` set in the pod spec. Each child gets its own Deployment, two PVCs (`{name}-data`, `{name}-workspace`), a ClusterIP Service (port 8000), and a NodePort Service (port 9000, assigned from range 30100–30199).
+The image's default ENTRYPOINT is `/usr/local/bin/docker-entrypoint.sh` (lair role). Child Deployments override it with `command: ["/usr/local/bin/docker-entrypoint-server.sh"]` in the pod spec. Each child gets its own Deployment, two PVCs (`{name}-data`, `{name}-workspace`), a ClusterIP Service (port 8000), and a NodePort Service (port 9000, assigned from range 30100–30199).
 
 Build and push from the **repo root** (replace `X.Y.Z` with the new version). Always use `buildx` with `--platform` so both `linux/amd64` and `linux/arm64` are included in the manifest:
 
@@ -25,7 +25,7 @@ docker buildx build \
   --builder multiplatform \
   --platform linux/amd64,linux/arm64 \
   --push \
-  -f lair/Dockerfile \
+  -f app/Dockerfile \
   -t ghcr.io/georgebradford0/lair:X.Y.Z \
   -t ghcr.io/georgebradford0/lair:latest \
   .
@@ -41,9 +41,10 @@ Octo is an agentic coding assistant: a server runs an AI loop against a git repo
 
 | Directory | Language | Role |
 |-----------|----------|------|
-| `core/` | Rust | Shared library: agentic loop, Claude API streaming, git/worktree ops, config |
-| `server/` | Rust + Axum | Child container: Noise handshake → WebSocket → runs agentic loop against a single git repo |
-| `lair/` | Rust + Axum | Parent container: orchestrates child Kubernetes Deployments; mobile connects here first |
+| `core/` | Rust | Shared library: agentic loop, Claude API streaming, git/worktree ops, config, HTTP/WS plumbing (`core::app`) |
+| `app/` | Rust + Axum | Merged binary `octo-app` with `--role lair\|server`. `app/src/lair.rs` is the parent (orchestrates child Deployments); `app/src/server.rs` is the child (repo-scoped agentic loop). Both are reachable from `app/src/main.rs`'s argparse dispatch. |
+| `k8s-ops/` | Rust | Kubernetes primitives shared by lair role + CLI: Deployment / Secret / RBAC helpers, child-secrets, pod readiness waits. |
+| `cli/` | Rust | `octo` CLI for managing the cluster (init, reload, pods, logs, config). |
 | `mobile/` | React Native (TS) | iOS/Android client: QR scan → native Noise tunnel → WebSocket UI |
 
 ### Transport

@@ -1,0 +1,29 @@
+[package]
+name        = "octo-app"
+version     = "0.5.0"
+edition     = "2021"
+description = "octo merged HTTP/WebSocket server — runs either the lair (parent) or server (child) role from a single binary"
+
+[[bin]]
+name = "octo-app"
+path = "src/main.rs"
+
+[dependencies]
+octo-core    = { path = "../core" }
+octo-k8s-ops = { path = "../k8s-ops" }
+axum                = { version = "0.7",  features = ["ws"] }
+tokio               = { version = "1",    features = ["full"] }
+tokio-util          = { version = "0.7",  features = ["rt"] }
+tower-http          = { version = "0.5",  features = ["cors"] }
+serde               = { version = "1.0",  features = ["derive"] }
+serde_json          = "1.0"
+uuid                = { version = "1",    features = ["v4"] }
+futures-util        = "0.3"
+git2                = { version = "0.19", features = ["vendored-libgit2"] }
+openssl             = { version = "0.10", features = ["vendored"] }
+anyhow              = "1.0"
+reqwest             = { version = "0.12", features = ["json"] }
+hex                 = "0.4"
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+clap                = { version = "4.4",  features = ["derive"] }

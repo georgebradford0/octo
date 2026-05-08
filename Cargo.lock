@@ -1717,6 +1717,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "octo-app"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "git2",
+ "hex",
+ "octo-core",
+ "octo-k8s-ops",
+ "openssl",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "octo-core"
 version = "0.0.4"
 dependencies = [
@@ -1746,48 +1770,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "octo-lair"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "axum",
- "futures-util",
- "hex",
- "octo-core",
- "octo-k8s-ops",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "octo-server"
-version = "0.2.40"
-dependencies = [
- "anyhow",
- "axum",
- "futures-util",
- "git2",
- "hex",
- "octo-core",
- "openssl",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

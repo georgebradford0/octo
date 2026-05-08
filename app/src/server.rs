@@ -516,10 +516,9 @@ fn make_extra_executor() -> Option<Arc<dyn Fn(String, serde_json::Value)
     }))
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Entry ─────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
         .with_target(false)
@@ -531,7 +530,6 @@ async fn main() {
 
     init_shell_env();
 
-    let args: Vec<String> = std::env::args().collect();
     let is_dev   = std::env::var("OCTO_DEV").as_deref() == Ok("1");
     let key_file = std::env::var("NOISE_KEY_FILE").unwrap_or_else(|_| NOISE_KEY_FILE.to_string());
 
@@ -545,7 +543,7 @@ async fn main() {
             }
         });
 
-    if args.get(1).map(|s| s.as_str()) == Some("--print-pubkey") {
+    if print_pubkey {
         let pubkey = if is_dev {
             DEV_PUBKEY_BASE32.to_string()
         } else if let Some((_, public)) = &injected_keypair {
@@ -555,7 +553,7 @@ async fn main() {
             to_base32(&public)
         };
         println!("{pubkey}");
-        return;
+        return Ok(());
     }
 
     let (static_private, static_public) = if is_dev {
@@ -641,7 +639,8 @@ async fn main() {
         .layer(cors);
 
     let addr = format!("0.0.0.0:{http_port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind HTTP port");
+    let listener = tokio::net::TcpListener::bind(&addr).await
+        .map_err(|e| anyhow::anyhow!("failed to bind HTTP port {addr}: {e}"))?;
     info!("[server] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port}, repo: {repo})");
 
     if let Ok(prompt) = std::env::var("STARTUP_PROMPT") {
@@ -699,5 +698,7 @@ async fn main() {
         }
     }
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await
+        .map_err(|e| anyhow::anyhow!("axum serve error: {e}"))?;
+    Ok(())
 }
