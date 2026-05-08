@@ -141,6 +141,7 @@ const C = {
   surface:       '#f2f2f7',
   border:        '#d1d1d6',
   accent:        '#2563eb',
+  accentLight:   '#eff4ff',
   green:         '#22863a',
   yellow:        '#b45309',
   red:           '#dc2626',
@@ -207,12 +208,15 @@ function renderText(text: string, baseStyle: object) {
   segments.forEach(segment => {
     // ── Fenced code block ──────────────────────────────────────────────────────
     if (segment.startsWith('```') && segment.endsWith('```')) {
+      let lang = ''
       const inner = segment.slice(3, -3).replace(/^\w[^\n]*\n/, ln => {
         // strip optional language tag (e.g. ```typescript\n)
-        return /^[a-zA-Z0-9_+-]+\n/.test(ln) ? '' : ln
+        if (/^[a-zA-Z0-9_+-]+\n/.test(ln)) { lang = ln.trim(); return '' }
+        return ln
       }).replace(/^\n/, '')
       elements.push(
         <View key={keyCounter++} style={s.codeBlock}>
+          {lang ? <Text style={s.codeBlockLang}>{lang}</Text> : null}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled">
             <Text style={s.codeBlockText} selectable>{inner}</Text>
           </ScrollView>
@@ -424,11 +428,14 @@ const MessageBubble = memo(function MessageBubble({
   const turnBoundary = visiblePrev !== undefined &&
     (message.role === 'user') !== (visiblePrev === 'user')
   const extraTopMargin = turnBoundary ? 12 : 0
+  // Tighter bottom margin for consecutive same-role messages (tool runs, etc.)
+  const sameRole = visiblePrev !== undefined && visiblePrev === message.role
+  const bubbleBottomMargin = sameRole ? 4 : 14
 
   if (message.role === 'error') {
     return (
       <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
-        <View style={[s.messageWrap, { marginBottom: 3, paddingLeft: 28 }]}>
+        <View style={[s.messageWrap, { marginBottom: bubbleBottomMargin, paddingLeft: 28 }]}>
           <Text style={s.errorLine} selectable>⚠ {message.text}</Text>
         </View>
       </Animated.View>
@@ -437,7 +444,7 @@ const MessageBubble = memo(function MessageBubble({
   if (message.role === 'interrupted') {
     return (
       <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
-        <View style={[s.messageWrap, { marginBottom: 3, paddingLeft: 28 }]}>
+        <View style={[s.messageWrap, { marginBottom: bubbleBottomMargin, paddingLeft: 28 }]}>
           <Text style={s.interruptedLine} selectable>■ interrupted</Text>
         </View>
       </Animated.View>
@@ -447,11 +454,11 @@ const MessageBubble = memo(function MessageBubble({
     return (
       <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
         <TouchableOpacity
-          style={[s.messageWrap, { marginBottom: 3 }]}
+          style={[s.messageWrap, { marginBottom: 4 }]}
           onPress={() => setToolExpanded(v => !v)}
           activeOpacity={0.7}
         >
-          <View style={s.toolAccent}>
+          <View style={s.toolChip}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Text style={[s.toolLine, { flex: 1 }]} selectable numberOfLines={toolExpanded ? undefined : 1} ellipsizeMode="tail">{message.text}</Text>
               <Text style={[s.toolChevron, { transform: [{ rotate: toolExpanded ? '90deg' : '0deg' }] }]}>›</Text>
@@ -471,7 +478,7 @@ const MessageBubble = memo(function MessageBubble({
   if (message.role === 'user') {
     return (
       <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
-        <View style={[s.messageWrap, s.messageWrapRight]}>
+        <View style={[s.messageWrap, s.messageWrapRight, { marginBottom: bubbleBottomMargin }]}>
           <View style={s.userBubble}>
             {renderedText}
           </View>
@@ -481,7 +488,7 @@ const MessageBubble = memo(function MessageBubble({
   }
   return (
     <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
-      <View style={s.messageWrap}>
+      <View style={[s.messageWrap, { marginBottom: bubbleBottomMargin }]}>
         {renderedText}
         {message.cost != null && (
           <Text style={s.costLabel}>{formatCost(message.cost)}</Text>
@@ -1105,7 +1112,8 @@ const ChatPane = memo(function ChatPane({
           style={s.messageList}
           ListEmptyComponent={
             <View style={s.emptyStateWrap}>
-              <Text style={s.emptyState}>BUILD</Text>
+              <AppIcon />
+              <Text style={s.emptyState}>What are you building?</Text>
             </View>
           }
           onContentSizeChange={(_, h) => {
@@ -1258,10 +1266,11 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
             >
               <Text style={s.backBtnText}>‹</Text>
             </TouchableOpacity>
-            <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
-            <View>
-              <Text style={s.headerTitle}>{containerDisplayName(child.name)}</Text>
+            <View style={[s.connStatusPill, { backgroundColor: statusColor(chatStatus) + '22' }]}>
+              <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
+              <Text style={[s.connPillLabel, { color: statusColor(chatStatus) }]}>{chatStatus === 'ready' ? 'live' : chatStatus}</Text>
             </View>
+            <Text style={s.headerTitle}>{containerDisplayName(child.name)}</Text>
           </View>
           <TouchableOpacity
             style={s.clearBtn}
@@ -1636,8 +1645,12 @@ function AppInner() {
             >
               <Text style={s.hamburgerBtnText}>≡</Text>
             </TouchableOpacity>
-            <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
+            <View style={[s.connStatusPill, { backgroundColor: statusColor(chatStatus) + '22' }]}>
+              <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
+              <Text style={[s.connPillLabel, { color: statusColor(chatStatus) }]}>{chatStatus === 'ready' ? 'live' : chatStatus}</Text>
+            </View>
           </View>
+          <Text style={s.headerBrand}>octo</Text>
           <View style={s.headerRight}>
             <TouchableOpacity
               style={s.clearBtn}
@@ -1710,6 +1723,12 @@ function AppInner() {
               />
             </Animated.View>
             <Animated.View style={[s.sidebar, { transform: [{ translateX: sidebarAnim.interpolate({ inputRange: [0, 1], outputRange: [-280, 0] }) }] }]}>
+              <View style={s.sidebarHeader}>
+                <Text style={s.sidebarBrand}>octo</Text>
+                <TouchableOpacity onPress={closeSidebar} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={s.sidebarCloseIcon}>✕</Text>
+                </TouchableOpacity>
+              </View>
               <View style={s.sidebarSection}>
                 <Text style={s.settingsMenuSectionTitle}>repos</Text>
               </View>
@@ -1817,22 +1836,26 @@ const s = StyleSheet.create({
   paneArea:     { flex: 1 },
 
   // Header
-  header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  headerLeft:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  backBtn:      { paddingRight: 4, paddingVertical: 2 },
-  backBtnText:  { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300', fontFamily: ARIMO },
-  clearBtn:     { paddingVertical: 4, paddingHorizontal: 2 },
-  clearBtnText: { fontSize: 14, color: C.textSecondary, fontWeight: '500', fontFamily: ARIMO },
-  headerTitle:  { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 1, fontFamily: ARIMO },
-  connDot:      { width: 8, height: 8, borderRadius: 4 },
+  header:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  headerLeft:      { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  headerRight:     { flex: 1, alignItems: 'flex-end' },
+  headerBrand:     { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 2, fontFamily: NUNITO, textAlign: 'center', flex: 1 },
+  backBtn:         { paddingRight: 4, paddingVertical: 2 },
+  backBtnText:     { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300', fontFamily: ARIMO },
+  clearBtn:        { paddingVertical: 4, paddingHorizontal: 2 },
+  clearBtnText:    { fontSize: 14, color: C.textSecondary, fontWeight: '500', fontFamily: ARIMO },
+  headerTitle:     { fontSize: 15, fontWeight: '600', color: C.textPrimary, fontFamily: ARIMO },
+  connDot:         { width: 10, height: 10, borderRadius: 5 },
+  connStatusPill:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, gap: 4 },
+  connPillLabel:   { fontSize: 11, fontWeight: '600', fontFamily: ARIMO, letterSpacing: 0.3 },
 
   // Chat pane
   pane:              { flex: 1, backgroundColor: C.bg },
   messageList:       { flex: 1 },
   messageListContent: { paddingVertical: 16 },
-  emptyStateWrap:    { alignItems: 'center', marginTop: 80, gap: 6 },
+  emptyStateWrap:    { alignItems: 'center', marginTop: 80, gap: 14 },
   emptyStateName:    { fontSize: 22, fontWeight: '700', color: C.textMuted, letterSpacing: 2, fontFamily: ARIMO },
-  emptyState:        { textAlign: 'center', color: C.textMuted, fontSize: 14, fontFamily: ARIMO },
+  emptyState:        { textAlign: 'center', color: C.textSecondary, fontSize: 16, fontFamily: ARIMO },
   reconnectBanner:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, zIndex: 10 },
   reconnectText:     { fontSize: 12, fontWeight: '600', fontFamily: ARIMO },
 
@@ -1844,18 +1867,19 @@ const s = StyleSheet.create({
   // Messages
   messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
   messageWrapRight: { alignItems: 'flex-end' },
-  userBubble:          { backgroundColor: C.surface, borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '80%' },
-  textBlock:           { color: C.textPrimary, fontSize: 18, lineHeight: 26, fontWeight: '400', fontFamily: ARIMO },
+  userBubble:          { backgroundColor: C.accent, borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '80%' },
+  textBlock:           { color: '#ffffff', fontSize: 16, lineHeight: 24, fontWeight: '400', fontFamily: ARIMO },
   assistantTextBlock:  { color: C.textPrimary, fontSize: 16, lineHeight: 24, fontWeight: '400', fontFamily: ARIMO },
   inlineCode:        { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, color: C.textPrimary, backgroundColor: C.surface, paddingHorizontal: 3, paddingVertical: 1, borderRadius: 3 },
-  codeBlock:         { backgroundColor: C.surface, borderRadius: 6, padding: 10, marginVertical: 4 },
+  codeBlock:         { backgroundColor: C.surface, borderRadius: 8, padding: 12, marginVertical: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border },
   codeBlockText:     { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 12, color: C.textPrimary, lineHeight: 18 },
+  codeBlockLang:     { fontSize: 10, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
   costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
-  toolAccent:        { borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 8 },
-  toolLine:          { fontSize: 14, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  toolChevron:       { fontSize: 16, color: C.textMuted, marginLeft: 6, fontWeight: '300' },
-  toolOutputBlock:   { marginTop: 6, borderLeftWidth: 2, borderLeftColor: C.border, paddingLeft: 10 },
+  toolChip:          { backgroundColor: C.accentLight, borderLeftWidth: 2, borderLeftColor: C.accent, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 7 },
+  toolLine:          { fontSize: 13, color: C.accent, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  toolChevron:       { fontSize: 16, color: C.accent, marginLeft: 6, fontWeight: '400' },
+  toolOutputBlock:   { marginTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, paddingTop: 8 },
   toolOutputText:    { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
   interruptedLine:   { fontSize: 16, lineHeight: 24, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
   errorLine:         { fontSize: 15, lineHeight: 22, color: C.red, fontFamily: ARIMO, fontStyle: 'italic' },
@@ -1864,9 +1888,9 @@ const s = StyleSheet.create({
   completionList: { position: 'absolute', left: 0, right: 0, maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg, zIndex: 10, elevation: 10 },
   completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
   completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  inputFloat:   { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 12 },
+  inputFloat:   { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 12, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg },
   inputRow:     { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
-  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, color: C.textPrimary, fontSize: 18, lineHeight: 26, minHeight: 56, maxHeight: 140, fontFamily: ARIMO, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, color: C.textPrimary, fontSize: 16, lineHeight: 24, minHeight: 56, maxHeight: 140, fontFamily: ARIMO },
   sendBtn:      { width: 48, height: 48, borderRadius: 24, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center', marginBottom: 4, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
   sendBtnDisabled: { backgroundColor: C.inputBorder },
   sendBtnIcon:  { fontSize: 22, color: '#fff', fontWeight: '700', lineHeight: 26 },
@@ -1890,7 +1914,10 @@ const s = StyleSheet.create({
   // Sidebar
   sidebarBackdrop:          { backgroundColor: 'rgba(0,0,0,0.28)', zIndex: 200 },
   sidebar:                  { position: 'absolute', top: 0, left: 0, bottom: 0, width: 280, backgroundColor: C.bg, zIndex: 201, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: C.border, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 4, height: 0 }, elevation: 16, flexDirection: 'column' },
-  sidebarSection:           { paddingHorizontal: 16, paddingTop: 20, paddingBottom: 10 },
+  sidebarSection:           { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10 },
+  sidebarHeader:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  sidebarBrand:             { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 2, fontFamily: NUNITO },
+  sidebarCloseIcon:         { fontSize: 18, color: C.textSecondary, fontFamily: ARIMO },
   sidebarExitBtn:           { paddingHorizontal: 16, paddingVertical: 16 },
   settingsMenuSectionTitle: { fontSize: 11, fontWeight: '700', color: C.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, fontFamily: ARIMO },
   settingsMenuDivider:      { height: StyleSheet.hairlineWidth, backgroundColor: C.border },
