@@ -19,7 +19,7 @@ kubectl config use-context docker-desktop
 
 # ── Build image locally ────────────────────────────────────────────────────────
 echo "▸ Building local image ${DEV_IMAGE}..."
-docker build -f lair/Dockerfile -t "${DEV_IMAGE}" .
+docker build -f app/Dockerfile -t "${DEV_IMAGE}" .
 
 # ── Manifests ──────────────────────────────────────────────────────────────────
 echo "▸ Applying namespace and RBAC..."
