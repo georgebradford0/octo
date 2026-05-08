@@ -119,10 +119,9 @@ pub async fn add(
 
     println!("→ waiting for MCP server to connect (up to 60s)...");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut logs = String::new();
-    loop {
+    let logs = loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        logs = tokio::process::Command::new("kubectl")
+        let logs = tokio::process::Command::new("kubectl")
             .args(["logs", "-n", k8s::NAMESPACE, &format!("deployment/{pod}"), "--since=75s"])
             .output().await
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -132,9 +131,9 @@ pub async fn add(
             || logs.contains(&spawn_fail_marker)
             || logs.contains(&init_fail_marker);
         if done || tokio::time::Instant::now() >= deadline {
-            break;
+            break logs;
         }
-    }
+    };
 
     // Print any [mcp] lines relevant to this server so the user can see what happened.
     for line in logs.lines() {
