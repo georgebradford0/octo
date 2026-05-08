@@ -578,6 +578,11 @@ const ChatPane = memo(function ChatPane({
   const [showScrollBtn,  setShowScrollBtn]  = useState(false)
   const [inputAreaH,     setInputAreaH]     = useState(0)
   const [stopSent,       setStopSent]       = useState(false)
+  // Holds the baseUrl that /history has successfully loaded for. Used by the
+  // persistent /stream effect to gate WS open until history is in place — if
+  // the WS opens first and the server replays buffered events for an in-flight
+  // turn, the subsequent history reconcile can clobber the streaming bubble.
+  const [historyReadyFor, setHistoryReadyFor] = useState<string | null>(null)
   const stopAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const sendMessageRef    = useRef<() => void>(() => {})
@@ -595,6 +600,14 @@ const ChatPane = memo(function ChatPane({
   // very next time it auto-scrolls — engages streamingLockRef immediately
   // after the user message is on screen.
   const scrollOnceAndLockRef = useRef<boolean>(false)
+  // Per-WS counters for the mobile→server keepalive. The WS effect emits
+  // `ping { id: ++clientPingNextRef }` every KEEPALIVE_INTERVAL_MS and the
+  // server replies with `pong { id }` (handled in handleStreamEvent above,
+  // bumps clientPongAckedRef). If clientPingNextRef - clientPongAckedRef
+  // reaches KEEPALIVE_MAX_MISSED, we force-close the WS so the existing
+  // backoff reconnect kicks in. Symmetrical to the server-side check.
+  const clientPingNextRef    = useRef<number>(0)
+  const clientPongAckedRef   = useRef<number>(0)
   const listRef           = useRef<FlatList<Message>>(null)
   const isAtBottomRef     = useRef(true)
   const contentHeightRef  = useRef(0)
@@ -700,6 +713,7 @@ const ChatPane = memo(function ChatPane({
         log(`[chat] stream done cost_usd=${event.cost_usd}`)
         lastToolIdRef.current = null
         streamingLockRef.current = false
+        updateStatus('ready')
         // WS stays open across turns now; reconcile with /history for cost stamp etc.
         loadHistoryRef.current()
         break
@@ -714,6 +728,7 @@ const ChatPane = memo(function ChatPane({
         log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
         lastToolIdRef.current = null
         streamingLockRef.current = false
+        updateStatus('ready')
         loadHistoryRef.current()
         break
       case 'error':
@@ -732,6 +747,13 @@ const ChatPane = memo(function ChatPane({
       case 'ping':
         sendFrame({ type: 'pong', id: event.id })
         break
+      case 'pong':
+        // Reply to one of our pings — bumps the per-WS ack tracker so the
+        // mobile-side liveness checker stops counting it as outstanding.
+        if (event.id > clientPongAckedRef.current) {
+          clientPongAckedRef.current = event.id
+        }
+        break
     }
   }, [updateStatus, sendFrame, onContainersUpdate])
 
@@ -746,8 +768,10 @@ const ChatPane = memo(function ChatPane({
     log(`[chat] loadHistory GET ${baseUrl}/history${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}`)
     fetch(`${baseUrl}/history`, { signal: controller.signal })
       .then(r => { log(`[chat] loadHistory HTTP ${r.status}`); return r.json() })
-      .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number; output?: string }>; is_streaming?: boolean }) => {
-        log(`[chat] history loaded ${data.messages.length} messages is_streaming=${data.is_streaming}`)
+      .then((data: { messages: Array<{ role: string; text: string; cost_usd?: number; output?: string }> }) => {
+        log(`[chat] history loaded ${data.messages.length} messages`)
+        // Mark history loaded for this baseUrl so the gated WS effect can run.
+        setHistoryReadyFor(baseUrl)
         const msgs: Message[] = withPrevRoles(data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],
@@ -768,9 +792,9 @@ const ChatPane = memo(function ChatPane({
           setMessages(cur => [...cur, ...tail.map((m, j) => ({ ...m, prevRole: j === 0 ? (cur.length > 0 ? cur[cur.length - 1].role : undefined) : tail[j - 1].role }))])
         }
         // else identical — no update.
-        // The persistent /stream WS handles is_streaming via its `ready` event,
-        // so loadHistory no longer needs to open a watch-mode connection.
-        updateStatus(data.is_streaming ? 'streaming' : 'ready')
+        // Status is driven entirely by /stream events now (`ready` on connect,
+        // `done`/`interrupted`/`error` at turn end), so loadHistory no longer
+        // needs to drive it from `is_streaming`.
         setTimeout(() => {
           const offset = Math.max(0, contentHeightRef.current - listHeightRef.current)
           listRef.current?.scrollToOffset({ offset, animated: false })
@@ -803,14 +827,28 @@ const ChatPane = memo(function ChatPane({
   // server's first `ready` event arrives. Intentional closes (effect cleanup
   // on baseUrl change / unmount, parent-driven closeWsRef teardown) flag
   // closingRef to suppress the retry loop.
+  //
+  // Gated on `historyReadyFor === baseUrl`: if the WS were to open while
+  // /history is still in flight and the server replays buffered events for an
+  // in-flight turn (child watch path), the subsequent history reconcile can
+  // clobber the streaming bubble. Loading history first puts the canonical
+  // conversation in place before any deltas land.
   useEffect(() => {
+    if (historyReadyFor !== baseUrl) return
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/stream'
     let cancelled = false
     let currentWs: WebSocket | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let pingTimer: ReturnType<typeof setInterval> | null = null
 
     const BASE_BACKOFF_MS = 1000
     const MAX_BACKOFF_MS  = 30_000
+    // Mirror of core::KEEPALIVE_INTERVAL / KEEPALIVE_MAX_MISSED. Don't tighten
+    // these without bumping the server-side defense; the server tolerates 30s
+    // (2 × 15s) of silence before evicting and we want our own check to fire
+    // strictly before that so we drop into reconnect first.
+    const KEEPALIVE_INTERVAL_MS = 15_000
+    const KEEPALIVE_MAX_MISSED  = 2
     let attempt = 0
 
     const connect = () => {
@@ -825,6 +863,25 @@ const ChatPane = memo(function ChatPane({
         log(`[chat] ws open after ${Date.now() - wsStart}ms`)
         // We don't reset `attempt` here — wait for the server's `ready` frame
         // to confirm the channel is actually usable, not just that TCP/WS opened.
+        // Reset per-connection ping counters and start firing pings.
+        clientPingNextRef.current  = 0
+        clientPongAckedRef.current = 0
+        if (pingTimer) clearInterval(pingTimer)
+        pingTimer = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return
+          // Outstanding = pings sent but not yet acked by server.
+          const outstanding = clientPingNextRef.current - clientPongAckedRef.current
+          if (outstanding >= KEEPALIVE_MAX_MISSED) {
+            logE(`[chat] keepalive: ${outstanding} unacked ping(s) — closing WS`)
+            // Close intentionally; the existing onclose path will reconnect
+            // with backoff (and we mustn't suppress that, so leave closingRef
+            // alone — this is a connection problem, not a teardown).
+            ws.close()
+            return
+          }
+          const id = ++clientPingNextRef.current
+          ws.send(encodeClientFrame({ type: 'ping', id }))
+        }, KEEPALIVE_INTERVAL_MS)
       }
       ws.onmessage = (e) => {
         const raw = typeof e.data === 'string' ? e.data : ''
@@ -847,6 +904,7 @@ const ChatPane = memo(function ChatPane({
         log(`[chat] ws closed after ${Date.now() - wsStart}ms code=${e.code} reason=${e.reason}`)
         if (wsRef.current === ws) wsRef.current = null
         currentWs = null
+        if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
         const intentional = closingRef.current
         closingRef.current = false
         if (cancelled || intentional) return
@@ -868,6 +926,10 @@ const ChatPane = memo(function ChatPane({
         clearTimeout(retryTimer)
         retryTimer = null
       }
+      if (pingTimer) {
+        clearInterval(pingTimer)
+        pingTimer = null
+      }
       if (currentWs) {
         log('[chat] tearing down ws (effect cleanup)')
         closingRef.current = true
@@ -875,7 +937,7 @@ const ChatPane = memo(function ChatPane({
         wsRef.current = null
       }
     }
-  }, [baseUrl, handleStreamEvent, reconnectingRef, updateStatus])
+  }, [baseUrl, historyReadyFor, handleStreamEvent, reconnectingRef, updateStatus])
 
   // Restore draft input on mount / baseUrl change.
   // Restore draft on mount / baseUrl change (cold-start fallback; skipped if
@@ -896,6 +958,9 @@ const ChatPane = memo(function ChatPane({
   useEffect(() => {
     const silent = reconnectingRef?.current ?? false
     if (!silent) updateStatus('connecting')
+    // Re-gate the WS effect for the new baseUrl until /history finishes
+    // loading for it.
+    setHistoryReadyFor(null)
     loadHistory()
     return () => { historyAbortRef.current?.abort() }
   }, [baseUrl])
