@@ -23,12 +23,14 @@ export type ServerEvent =
   | { type: 'system';        text: string }
   | { type: 'containers';    containers: ContainerInfo[] }
   | { type: 'ping';          id: number }
+  | { type: 'pong';          id: number }
 
 // ── Client → server frames ────────────────────────────────────────────────────
 
 export type ClientFrame =
   | { type: 'user_message';    text: string }
   | { type: 'interrupt' }
+  | { type: 'ping';            id: number }
   | { type: 'pong';            id: number }
   | { type: 'start_container'; id: string }
   // Legacy: child server's "watch" mode and the original first-frame `{text}`

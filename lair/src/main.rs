@@ -462,6 +462,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 Some(Ok(WsMessage::Text(t))) => {
                     if let Some(id) = parse_pong_id(&t) {
                         if id > last_acked_id { last_acked_id = id; }
+                    } else if let Some(id) = parse_ping_id(&t) {
+                        // Mobile-side keepalive — echo a pong on this same WS.
+                        let json = serde_json::json!({"type":"pong","id":id}).to_string();
+                        if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
                     } else {
                         handle_client_frame(&t, &state).await;
                     }
@@ -482,6 +486,14 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
 fn parse_pong_id(raw: &str) -> Option<u64> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     if v.get("type").and_then(|x| x.as_str())? != "pong" { return None; }
+    v.get("id").and_then(|x| x.as_u64())
+}
+
+/// Parse client → server `ping { id }` frames so we can answer with a `pong`
+/// (mobile-side keepalive — symmetric to the server's outbound pings).
+fn parse_ping_id(raw: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if v.get("type").and_then(|x| x.as_str())? != "ping" { return None; }
     v.get("id").and_then(|x| x.as_u64())
 }
 
