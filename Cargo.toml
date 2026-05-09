@@ -4,6 +4,7 @@ members = [
     "lair",
     "k8s-ops",
     "cli",
+    "relay",
     "tests",
 ]
 resolver = "2"

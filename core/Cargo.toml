@@ -16,3 +16,6 @@ git2         = "0.19"
 snow         = "0.9"
 anyhow       = "1.0"
 tracing      = "0.1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand         = "0.8"
+base64       = "0.22"

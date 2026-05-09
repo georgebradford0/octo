@@ -27,6 +27,7 @@ use octo_core::{
     self,
     build_ephemeral_system_prompt, build_tools_with_mcp, chain_executor_with_mcp,
     completion_chat_event, init_mcp_pool, init_shell_env, load_or_generate_keypair,
+    relay as relay_client, RelaySigner,
     resolve_api_key, resolve_model, run_noise_proxy, run_background_task_tool, send_message,
     spawn_background_task, to_base32, ApiMessage, AnthropicTool, BackgroundTaskParams, ChatEvent,
     ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
@@ -43,7 +44,9 @@ use tower_http::cors::{Any, CorsLayer};
 
 // ── Noise Protocol ────────────────────────────────────────────────────────────
 
-const NOISE_KEY_FILE: &str = "/data/noise_key.bin";
+const NOISE_KEY_FILE:         &str = "/data/noise_key.bin";
+const RELAY_SIGNING_KEY_FILE: &str = "/data/relay_signing_key.bin";
+const DEFAULT_RELAY_URL:      &str = "https://octorelay.directto.link";
 
 // ── Container registry ────────────────────────────────────────────────────────
 
@@ -115,6 +118,13 @@ struct AppState {
     /// mobile keeps showing "connecting" during a reload window instead of
     /// flashing "live" against a half-initialized server.
     ready_rx:             watch::Receiver<bool>,
+    /// Ed25519 keypair used to sign push-notification relay POSTs. Public half
+    /// is exposed via `/info` so mobile can register it with the relay over
+    /// the encrypted Noise tunnel before any relay traffic flows.
+    relay_signer:         Arc<RelaySigner>,
+    /// Configurable so tests/dev can point at a local relay. Empty string
+    /// disables push entirely.
+    relay_url:            String,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -127,7 +137,11 @@ async fn interrupt_handler(State(state): State<Arc<AppState>>) -> StatusCode {
 }
 
 async fn info_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "pubkey": state.pubkey_b32 }))
+    Json(serde_json::json!({
+        "pubkey":               state.pubkey_b32,
+        "relay_signing_pubkey": state.relay_signer.pubkey_b32(),
+        "relay_url":            state.relay_url,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -977,6 +991,18 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         if let Some(json) = chat_event_to_wire_json(&event) {
             buffer_and_fanout(&stream_state_arc.stream_state, json.to_string());
         }
+        // Best-effort push notification. Wakes registered devices even when
+        // the WS isn't connected (app suspended). Mobile fetches the actual
+        // outcome from /history over the Noise tunnel after waking.
+        let signer = stream_state_arc.relay_signer.clone();
+        let url    = stream_state_arc.relay_url.clone();
+        if !url.is_empty() {
+            let title = format!("Background task {}", outcome.status);
+            let body  = outcome.summary.chars().take(120).collect::<String>();
+            tokio::spawn(async move {
+                relay_client::notify(&url, &signer, "task_complete", Some(&title), Some(&body)).await;
+            });
+        }
     });
 
     format!("Background task {task_id} started. The user will be notified when it completes.")
@@ -1103,6 +1129,13 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let (containers_tx, containers_rx) = watch::channel(Vec::<ContainerInfo>::new());
     let (ready_tx, ready_rx)           = watch::channel(false);
 
+    let relay_signer  = Arc::new(RelaySigner::load_or_generate(RELAY_SIGNING_KEY_FILE));
+    let relay_url_str = std::env::var("OCTO_RELAY_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
+    info!("[lair] relay_signing_pubkey={} relay_url={}", relay_signer.pubkey_b32(), relay_url_str);
+
     let state = Arc::new(AppState {
         messages:              Arc::new(Mutex::new(messages)),
         last_cost_usd:         Mutex::new(None),
@@ -1120,6 +1153,8 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         is_streaming:          AtomicBool::new(false),
         stream_state:          Mutex::new(StreamState::new()),
         ready_rx,
+        relay_signer,
+        relay_url:             relay_url_str,
     });
 
     tokio::spawn(poll_containers(state.clone(), ready_tx.clone()));

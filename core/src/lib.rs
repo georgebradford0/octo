@@ -30,6 +30,9 @@ pub use background::{
     completion_chat_event, run_background_task_tool, spawn_background_task,
 };
 
+pub mod relay;
+pub use relay::{RelaySigner, notify as relay_notify};
+
 // ── Shared HTTP client ────────────────────────────────────────────────────────
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

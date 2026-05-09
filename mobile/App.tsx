@@ -26,6 +26,7 @@ import Reanimated, { useAnimatedStyle } from 'react-native-reanimated'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Camera, useCameraDevice, useCodeScanner } from 'react-native-vision-camera'
 import NoiseConnection from './src/NativeNoiseConnection'
+import { registerWithRelay } from './src/registerWithRelay'
 import {
   type ClientFrame,
   type ContainerInfo as WireContainerInfo,
@@ -822,6 +823,10 @@ const ChatPane = memo(function ChatPane({
         log(`[chat] history loaded ${data.messages.length} messages`)
         // Mark history loaded for this baseUrl so the gated WS effect can run.
         setHistoryReadyFor(baseUrl)
+        // First successful tunnel round-trip — register for push notifications
+        // (idempotent, swallows all errors). Fires on the first chat mount per
+        // baseUrl; subsequent calls are short-circuited by an in-module Set.
+        registerWithRelay(baseUrl, log).catch(() => {})
         const msgs: Message[] = withPrevRoles(data.messages.map((m, i) => ({
           id:   `h${i}`,
           role: m.role as Message['role'],

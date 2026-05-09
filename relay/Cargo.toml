@@ -1,0 +1,27 @@
+[package]
+name        = "octo-relay"
+version     = "0.1.0"
+edition     = "2021"
+description = "Push-notification relay for self-hosted lair instances. Holds APNs/FCM credentials and forwards Ed25519-signed POSTs from registered lair pubkeys to authorized device tokens."
+
+[[bin]]
+name = "octo-relay"
+path = "src/main.rs"
+
+[dependencies]
+axum                = "0.7"
+tokio               = { version = "1", features = ["full"] }
+tower-http          = { version = "0.5", features = ["trace"] }
+serde               = { version = "1", features = ["derive"] }
+serde_json          = "1"
+rusqlite            = { version = "0.31", features = ["bundled"] }
+ed25519-dalek       = "2"
+jsonwebtoken        = "9"
+reqwest             = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "json"] }
+anyhow              = "1"
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+base32              = "0.5"
+base64              = "0.22"
+hex                 = "0.4"
+clap                = { version = "4", features = ["derive", "env"] }
