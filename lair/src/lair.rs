@@ -110,6 +110,11 @@ struct AppState {
     /// joiners replay the buffer so they don't miss events emitted before they
     /// connected. Cleared at the start of each new turn.
     stream_state:         Mutex<StreamState>,
+    /// Flips to true once subsystem initialization completes (first containers
+    /// poll done). `handle_stream` waits on this before emitting `ready`, so
+    /// mobile keeps showing "connecting" during a reload window instead of
+    /// flashing "live" against a half-initialized server.
+    ready_rx:             watch::Receiver<bool>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -305,6 +310,16 @@ fn spawn_turn(state: Arc<AppState>, text: String) {
 async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     info!("[lair/stream] WebSocket connection opened");
     let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // Hold off on greeting the client until subsystem init completes (first
+    // K8s poll, or 30s soft cap). Without this, mobile shows "live" the moment
+    // the WS opens against a freshly-restarted pod whose containers list and
+    // MCP pool may still be settling — and a `user_message` sent in that
+    // window can fail with a confusing 404.
+    let mut ready_rx = state.ready_rx.clone();
+    while !*ready_rx.borrow() {
+        if ready_rx.changed().await.is_err() { break; }
+    }
 
     // Atomically snapshot the per-turn buffer (events from any in-flight turn)
     // and register as a subscriber so no events are lost in the gap. The buffer
@@ -536,9 +551,10 @@ async fn terminate_agent_by_id(state: &AppState, id: &str) -> Result<(), String>
 
 // ── Container poller ──────────────────────────────────────────────────────────
 
-async fn poll_containers(state: Arc<AppState>) {
+async fn poll_containers(state: Arc<AppState>, ready_tx: watch::Sender<bool>) {
     info!("[containers] poller starting, initial delay 5s");
     tokio::time::sleep(Duration::from_secs(5)).await;
+    let mut first_iter = true;
     loop {
         debug!("[containers] polling K8s for managed deployments");
         match k8s::list_managed_deployments(&state.kube_client).await {
@@ -571,6 +587,11 @@ async fn poll_containers(state: Arc<AppState>) {
                 }
             }
             Err(e) => error!("[containers] poll error: {e}"),
+        }
+        if first_iter {
+            first_iter = false;
+            ready_tx.send_replace(true);
+            info!("[containers] first poll complete — server marked ready");
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(10)) => {
@@ -1080,6 +1101,7 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let mcp_pool     = init_mcp_pool().await;
     let poll_trigger = Arc::new(Notify::new());
     let (containers_tx, containers_rx) = watch::channel(Vec::<ContainerInfo>::new());
+    let (ready_tx, ready_rx)           = watch::channel(false);
 
     let state = Arc::new(AppState {
         messages:              Arc::new(Mutex::new(messages)),
@@ -1097,9 +1119,22 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         cancel:                Mutex::new(CancellationToken::new()),
         is_streaming:          AtomicBool::new(false),
         stream_state:          Mutex::new(StreamState::new()),
+        ready_rx,
     });
 
-    tokio::spawn(poll_containers(state.clone()));
+    tokio::spawn(poll_containers(state.clone(), ready_tx.clone()));
+
+    // Soft cap so a stuck poller can't keep the UI in "connecting" forever.
+    // 30s is well past the poller's 5s warm-up + a normal first list, but
+    // short enough that mobile recovers if K8s is unreachable.
+    let ready_tx_timeout = ready_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        if !*ready_tx_timeout.borrow() {
+            warn!("[lair] readiness latch timed out after 30s — flipping ready anyway");
+            ready_tx_timeout.send_replace(true);
+        }
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
