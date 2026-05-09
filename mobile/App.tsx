@@ -8,6 +8,7 @@ import {
   Easing,
   FlatList,
   Image,
+  Keyboard,
   NativeModules,
   PermissionsAndroid,
   Platform,
@@ -1051,6 +1052,7 @@ const ChatPane = memo(function ChatPane({
     setMessages(prev => appendMsg(prev, { id: uid(), role: 'user' as const, text }))
     isAtBottomRef.current = true
     setInput('')
+    Keyboard.dismiss()
     AsyncStorage.removeItem(draftKey).catch(() => {})
     updateStatus('streaming')
 
