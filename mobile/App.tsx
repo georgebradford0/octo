@@ -1117,7 +1117,6 @@ const ChatPane = memo(function ChatPane({
           ListEmptyComponent={
             <View style={s.emptyStateWrap}>
               <AppIcon />
-              <Text style={s.emptyState}>What are you building?</Text>
             </View>
           }
           onContentSizeChange={(_, h) => {
@@ -1883,9 +1882,7 @@ const s = StyleSheet.create({
   pane:              { flex: 1, backgroundColor: C.bg },
   messageList:       { flex: 1 },
   messageListContent: { paddingVertical: 16 },
-  emptyStateWrap:    { alignItems: 'center', marginTop: 80, gap: 14 },
-  emptyStateName:    { fontSize: 22, fontWeight: '700', color: C.textMuted, letterSpacing: 2, fontFamily: ARIMO },
-  emptyState:        { textAlign: 'center', color: C.textSecondary, fontSize: 16, fontFamily: ARIMO },
+  emptyStateWrap:    { alignItems: 'center', marginTop: 80 },
   reconnectBanner:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, zIndex: 10 },
   reconnectText:     { fontSize: 12, fontWeight: '600', fontFamily: ARIMO },
 
