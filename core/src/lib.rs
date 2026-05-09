@@ -71,13 +71,13 @@ pub fn config_path() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    pub name:           Option<String>,
-    pub api_key:        Option<String>,
-    pub openai_api_key: Option<String>,
-    pub model:          Option<String>,
+    pub name:              Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub openai_api_key:    Option<String>,
+    pub model:             Option<String>,
     /// Full chat-completions URL (e.g. `https://api.openai.com/v1/chat/completions`).
     /// Sent verbatim — no path is appended.
-    pub api_url:        Option<String>,
+    pub api_url:           Option<String>,
 }
 
 // ── API Backend ───────────────────────────────────────────────────────────────
@@ -139,11 +139,11 @@ pub fn resolve_api_key() -> Option<String> {
         std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty())
             .or_else(|| {
                 let cfg = read_config();
-                cfg.openai_api_key.filter(|s| !s.is_empty()).or(cfg.api_key)
+                cfg.openai_api_key.filter(|s| !s.is_empty()).or(cfg.anthropic_api_key)
             })
     } else {
         std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
-            .or_else(|| read_config().api_key)
+            .or_else(|| read_config().anthropic_api_key)
             .or_else(|| read_key_from_shell_files())
     }
 }

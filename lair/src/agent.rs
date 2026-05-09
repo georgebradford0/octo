@@ -424,13 +424,13 @@ async fn get_config_handler() -> Json<Config> { Json(read_config()) }
 
 async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
     info!(
-        "[agent/config] update model={:?} api_key={}",
+        "[agent/config] update model={:?} anthropic_api_key={}",
         patch.model,
-        if patch.api_key.is_some() { "provided" } else { "unchanged" }
+        if patch.anthropic_api_key.is_some() { "provided" } else { "unchanged" }
     );
     let mut cfg = read_config();
-    if patch.api_key.is_some() { cfg.api_key = patch.api_key; }
-    if patch.model.is_some()   { cfg.model   = patch.model; }
+    if patch.anthropic_api_key.is_some() { cfg.anthropic_api_key = patch.anthropic_api_key; }
+    if patch.model.is_some()             { cfg.model             = patch.model; }
     write_config(&cfg);
     StatusCode::OK
 }

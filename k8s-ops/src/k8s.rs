@@ -636,11 +636,11 @@ pub async fn upsert_child_secret(
 
 /// Subset of lair-secrets that children receive via `child-secrets`.
 pub struct ChildSecrets {
-    pub api_key:        String,
-    pub gh_token:       Option<String>,
-    pub model:          Option<String>,
-    pub api_url:        Option<String>,
-    pub openai_api_key: Option<String>,
+    pub anthropic_api_key: String,
+    pub gh_token:          Option<String>,
+    pub model:             Option<String>,
+    pub api_url:           Option<String>,
+    pub openai_api_key:    Option<String>,
 }
 
 /// Read all current values from the `child-secrets` Secret.
@@ -661,11 +661,11 @@ pub async fn read_child_secrets(client: &Client) -> anyhow::Result<ChildSecrets>
     };
 
     Ok(ChildSecrets {
-        api_key:        read("ANTHROPIC_API_KEY")?,
-        gh_token:       read_opt("GH_TOKEN"),
-        model:          read_opt("MODEL"),
-        api_url:        read_opt("OPENAI_API_URL"),
-        openai_api_key: read_opt("OPENAI_API_KEY"),
+        anthropic_api_key: read("ANTHROPIC_API_KEY")?,
+        gh_token:          read_opt("GH_TOKEN"),
+        model:             read_opt("MODEL"),
+        api_url:           read_opt("OPENAI_API_URL"),
+        openai_api_key:    read_opt("OPENAI_API_KEY"),
     })
 }
 
@@ -946,7 +946,7 @@ pub async fn read_secret_value(client: &Client, secret_name: &str, key: &str) ->
 
 /// All values stored in the `lair-secrets` Secret.
 pub struct LairSecrets {
-    pub api_key:           String,
+    pub anthropic_api_key: String,
     pub noise_private_key: String,
     pub gh_token:          Option<String>,
     pub mcp_config_json:   Option<String>,
@@ -973,7 +973,7 @@ pub async fn read_lair_secrets(client: &Client) -> anyhow::Result<LairSecrets> {
     };
 
     Ok(LairSecrets {
-        api_key:           read("ANTHROPIC_API_KEY")?,
+        anthropic_api_key: read("ANTHROPIC_API_KEY")?,
         noise_private_key: read("NOISE_PRIVATE_KEY")?,
         gh_token:          read_opt("GH_TOKEN"),
         mcp_config_json:   read_opt("MCP_CONFIG_JSON"),

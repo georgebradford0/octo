@@ -32,7 +32,7 @@ fn validate_resolved_config(
             }
             if openai_api_key.is_none() && api_key.is_empty() {
                 return Err(
-                    "OpenAI-compatible setup requires openai_api_key (or api_key as a fallback) for the bearer token".into()
+                    "OpenAI-compatible setup requires openai_api_key (or anthropic_api_key as a fallback) for the bearer token".into()
                 );
             }
             if model.is_none() {
@@ -44,7 +44,7 @@ fn validate_resolved_config(
         None => {
             if api_key.is_empty() {
                 return Err(
-                    "api_key is required for the Anthropic backend (or set api_url for an OpenAI-compatible endpoint)".into()
+                    "anthropic_api_key is required for the Anthropic backend (or set api_url for an OpenAI-compatible endpoint)".into()
                 );
             }
         }
@@ -67,7 +67,7 @@ enum Command {
     Init {
         /// Anthropic API key
         #[arg(long, env = "ANTHROPIC_API_KEY")]
-        api_key: Option<String>,
+        anthropic_api_key: Option<String>,
 
         /// GitHub token (optional, for private repos)
         #[arg(long, env = "GH_TOKEN")]
@@ -87,7 +87,7 @@ enum Command {
         #[arg(long)]
         mcp_config: Option<std::path::PathBuf>,
 
-        /// Path to a config.json file (sets model, api_url, api_key)
+        /// Path to a config.json file (sets model, api_url, anthropic_api_key)
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
@@ -184,7 +184,7 @@ enum ConfigAction {
 
         /// Anthropic API key
         #[arg(long)]
-        api_key: Option<String>,
+        anthropic_api_key: Option<String>,
 
         /// API key for the OpenAI-compatible provider set via --api-url
         #[arg(long)]
@@ -432,7 +432,7 @@ async fn uninstall(yes: bool) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { api_key, gh_token, noise_port, public_port, mcp_config, config } => {
+        Command::Init { anthropic_api_key: api_key, gh_token, noise_port, public_port, mcp_config, config } => {
             // Explicit --config errors hard if missing/invalid; otherwise fall back to
             // ~/.octo/config.json, which read_config() returns as default if absent or malformed.
             let cfg = match &config {
@@ -458,11 +458,11 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // api_key: --api-key flag > config file > error
+            // anthropic_api_key: --anthropic-api-key flag > config file > error
             let resolved_api_key = api_key
-                .or(cfg.api_key)
+                .or(cfg.anthropic_api_key)
                 .ok_or_else(|| anyhow::anyhow!(
-                    "API key is required: pass --api-key, set ANTHROPIC_API_KEY, or include api_key in --config or ~/.octo/config.json"
+                    "Anthropic API key is required: pass --anthropic-api-key, set ANTHROPIC_API_KEY, or include anthropic_api_key in --config or ~/.octo/config.json"
                 ))?;
 
             if let Err(e) = validate_resolved_config(
@@ -552,7 +552,7 @@ async fn main() -> Result<()> {
             };
             match k8s::read_lair_secrets(&client).await {
                 Ok(current) => {
-                    let api_key        = local.api_key       .unwrap_or(current.api_key);
+                    let api_key        = local.anthropic_api_key.unwrap_or(current.anthropic_api_key);
                     let model          = local.model         .or(current.model);
                     let api_url        = local.api_url       .or(current.api_url);
                     let openai_api_key = local.openai_api_key.or(current.openai_api_key);
@@ -696,15 +696,15 @@ async fn main() -> Result<()> {
             match action {
                 ConfigAction::Show => {
                     let s = k8s::read_lair_secrets(&client).await?;
-                    println!("api_key:        {}", mask(&s.api_key));
-                    println!("openai_api_key: {}", s.openai_api_key.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
-                    println!("model:          {}", s.model.as_deref().unwrap_or("(default)"));
-                    println!("api_url:        {}", s.api_url.as_deref().unwrap_or("(Anthropic)"));
-                    println!("gh_token:       {}", s.gh_token.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
+                    println!("anthropic_api_key: {}", mask(&s.anthropic_api_key));
+                    println!("openai_api_key:    {}", s.openai_api_key.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
+                    println!("model:             {}", s.model.as_deref().unwrap_or("(default)"));
+                    println!("api_url:           {}", s.api_url.as_deref().unwrap_or("(Anthropic)"));
+                    println!("gh_token:          {}", s.gh_token.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
                 }
-                ConfigAction::Set { model, api_url, api_key, openai_api_key, gh_token } => {
+                ConfigAction::Set { model, api_url, anthropic_api_key: api_key, openai_api_key, gh_token } => {
                     let current = k8s::read_lair_secrets(&client).await?;
-                    let new_api_key        = api_key       .unwrap_or(current.api_key);
+                    let new_api_key        = api_key       .unwrap_or(current.anthropic_api_key);
                     let new_gh_token       = gh_token      .or(current.gh_token);
                     let new_model          = model         .or(current.model);
                     let new_api_url        = api_url       .or(current.api_url);
@@ -723,10 +723,10 @@ async fn main() -> Result<()> {
 
                     // Also persist to ~/.octo/config.json so reload picks it up.
                     let mut local = octo_k8s_ops::read_config();
-                    local.api_key        = Some(new_api_key);
-                    local.openai_api_key = new_openai_api_key;
-                    local.model          = new_model;
-                    local.api_url        = new_api_url;
+                    local.anthropic_api_key = Some(new_api_key);
+                    local.openai_api_key    = new_openai_api_key;
+                    local.model             = new_model;
+                    local.api_url           = new_api_url;
                     octo_k8s_ops::write_config(&local);
 
                     println!("Config updated in lair-secrets and ~/.octo/config.json.");
