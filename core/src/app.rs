@@ -118,6 +118,12 @@ pub fn messages_to_history(messages: &[ApiMessage], last_cost_usd: Option<f64>) 
             "interrupted" => {
                 result.push(HistMsg { role: "interrupted".to_string(), text: "interrupted".to_string(), cost_usd: None, output: None });
             }
+            "bg_complete" => {
+                let text: String = m.content.iter()
+                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })
+                    .collect();
+                result.push(HistMsg { role: "bg_complete".to_string(), text, cost_usd: None, output: None });
+            }
             "error" => {
                 let text: String = m.content.iter()
                     .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None })

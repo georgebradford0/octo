@@ -59,7 +59,7 @@ interface ContainerInfo {
 
 interface Message {
   id:         string
-  role:       'user' | 'assistant' | 'tool' | 'session' | 'interrupted' | 'error'
+  role:       'user' | 'assistant' | 'tool' | 'session' | 'interrupted' | 'error' | 'bg_complete'
   text:       string
   cost?:      number
   toolUseId?: string
@@ -450,6 +450,19 @@ const MessageBubble = memo(function MessageBubble({
       <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
         <View style={[s.messageWrap, { marginBottom: bubbleBottomMargin, paddingLeft: 28 }]}>
           <Text style={s.interruptedLine} selectable>■ interrupted</Text>
+        </View>
+      </Animated.View>
+    )
+  }
+  if (message.role === 'bg_complete') {
+    // Take just the first line of the injected text — it's prefixed with
+    // "Background task <id> completed (status=…)" which is enough context;
+    // the long body would crowd the chip.
+    const firstLine = message.text.split('\n', 1)[0] || message.text
+    return (
+      <Animated.View style={{ opacity: fadeAnim, marginTop: extraTopMargin }}>
+        <View style={[s.messageWrap, { marginBottom: bubbleBottomMargin, paddingLeft: 28 }]}>
+          <Text style={s.bgCompleteLine} selectable>◇ {firstLine}</Text>
         </View>
       </Animated.View>
     )
@@ -1915,6 +1928,7 @@ const s = StyleSheet.create({
   toolOutputBlock:   { marginTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, paddingTop: 8 },
   toolOutputText:    { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
   interruptedLine:   { fontSize: 16, lineHeight: 24, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
+  bgCompleteLine:    { fontSize: 14, lineHeight: 20, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
   errorLine:         { fontSize: 15, lineHeight: 22, color: C.red, fontFamily: ARIMO, fontStyle: 'italic' },
 
   // Input bar

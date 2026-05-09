@@ -744,6 +744,19 @@ pub struct StreamUsage {
 ///   `ToolUse` blocks retain `id` and `name` (required for API validity) but
 ///   the `input` is dropped (`{}`).
 pub fn compact_history(messages: &[ApiMessage], keep_full: usize) -> Vec<ApiMessage> {
+    // Pre-pass: translate roles that are persisted-only (e.g. `bg_complete`
+    // for background-task injections) into roles the API understands. Done
+    // here rather than at the serialiser layer so every backend gets the
+    // same behaviour automatically.
+    let messages: Vec<ApiMessage> = messages.iter().map(|m| match m.role.as_str() {
+        "bg_complete" => ApiMessage {
+            role:    "user".to_string(),
+            content: m.content.clone(),
+        },
+        _ => m.clone(),
+    }).collect();
+    let messages = &messages[..];
+
     // Collect indices of user messages whose content is entirely ToolResult blocks.
     let tool_result_indices: Vec<usize> = messages.iter().enumerate()
         .filter(|(_, m)| m.role == "user" && m.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })))
@@ -1708,9 +1721,12 @@ fn background_task_note() -> &'static str {
      task that should not block the current chat turn — long builds, multi-step research, \
      repo-wide refactors. The task runs as an isolated agentic loop with the same tools you \
      have, starting from `task_description` as its first user message; it does not inherit \
-     conversation history, so make the description self-contained. The user is notified \
-     in-app via a system message when it completes. Do not use it for trivially short tasks \
-     — the user prefers a direct reply."
+     conversation history, so make the description self-contained. \
+     When it completes, the result is injected into this conversation as a 'Background task … \
+     completed' message and you'll be invoked autonomously to react. If no follow-up action \
+     is genuinely useful, reply with one short acknowledgement line rather than producing \
+     prose; only continue working if the result clearly demands it. Do not use this tool for \
+     trivially short tasks — the user prefers a direct reply."
 }
 
 pub fn build_system_prompt(repo_path: &str) -> String {
