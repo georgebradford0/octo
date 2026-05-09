@@ -36,7 +36,7 @@ spec:
               name: noise
           envFrom:
             # All secret keys (ANTHROPIC_API_KEY, GH_TOKEN, NOISE_PRIVATE_KEY,
-            # MCP_CONFIG_JSON, MODEL, OPENAI_BASE_URL, OPENAI_API_KEY, …) become
+            # MCP_CONFIG_JSON, MODEL, OPENAI_API_URL, OPENAI_API_KEY, …) become
             # env vars verbatim. Same shape child pods use, so adding a key here
             # automatically propagates to children. See k8s-ops::upsert_secret.
             - secretRef:

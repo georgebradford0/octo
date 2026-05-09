@@ -568,7 +568,7 @@ pub async fn upsert_secret(
     noise_private_key_hex: &str,
     mcp_config_json: Option<&str>,
     model: Option<&str>,
-    base_url: Option<&str>,
+    api_url: Option<&str>,
     openai_api_key: Option<&str>,
 ) -> anyhow::Result<()> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
@@ -585,8 +585,8 @@ pub async fn upsert_secret(
     if let Some(m) = model {
         string_data["MODEL"] = serde_json::json!(m);
     }
-    if let Some(u) = base_url {
-        string_data["OPENAI_BASE_URL"] = serde_json::json!(u);
+    if let Some(u) = api_url {
+        string_data["OPENAI_API_URL"] = serde_json::json!(u);
     }
     if let Some(k) = openai_api_key {
         string_data["OPENAI_API_KEY"] = serde_json::json!(k);
@@ -612,7 +612,7 @@ pub async fn upsert_child_secret(
     api_key:        &str,
     gh_token:       Option<&str>,
     model:          Option<&str>,
-    base_url:       Option<&str>,
+    api_url:        Option<&str>,
     openai_api_key: Option<&str>,
 ) -> anyhow::Result<()> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE);
@@ -621,7 +621,7 @@ pub async fn upsert_child_secret(
     });
     if let Some(gh) = gh_token { string_data["GH_TOKEN"]       = json!(gh); }
     if let Some(m)  = model    { string_data["MODEL"]          = json!(m);  }
-    if let Some(u)  = base_url { string_data["OPENAI_BASE_URL"] = json!(u); }
+    if let Some(u)  = api_url  { string_data["OPENAI_API_URL"] = json!(u); }
     if let Some(k)  = openai_api_key { string_data["OPENAI_API_KEY"] = json!(k); }
     let secret: Secret = serde_json::from_value(json!({
         "apiVersion": "v1",
@@ -639,7 +639,7 @@ pub struct ChildSecrets {
     pub api_key:        String,
     pub gh_token:       Option<String>,
     pub model:          Option<String>,
-    pub base_url:       Option<String>,
+    pub api_url:        Option<String>,
     pub openai_api_key: Option<String>,
 }
 
@@ -664,7 +664,7 @@ pub async fn read_child_secrets(client: &Client) -> anyhow::Result<ChildSecrets>
         api_key:        read("ANTHROPIC_API_KEY")?,
         gh_token:       read_opt("GH_TOKEN"),
         model:          read_opt("MODEL"),
-        base_url:       read_opt("OPENAI_BASE_URL"),
+        api_url:        read_opt("OPENAI_API_URL"),
         openai_api_key: read_opt("OPENAI_API_KEY"),
     })
 }
@@ -951,7 +951,7 @@ pub struct LairSecrets {
     pub gh_token:          Option<String>,
     pub mcp_config_json:   Option<String>,
     pub model:             Option<String>,
-    pub base_url:          Option<String>,
+    pub api_url:           Option<String>,
     pub openai_api_key:    Option<String>,
 }
 
@@ -978,7 +978,7 @@ pub async fn read_lair_secrets(client: &Client) -> anyhow::Result<LairSecrets> {
         gh_token:          read_opt("GH_TOKEN"),
         mcp_config_json:   read_opt("MCP_CONFIG_JSON"),
         model:             read_opt("MODEL"),
-        base_url:          read_opt("OPENAI_BASE_URL"),
+        api_url:           read_opt("OPENAI_API_URL"),
         openai_api_key:    read_opt("OPENAI_API_KEY"),
     })
 }

@@ -10,7 +10,7 @@ pub async fn run(
     public_port:    u16,
     mcp_config:     Option<&std::path::Path>,
     model:          Option<&str>,
-    base_url:       Option<&str>,
+    api_url:        Option<&str>,
     openai_api_key: Option<&str>,
 ) -> Result<()> {
     ensure_kubernetes().await?;
@@ -53,8 +53,8 @@ pub async fn run(
     k8s::ensure_rbac(&client).await?;
     k8s::ensure_child_rbac(&client).await?;
     println!("Storing API keys and keypair in cluster secret...");
-    k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex, mcp_config_json.as_deref(), model, base_url, openai_api_key).await?;
-    k8s::upsert_child_secret(&client, api_key, gh_token, model, base_url, openai_api_key).await?;
+    k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex, mcp_config_json.as_deref(), model, api_url, openai_api_key).await?;
+    k8s::upsert_child_secret(&client, api_key, gh_token, model, api_url, openai_api_key).await?;
     println!("Configuring GHCR image pull credentials...");
     k8s::ensure_ghcr_pull_secret(&client, gh_token).await?;
     println!("Provisioning lair data volume...");

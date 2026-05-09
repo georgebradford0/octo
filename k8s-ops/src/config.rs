@@ -19,7 +19,7 @@ pub struct Config {
     pub api_key:         Option<String>,
     pub openai_api_key:  Option<String>,
     pub model:           Option<String>,
-    pub base_url:        Option<String>,
+    pub api_url:         Option<String>,
 }
 
 pub fn read_config() -> Config {

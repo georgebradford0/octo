@@ -17,18 +17,18 @@ fn mask(s: &str) -> String {
 fn validate_resolved_config(
     api_key:        &str,
     openai_api_key: Option<&str>,
-    base_url:       Option<&str>,
+    api_url:        Option<&str>,
     model:          Option<&str>,
 ) -> Result<(), String> {
     let api_key        = api_key.trim();
     let openai_api_key = openai_api_key.map(str::trim).filter(|s| !s.is_empty());
-    let base_url       = base_url      .map(str::trim).filter(|s| !s.is_empty());
+    let api_url        = api_url       .map(str::trim).filter(|s| !s.is_empty());
     let model          = model         .map(str::trim).filter(|s| !s.is_empty());
 
-    match base_url {
+    match api_url {
         Some(url) => {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(format!("base_url must start with http:// or https:// (got: {url})"));
+                return Err(format!("api_url must start with http:// or https:// (got: {url})"));
             }
             if openai_api_key.is_none() && api_key.is_empty() {
                 return Err(
@@ -44,7 +44,7 @@ fn validate_resolved_config(
         None => {
             if api_key.is_empty() {
                 return Err(
-                    "api_key is required for the Anthropic backend (or set base_url for an OpenAI-compatible endpoint)".into()
+                    "api_key is required for the Anthropic backend (or set api_url for an OpenAI-compatible endpoint)".into()
                 );
             }
         }
@@ -87,7 +87,7 @@ enum Command {
         #[arg(long)]
         mcp_config: Option<std::path::PathBuf>,
 
-        /// Path to a config.json file (sets model, base_url, api_key)
+        /// Path to a config.json file (sets model, api_url, api_key)
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
@@ -177,15 +177,16 @@ enum ConfigAction {
         #[arg(long)]
         model: Option<String>,
 
-        /// OpenAI-compatible base URL (leave empty to use Anthropic)
+        /// Full OpenAI-compatible chat-completions URL, e.g.
+        /// https://api.openai.com/v1/chat/completions (leave empty to use Anthropic)
         #[arg(long)]
-        base_url: Option<String>,
+        api_url: Option<String>,
 
         /// Anthropic API key
         #[arg(long)]
         api_key: Option<String>,
 
-        /// API key for the OpenAI-compatible provider set via --base-url
+        /// API key for the OpenAI-compatible provider set via --api-url
         #[arg(long)]
         openai_api_key: Option<String>,
 
@@ -467,7 +468,7 @@ async fn main() -> Result<()> {
             if let Err(e) = validate_resolved_config(
                 &resolved_api_key,
                 cfg.openai_api_key.as_deref(),
-                cfg.base_url.as_deref(),
+                cfg.api_url.as_deref(),
                 cfg.model.as_deref(),
             ) {
                 eprintln!("error: invalid config: {e}");
@@ -481,7 +482,7 @@ async fn main() -> Result<()> {
                 public_port,
                 mcp_config.as_deref(),
                 cfg.model.as_deref(),
-                cfg.base_url.as_deref(),
+                cfg.api_url.as_deref(),
                 cfg.openai_api_key.as_deref(),
             ).await?;
         }
@@ -553,13 +554,13 @@ async fn main() -> Result<()> {
                 Ok(current) => {
                     let api_key        = local.api_key       .unwrap_or(current.api_key);
                     let model          = local.model         .or(current.model);
-                    let base_url       = local.base_url      .or(current.base_url);
+                    let api_url        = local.api_url       .or(current.api_url);
                     let openai_api_key = local.openai_api_key.or(current.openai_api_key);
 
                     if let Err(e) = validate_resolved_config(
                         &api_key,
                         openai_api_key.as_deref(),
-                        base_url.as_deref(),
+                        api_url.as_deref(),
                         model.as_deref(),
                     ) {
                         eprintln!("error: invalid config: {e}");
@@ -573,7 +574,7 @@ async fn main() -> Result<()> {
                         &current.noise_private_key,
                         current.mcp_config_json.as_deref(),
                         model.as_deref(),
-                        base_url.as_deref(),
+                        api_url.as_deref(),
                         openai_api_key.as_deref(),
                     ).await?;
                     k8s::ensure_child_rbac(&client).await?;
@@ -582,7 +583,7 @@ async fn main() -> Result<()> {
                         &api_key,
                         current.gh_token.as_deref(),
                         model.as_deref(),
-                        base_url.as_deref(),
+                        api_url.as_deref(),
                         openai_api_key.as_deref(),
                     ).await?;
                     println!("Config synced to lair-secrets and child-secrets.");
@@ -698,15 +699,15 @@ async fn main() -> Result<()> {
                     println!("api_key:        {}", mask(&s.api_key));
                     println!("openai_api_key: {}", s.openai_api_key.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
                     println!("model:          {}", s.model.as_deref().unwrap_or("(default)"));
-                    println!("base_url:       {}", s.base_url.as_deref().unwrap_or("(Anthropic)"));
+                    println!("api_url:        {}", s.api_url.as_deref().unwrap_or("(Anthropic)"));
                     println!("gh_token:       {}", s.gh_token.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
                 }
-                ConfigAction::Set { model, base_url, api_key, openai_api_key, gh_token } => {
+                ConfigAction::Set { model, api_url, api_key, openai_api_key, gh_token } => {
                     let current = k8s::read_lair_secrets(&client).await?;
                     let new_api_key        = api_key       .unwrap_or(current.api_key);
                     let new_gh_token       = gh_token      .or(current.gh_token);
                     let new_model          = model         .or(current.model);
-                    let new_base_url       = base_url      .or(current.base_url);
+                    let new_api_url        = api_url       .or(current.api_url);
                     let new_openai_api_key = openai_api_key.or(current.openai_api_key);
 
                     k8s::upsert_secret(
@@ -716,7 +717,7 @@ async fn main() -> Result<()> {
                         &current.noise_private_key,
                         current.mcp_config_json.as_deref(),
                         new_model.as_deref(),
-                        new_base_url.as_deref(),
+                        new_api_url.as_deref(),
                         new_openai_api_key.as_deref(),
                     ).await?;
 
@@ -725,7 +726,7 @@ async fn main() -> Result<()> {
                     local.api_key        = Some(new_api_key);
                     local.openai_api_key = new_openai_api_key;
                     local.model          = new_model;
-                    local.base_url       = new_base_url;
+                    local.api_url        = new_api_url;
                     octo_k8s_ops::write_config(&local);
 
                     println!("Config updated in lair-secrets and ~/.octo/config.json.");

@@ -75,7 +75,9 @@ pub struct Config {
     pub api_key:        Option<String>,
     pub openai_api_key: Option<String>,
     pub model:          Option<String>,
-    pub base_url:       Option<String>,
+    /// Full chat-completions URL (e.g. `https://api.openai.com/v1/chat/completions`).
+    /// Sent verbatim — no path is appended.
+    pub api_url:        Option<String>,
 }
 
 // ── API Backend ───────────────────────────────────────────────────────────────
@@ -83,21 +85,22 @@ pub struct Config {
 #[derive(Clone)]
 pub enum ApiBackend {
     Anthropic,
-    OpenAi { base_url: String },
+    /// `api_url` is the full chat-completions endpoint, used as the POST target
+    /// without modification.
+    OpenAi { api_url: String },
 }
 
 impl ApiBackend {
     /// Resolve the backend from environment then config.
-    /// `OPENAI_BASE_URL` env var or `config.base_url` → OpenAI-compatible.
+    /// `OPENAI_API_URL` env var or `config.api_url` → OpenAI-compatible.
     /// Otherwise → Anthropic.
     pub fn resolve() -> Self {
-        let url = std::env::var("OPENAI_BASE_URL").ok().filter(|s| !s.is_empty())
-            .or_else(|| read_config().base_url.filter(|s| !s.is_empty()));
+        let url = std::env::var("OPENAI_API_URL").ok().filter(|s| !s.is_empty())
+            .or_else(|| read_config().api_url.filter(|s| !s.is_empty()));
         match url {
             Some(u) => {
-                let base = u.trim_end_matches('/').to_string();
-                info!("[core] using OpenAI-compatible backend: {base}");
-                ApiBackend::OpenAi { base_url: base }
+                info!("[core] using OpenAI-compatible backend: {u}");
+                ApiBackend::OpenAi { api_url: u }
             }
             None => {
                 debug!("[core] using Anthropic backend");
@@ -129,10 +132,10 @@ pub fn write_config(cfg: &Config) {
 pub fn resolve_api_key() -> Option<String> {
     // When using an OpenAI-compatible backend, OPENAI_API_KEY takes priority over
     // ANTHROPIC_API_KEY so the correct provider key is sent as the Bearer token.
-    let openai_base = std::env::var("OPENAI_BASE_URL").ok().filter(|s| !s.is_empty())
-        .or_else(|| read_config().base_url.filter(|s| !s.is_empty()));
+    let openai_url = std::env::var("OPENAI_API_URL").ok().filter(|s| !s.is_empty())
+        .or_else(|| read_config().api_url.filter(|s| !s.is_empty()));
 
-    if openai_base.is_some() {
+    if openai_url.is_some() {
         std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty())
             .or_else(|| {
                 let cfg = read_config();
@@ -1214,7 +1217,7 @@ pub async fn call_turn(
             Ok((blocks, stop_reason, stream_usage))
         }
 
-        ApiBackend::OpenAi { base_url } => {
+        ApiBackend::OpenAi { api_url } => {
             let tools_json  = tools_to_openai(&all_tools);
             let messages_oa = messages_to_openai(system, &compacted);
 
@@ -1227,10 +1230,9 @@ pub async fn call_turn(
                 "messages":   messages_oa,
             });
 
-            let url = format!("{base_url}/chat/completions");
             let response = tokio::select! {
                 res = http_client()
-                    .post(&url)
+                    .post(api_url)
                     .header("Authorization",  format!("Bearer {api_key}"))
                     .header("content-type",   "application/json")
                     .header("accept",         "text/event-stream")
@@ -1365,7 +1367,7 @@ pub async fn send_message(
                 (blocks, stop_reason, usage)
             }
 
-            ApiBackend::OpenAi { base_url } => {
+            ApiBackend::OpenAi { api_url } => {
                 let tools_json  = tools_to_openai(&all_tools);
                 let messages_oa = messages_to_openai(system, &compacted);
                 let body = serde_json::json!({
@@ -1376,10 +1378,9 @@ pub async fn send_message(
                     "tools":      tools_json,
                     "messages":   messages_oa,
                 });
-                let url = format!("{base_url}/chat/completions");
                 let response = tokio::select! {
                     res = http_client()
-                        .post(&url)
+                        .post(api_url)
                         .header("Authorization", format!("Bearer {api_key}"))
                         .header("content-type",  "application/json")
                         .header("accept",        "text/event-stream")
