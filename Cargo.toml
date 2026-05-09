@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "core",
-    "app",
+    "lair",
     "k8s-ops",
     "cli",
     "tests",

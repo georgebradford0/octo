@@ -38,9 +38,9 @@ pub fn effective_image() -> String {
     }
 }
 /// Child Deployments override the image's default ENTRYPOINT (which runs the
-/// lair role) with this `command:` so the same `octo-app` binary boots in the
+/// lair role) with this `command:` so the same `octo-lair` binary boots in the
 /// `agent` role instead.
-const CHILD_COMMAND: &[&str] = &["/usr/local/bin/octo-app", "--role", "agent"];
+const CHILD_COMMAND: &[&str] = &["/usr/local/bin/octo-lair", "--role", "agent"];
 const LAIR_NAME:   &str = "lair";
 const CHILD_NAME:  &str = "child";
 
@@ -433,7 +433,7 @@ pub async fn update_and_restart_all(client: &Client) -> anyhow::Result<Vec<Strin
     let mut updated = Vec::new();
     for (name, container_name, is_child) in &targets {
         // Children additionally get migrated to the dedicated `child` SA,
-        // `child-secrets` envFrom, and the merged `octo-app --role agent`
+        // `child-secrets` envFrom, and the merged `octo-lair --role agent`
         // command on every reload, so existing pre-merge deployments
         // transition without a destroy/recreate. Lair keeps its own SA/secret
         // and runs the image's default ENTRYPOINT.

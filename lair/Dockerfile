@@ -7,28 +7,28 @@ ENV OPENSSL_NO_VENDOR=1
 
 WORKDIR /build
 
-# Workspace manifest includes the crates needed to build the merged app binary.
+# Workspace manifest includes the crates needed to build the merged lair binary.
 # tests/ and cli/ are not built inside the image — they're for local use only.
-RUN printf '[workspace]\nmembers = ["core", "app", "k8s-ops"]\nresolver = "2"\n' > Cargo.toml
+RUN printf '[workspace]\nmembers = ["core", "lair", "k8s-ops"]\nresolver = "2"\n' > Cargo.toml
 
 COPY Cargo.lock ./
 COPY core/Cargo.toml    core/
-COPY app/Cargo.toml     app/
+COPY lair/Cargo.toml    lair/
 COPY k8s-ops/Cargo.toml k8s-ops/
 
 # Stub sources for dep-caching layer.
-RUN mkdir -p core/src app/src k8s-ops/src && \
+RUN mkdir -p core/src lair/src k8s-ops/src && \
     echo '' > core/src/lib.rs && \
-    echo 'fn main() {}' > app/src/main.rs && \
+    echo 'fn main() {}' > lair/src/main.rs && \
     echo '' > k8s-ops/src/lib.rs
 
 RUN cargo fetch
 
 COPY core/src    core/src
-COPY app/src     app/src
+COPY lair/src    lair/src
 COPY k8s-ops/src k8s-ops/src
 
-RUN cargo build --release -p octo-app
+RUN cargo build --release -p octo-lair
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -50,7 +50,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl git gpg && \
     # uvx (via uv)
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
 
-COPY --from=builder /build/target/release/octo-app /usr/local/bin/octo-app
+COPY --from=builder /build/target/release/octo-lair /usr/local/bin/octo-lair
 
 LABEL org.opencontainers.image.source=https://github.com/georgebradford0/octo
 
@@ -60,5 +60,5 @@ ENV OCTO_DATA_DIR=/data
 ENV NOISE_KEY_FILE=/data/noise_key.bin
 
 # Default ENTRYPOINT runs the parent (lair) role. Child Deployments override
-# this with `command: ["/usr/local/bin/octo-app", "--role", "server"]`.
-ENTRYPOINT ["/usr/local/bin/octo-app", "--role", "lair"]
+# this with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]`.
+ENTRYPOINT ["/usr/local/bin/octo-lair", "--role", "lair"]

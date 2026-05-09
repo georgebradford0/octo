@@ -1,11 +1,11 @@
 [package]
-name        = "octo-app"
+name        = "octo-lair"
 version     = "0.5.2"
 edition     = "2021"
-description = "octo merged HTTP/WebSocket server — runs either the lair (parent) or server (child) role from a single binary"
+description = "octo merged HTTP/WebSocket server — runs either the lair (parent) or agent (child) role from a single binary"
 
 [[bin]]
-name = "octo-app"
+name = "octo-lair"
 path = "src/main.rs"
 
 [dependencies]
