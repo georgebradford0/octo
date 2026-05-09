@@ -1,6 +1,6 @@
 [package]
 name        = "octo-app"
-version     = "0.5.1"
+version     = "0.5.2"
 edition     = "2021"
 description = "octo merged HTTP/WebSocket server — runs either the lair (parent) or server (child) role from a single binary"
 
