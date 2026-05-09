@@ -137,22 +137,26 @@ const DEV_CONN: NoiseConnectionInfo = {
 
 const ARIMO  = 'Arimo'
 const NUNITO = 'Nunito'
+const MONO   = Platform.OS === 'ios' ? 'Menlo' : 'monospace'
 
 // ── Colours ────────────────────────────────────────────────────────────────────
+// "Editorial Terminal" — warm cream paper, deep ink-navy, oceanic teal accent.
+// The palette references both marine field-research (octo / octopus) and the
+// printed page: ink on paper instead of pixels on glass.
 
 const C = {
-  bg:            '#ffffff',
-  surface:       '#f2f2f7',
-  border:        '#d1d1d6',
-  accent:        '#2563eb',
-  accentLight:   '#eff4ff',
-  green:         '#22863a',
-  yellow:        '#b45309',
-  red:           '#dc2626',
-  textPrimary:   '#1c1c1e',
-  textSecondary: '#6b6b6b',
-  textMuted:     '#aeaeb2',
-  inputBorder:   '#d1d1d6',
+  bg:            '#F4EFE3',  // warm cream paper
+  surface:       '#EBE4D2',  // deeper cream surface (code blocks, raised tints)
+  border:        '#D6CDB6',  // hairline divider
+  accent:        '#0B6E73',  // deep oceanic teal — "live" / tools / accents
+  accentLight:   '#DEE9E5',  // teal-tinted cream
+  green:         '#0B6E73',  // alias of accent: "live" status
+  yellow:        '#8E6B14',  // dark goldenrod: warnings / connecting
+  red:           '#7E2926',  // oxblood: errors / destructive
+  textPrimary:   '#0E1A24',  // deep ink-navy with the faintest cool undertone
+  textSecondary: '#4F5763',  // body grey
+  textMuted:     '#8E8775',  // muted warm grey: placeholders / status meta
+  inputBorder:   '#D6CDB6',
 }
 
 const statusColor = (st: ConnStatus): string => {
@@ -389,6 +393,29 @@ function OrbitingArc({ size = 48, thickness = 3, durationMs = 1100 }: {
   )
 }
 
+// ── PaperPlane ────────────────────────────────────────────────────────────────
+// The canonical "send" mark, rendered with two stacked View triangles:
+//   1. A large right-pointing triangle in white — the wing silhouette.
+//   2. A smaller triangle in the button's background colour, sitting on the
+//      bottom edge — this "notch" creates the V-cut that reads as the
+//      paper-plane fold.
+// The whole assembly is rotated -22° so it reads as a plane in flight, not a
+// play-button. When disabled the wing dims and the notch tracks the disabled
+// surface colour so the cutout still works.
+
+function PaperPlane({ disabled = false }: { disabled?: boolean }) {
+  const wingColor  = disabled ? C.textMuted : '#FFFFFF'
+  const notchColor = disabled ? C.surface  : '#4A90E2'
+  return (
+    <View style={s.paperPlaneWrap}>
+      <View style={s.paperPlaneTilt}>
+        <View style={[s.paperPlaneWing,  { borderLeftColor: wingColor }]} />
+        <View style={[s.paperPlaneNotch, { borderLeftColor: notchColor }]} />
+      </View>
+    </View>
+  )
+}
+
 // ── @ completion helpers ───────────────────────────────────────────────────────
 
 function parseAtQuery(text: string): { atIndex: number; dirPart: string; filePart: string } | null {
@@ -567,7 +594,8 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
       <View style={s.scannerOverlay}>
         <View style={s.scannerTopBar}>
           <Image source={require('./assets/icon.png')} style={s.scannerIcon} />
-          <Text style={s.scannerTitle}>Scan QR code</Text>
+          <Text style={s.scannerTitle}>Scan Session QR</Text>
+          <Text style={s.scannerSubtitle}>Point at the code shown by your octo server</Text>
         </View>
         <View style={[s.scannerReticle, { width: reticleSize, height: reticleSize }]}>
           <View style={[s.scannerCorner, s.cornerTL]} />
@@ -1136,6 +1164,8 @@ const ChatPane = memo(function ChatPane({
           ListEmptyComponent={
             <View style={s.emptyStateWrap}>
               <AppIcon />
+              <View style={s.emptyStateRule} />
+              <Text style={s.emptyStateTagline}>Awaiting Instructions</Text>
             </View>
           }
           onContentSizeChange={(_, h) => {
@@ -1205,7 +1235,7 @@ const ChatPane = memo(function ChatPane({
               // the button at reduced opacity until the server's
               // interrupt_ack (or the 3 s timeout fallback in stopAckTimerRef).
               <View style={s.inputBtnSlot}>
-                <OrbitingArc size={48} thickness={3} />
+                <OrbitingArc size={56} thickness={3} />
                 <TouchableOpacity
                   style={[s.stopBtnInline, stopSent && { opacity: 0.4 }]}
                   disabled={stopSent}
@@ -1230,7 +1260,7 @@ const ChatPane = memo(function ChatPane({
                 disabled={!input.trim()}
                 activeOpacity={0.75}
               >
-                <Text style={s.sendBtnIcon}>↑</Text>
+                <PaperPlane disabled={!input.trim()} />
               </TouchableOpacity>
             )}
           </View>
@@ -1254,7 +1284,7 @@ const ChatPane = memo(function ChatPane({
         )}
 
         {status === 'error' && (
-          <View style={[s.reconnectBanner, { backgroundColor: '#fee2e2', borderBottomColor: '#fecaca' }]} pointerEvents="none">
+          <View style={[s.reconnectBanner, { backgroundColor: C.surface, borderBottomColor: C.red }]} pointerEvents="none">
             <Text style={[s.reconnectText, { color: C.red }]}>Connection error</Text>
           </View>
         )}
@@ -1630,7 +1660,8 @@ function AppInner() {
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
         <View style={s.setupCenter}>
           <AppIcon />
-          <Text style={s.setupTitle}>octo</Text>
+          <Text style={s.setupTitle}>OCTO</Text>
+          <View style={s.setupRule} />
           <Text style={s.setupError}>{tunnelError}</Text>
           <TouchableOpacity style={s.setupBtn} onPress={() => setConn(null)}>
             <Text style={s.setupBtnText}>back</Text>
@@ -1645,9 +1676,13 @@ function AppInner() {
     return (
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
         <View style={s.setupCenter}>
-          <TouchableOpacity onPress={requestCameraAndScan}>
+          <TouchableOpacity onPress={requestCameraAndScan} activeOpacity={0.85}>
             <AppIcon pulse />
           </TouchableOpacity>
+          <Text style={s.setupTitle}>OCTO</Text>
+          <View style={s.setupRule} />
+          <Text style={s.setupSubtitle}>Distributed Coding Agents</Text>
+          <Text style={s.setupTagline}>Tap the mark to scan your session QR code.</Text>
         </View>
       </SafeAreaView>
     )
@@ -1692,7 +1727,11 @@ function AppInner() {
               onPress={openSidebar}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Text style={s.hamburgerBtnText}>≡</Text>
+              <View style={s.hamburgerBars}>
+                <View style={s.hamburgerBar} />
+                <View style={s.hamburgerBar} />
+                <View style={s.hamburgerBar} />
+              </View>
             </TouchableOpacity>
             <View style={[s.connStatusPill, { backgroundColor: statusColor(chatStatus) + '22' }]}>
               <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
@@ -1772,13 +1811,16 @@ function AppInner() {
             </Animated.View>
             <Animated.View style={[s.sidebar, { transform: [{ translateX: sidebarAnim.interpolate({ inputRange: [0, 1], outputRange: [-280, 0] }) }] }]}>
               <View style={s.sidebarHeader}>
-                <Text style={s.sidebarBrand}>octo</Text>
+                <View>
+                  <Text style={s.sidebarBrand}>OCTO</Text>
+                  <Text style={s.sidebarBrandSub}>Agent Console</Text>
+                </View>
                 <TouchableOpacity onPress={closeSidebar} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                   <Text style={s.sidebarCloseIcon}>✕</Text>
                 </TouchableOpacity>
               </View>
               <View style={s.sidebarSection}>
-                <Text style={s.settingsMenuSectionTitle}>repos</Text>
+                <Text style={s.settingsMenuSectionTitle}>Repositories</Text>
               </View>
               <ScrollView
                 style={{ flex: 1 }}
@@ -1847,131 +1889,155 @@ export default function App() {
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  // Setup / connecting / picker
-  setupSafe:    { flex: 1, backgroundColor: '#F7F7F8' },
-  setupCenter:  { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40, gap: 16 },
-  setupTitle:   { fontSize: 26, fontWeight: '700', color: C.textPrimary, letterSpacing: 2, fontFamily: NUNITO },
-  setupDesc:    { fontSize: 15, color: C.textSecondary, textAlign: 'center', lineHeight: 22, fontFamily: ARIMO },
-  setupStatus:  { fontSize: 15, color: C.textSecondary, textAlign: 'center', fontFamily: ARIMO },
-  setupError:   { fontSize: 14, color: C.red, textAlign: 'center', lineHeight: 20, fontFamily: ARIMO },
-  setupBtn:     { backgroundColor: '#D16E50', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 32, alignItems: 'center', marginTop: 8 },
-  setupBtnText: { color: '#F7F7F8', fontWeight: '700', fontSize: 16, fontFamily: NUNITO },
+  // Setup / connection
+  setupSafe:     { flex: 1, backgroundColor: C.bg },
+  setupCenter:   { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40, gap: 12 },
+  setupTitle:    { fontSize: 38, fontWeight: '800', color: C.textPrimary, letterSpacing: 9, fontFamily: NUNITO, marginTop: 18 },
+  setupSubtitle: { fontSize: 10, color: C.textSecondary, letterSpacing: 3.5, textTransform: 'uppercase', fontFamily: MONO, fontWeight: '700' },
+  setupRule:     { width: 28, height: 1, backgroundColor: C.textPrimary, marginVertical: 2, opacity: 0.4 },
+  setupTagline:  { fontSize: 13, color: C.textSecondary, textAlign: 'center', lineHeight: 21, fontFamily: ARIMO, fontStyle: 'italic', marginTop: 14, maxWidth: 280 },
+  setupDesc:     { fontSize: 14, color: C.textSecondary, textAlign: 'center', lineHeight: 22, fontFamily: ARIMO },
+  setupStatus:   { fontSize: 11, color: C.textMuted, textAlign: 'center', fontFamily: MONO, letterSpacing: 1.5, textTransform: 'uppercase' },
+  setupError:    { fontSize: 12, color: C.red, textAlign: 'center', lineHeight: 18, fontFamily: MONO, letterSpacing: 0.4 },
+  setupBtn:      { borderRadius: 0, borderWidth: 1.5, borderColor: C.textPrimary, paddingVertical: 13, paddingHorizontal: 36, marginTop: 14, backgroundColor: 'transparent' },
+  setupBtnText:  { color: C.textPrimary, fontWeight: '800', fontSize: 11, letterSpacing: 4, textTransform: 'uppercase', fontFamily: ARIMO },
+
+  // App icon mark
+  creatureImg:        { width: 116, height: 116, borderRadius: 26, marginBottom: 8 },
+
+  // Inline transition overlays (starting / reconnecting)
+  startingOverlay:    { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', gap: 18, paddingHorizontal: 32 },
+  startingText:       { fontSize: 11, color: C.textSecondary, fontFamily: MONO, letterSpacing: 2.5, textTransform: 'uppercase', fontWeight: '700' },
+  startingErrorText:  { fontSize: 12, fontWeight: '800', color: C.red, fontFamily: ARIMO, textAlign: 'center', letterSpacing: 3, textTransform: 'uppercase' },
+  startingErrorDetail:{ fontSize: 12, color: C.textSecondary, fontFamily: MONO, textAlign: 'center', lineHeight: 18 },
+  startingCancelBtn:  { marginTop: 10, paddingVertical: 11, paddingHorizontal: 28, borderRadius: 0, borderWidth: 1.5, borderColor: C.textPrimary },
+  startingCancelText: { fontSize: 11, color: C.textPrimary, fontFamily: ARIMO, letterSpacing: 4, textTransform: 'uppercase', fontWeight: '800' },
 
   // QR scanner
-  creatureImg:       { width: 120, height: 120, borderRadius: 26, marginBottom: 12 },
-  startingOverlay:    { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', gap: 16, paddingHorizontal: 32 },
-  startingText:       { fontSize: 15, color: C.textSecondary, fontFamily: ARIMO },
-  startingErrorText:  { fontSize: 16, fontWeight: '600', color: C.red, fontFamily: ARIMO, textAlign: 'center' },
-  startingErrorDetail:{ fontSize: 13, color: C.textSecondary, fontFamily: ARIMO, textAlign: 'center', lineHeight: 18 },
-  startingCancelBtn:  { marginTop: 8, paddingVertical: 10, paddingHorizontal: 28, borderRadius: 10, borderWidth: 1, borderColor: C.border },
-  startingCancelText: { fontSize: 15, color: C.textPrimary, fontFamily: ARIMO },
-  scannerFull:       { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
-  scannerOverlay:    { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 60 },
-  scannerTopBar:     { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
-  scannerIcon:       { width: 64, height: 64, borderRadius: 14, marginBottom: 8 },
-  scannerTitle:      { color: '#fff', fontSize: 20, fontWeight: '700', fontFamily: ARIMO },
-  scannerSubtitle:   { color: 'rgba(255,255,255,0.6)', fontSize: 14, textAlign: 'center', lineHeight: 20, fontFamily: ARIMO },
+  scannerFull:       { ...StyleSheet.absoluteFillObject, backgroundColor: '#0A0E12', zIndex: 100 },
+  scannerOverlay:    { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'space-between', paddingVertical: 80 },
+  scannerTopBar:     { alignItems: 'center', gap: 6, paddingHorizontal: 32 },
+  scannerIcon:       { width: 56, height: 56, borderRadius: 13, marginBottom: 6 },
+  scannerTitle:      { color: '#F4EFE3', fontSize: 12, fontWeight: '800', fontFamily: ARIMO, letterSpacing: 4, textTransform: 'uppercase' },
+  scannerSubtitle:   { color: 'rgba(244,239,227,0.55)', fontSize: 11, textAlign: 'center', lineHeight: 17, fontFamily: MONO, letterSpacing: 1, marginTop: 4 },
   scannerReticle:    { width: 240, height: 240 },
-  scannerCorner:     { position: 'absolute', width: 28, height: 28, borderColor: C.accent, borderWidth: 3 },
-  cornerTL:          { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 4 },
-  cornerTR:          { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 4 },
-  cornerBL:          { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 4 },
-  cornerBR:          { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 4 },
-  scannerCancel:     { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 24, paddingVertical: 12, paddingHorizontal: 32 },
-  scannerCancelText: { color: '#fff', fontSize: 16, fontWeight: '600', fontFamily: ARIMO },
-  scannerError:      { color: C.red, fontSize: 16, textAlign: 'center', marginBottom: 24, fontFamily: ARIMO },
+  scannerCorner:     { position: 'absolute', width: 32, height: 32, borderColor: '#F4EFE3', borderWidth: 1.5 },
+  cornerTL:          { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0 },
+  cornerTR:          { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0 },
+  cornerBL:          { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0 },
+  cornerBR:          { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0 },
+  scannerCancel:     { borderWidth: 1, borderColor: 'rgba(244,239,227,0.45)', borderRadius: 0, paddingVertical: 12, paddingHorizontal: 36 },
+  scannerCancelText: { color: '#F4EFE3', fontSize: 11, fontWeight: '800', fontFamily: ARIMO, letterSpacing: 4, textTransform: 'uppercase' },
+  scannerError:      { color: '#E07057', fontSize: 13, textAlign: 'center', marginBottom: 24, fontFamily: MONO, letterSpacing: 1 },
 
   // Chat layout
   safe:         { flex: 1, backgroundColor: C.bg },
   paneArea:     { flex: 1 },
 
   // Header
-  header:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  header:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border, backgroundColor: C.bg },
   headerLeft:      { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  backBtn:         { paddingRight: 4, paddingVertical: 2 },
-  backBtnText:     { fontSize: 32, lineHeight: 34, color: C.accent, fontWeight: '300', fontFamily: ARIMO },
-  clearBtn:        { paddingVertical: 4, paddingHorizontal: 2 },
-  clearBtnText:    { fontSize: 14, color: C.textSecondary, fontWeight: '500', fontFamily: ARIMO },
-  headerTitle:     { fontSize: 15, fontWeight: '600', color: C.textPrimary, fontFamily: ARIMO },
-  connDot:         { width: 10, height: 10, borderRadius: 5 },
-  connStatusPill:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, gap: 4 },
-  connPillLabel:   { fontSize: 11, fontWeight: '600', fontFamily: ARIMO, letterSpacing: 0.3 },
+  backBtn:         { paddingRight: 6, paddingVertical: 2 },
+  backBtnText:     { fontSize: 30, lineHeight: 32, color: C.textPrimary, fontWeight: '300', fontFamily: ARIMO },
+  clearBtn:        { paddingVertical: 5, paddingHorizontal: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, borderRadius: 0 },
+  clearBtnText:    { fontSize: 10, color: C.textSecondary, fontWeight: '800', fontFamily: ARIMO, letterSpacing: 2.2, textTransform: 'uppercase' },
+  headerTitle:     { fontSize: 12, fontWeight: '800', color: C.textPrimary, fontFamily: ARIMO, letterSpacing: 2, textTransform: 'uppercase' },
+  // Status as a typographic tag — small square index, monospace label, hairline border
+  connDot:         { width: 6, height: 6, borderRadius: 0 },
+  connStatusPill:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 0, gap: 6, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border },
+  connPillLabel:   { fontSize: 10, fontWeight: '800', fontFamily: MONO, letterSpacing: 1.6, textTransform: 'uppercase' },
 
   // Chat pane
-  pane:              { flex: 1, backgroundColor: C.bg },
-  messageList:       { flex: 1 },
-  messageListContent: { paddingVertical: 16 },
-  emptyStateWrap:    { alignItems: 'center', marginTop: 80 },
-  reconnectBanner:   { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, zIndex: 10 },
-  reconnectText:     { fontSize: 12, fontWeight: '600', fontFamily: ARIMO },
+  pane:               { flex: 1, backgroundColor: C.bg },
+  messageList:        { flex: 1 },
+  messageListContent: { paddingVertical: 18 },
+  emptyStateWrap:     { alignItems: 'center', marginTop: 88, gap: 6 },
+  emptyStateBrand:    { fontSize: 30, color: C.textPrimary, fontWeight: '800', letterSpacing: 8, fontFamily: NUNITO, marginTop: 8 },
+  emptyStateRule:     { width: 24, height: 1, backgroundColor: C.textPrimary, opacity: 0.35, marginTop: 4 },
+  emptyStateTagline:  { fontSize: 10, color: C.textMuted, fontFamily: MONO, letterSpacing: 2.6, textTransform: 'uppercase', marginTop: 6, fontWeight: '700' },
+  reconnectBanner:    { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, zIndex: 10 },
+  reconnectText:      { fontSize: 10, fontWeight: '800', fontFamily: MONO, letterSpacing: 2, textTransform: 'uppercase' },
 
-  // Scroll-to-bottom button
+  // Scroll-to-bottom — sharp-cornered tile rather than a floating circle
   scrollBtnWrap:     { position: 'absolute', left: 0, right: 0, alignItems: 'center', pointerEvents: 'box-none' },
-  scrollBtn:         { backgroundColor: C.bg, borderRadius: 20, width: 36, height: 36, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border, marginBottom: 8 },
-  scrollBtnIcon:     { fontSize: 18, color: C.textSecondary, lineHeight: 22, fontFamily: ARIMO },
+  scrollBtn:         { backgroundColor: C.bg, borderRadius: 0, width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.textPrimary, marginBottom: 10 },
+  scrollBtnIcon:     { fontSize: 14, color: C.textPrimary, lineHeight: 16, fontFamily: ARIMO, fontWeight: '700' },
 
   // Messages
-  messageWrap:      { paddingHorizontal: 14, marginBottom: 14 },
-  messageWrapRight: { alignItems: 'flex-end' },
-  userBubble:          { backgroundColor: C.accent, borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '80%' },
-  textBlock:           { color: '#ffffff', fontSize: 16, lineHeight: 24, fontWeight: '400', fontFamily: ARIMO },
-  assistantTextBlock:  { color: C.textPrimary, fontSize: 16, lineHeight: 24, fontWeight: '400', fontFamily: ARIMO },
-  inlineCode:        { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13, color: C.textPrimary, backgroundColor: C.surface, paddingHorizontal: 3, paddingVertical: 1, borderRadius: 3 },
-  codeBlock:         { backgroundColor: C.surface, borderRadius: 8, padding: 12, marginVertical: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border },
-  codeBlockText:     { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 12, color: C.textPrimary, lineHeight: 18 },
-  codeBlockLang:     { fontSize: 10, color: C.textMuted, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
-  questionMark:      { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
-  costLabel:         { fontSize: 11, color: C.textMuted, marginTop: 4, marginLeft: 2, fontFamily: ARIMO },
-  toolChip:          { backgroundColor: C.accentLight, borderLeftWidth: 2, borderLeftColor: C.accent, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 7 },
-  toolLine:          { fontSize: 13, color: C.accent, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  toolChevron:       { fontSize: 16, color: C.accent, marginLeft: 6, fontWeight: '400' },
-  toolOutputBlock:   { marginTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, paddingTop: 8 },
-  toolOutputText:    { fontSize: 12, color: C.textSecondary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', lineHeight: 18 },
-  interruptedLine:   { fontSize: 16, lineHeight: 24, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
-  bgCompleteLine:    { fontSize: 14, lineHeight: 20, color: C.textMuted, fontFamily: ARIMO, fontStyle: 'italic' },
-  errorLine:         { fontSize: 15, lineHeight: 22, color: C.red, fontFamily: ARIMO, fontStyle: 'italic' },
+  messageWrap:         { paddingHorizontal: 16, marginBottom: 14 },
+  messageWrapRight:    { alignItems: 'flex-end' },
+  // User bubble: icon-blue, white text — ties the user voice to the app mark
+  userBubble:          { backgroundColor: '#4A90E2', borderRadius: 18, borderBottomRightRadius: 4, paddingHorizontal: 14, paddingVertical: 10, maxWidth: '82%' },
+  textBlock:           { color: '#FFFFFF', fontSize: 15.5, lineHeight: 23, fontWeight: '400', fontFamily: ARIMO },
+  assistantTextBlock:  { color: '#1F2937', fontSize: 15.5, lineHeight: 24, fontWeight: '400', fontFamily: ARIMO },
+  inlineCode:          { fontFamily: MONO, fontSize: 12.5, color: C.textPrimary, backgroundColor: C.surface, paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border },
+  codeBlock:           { backgroundColor: C.surface, borderRadius: 4, padding: 12, marginVertical: 6, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border },
+  codeBlockText:       { fontFamily: MONO, fontSize: 12, color: C.textPrimary, lineHeight: 18 },
+  codeBlockLang:       { fontSize: 9, color: C.textMuted, fontFamily: MONO, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1.6, fontWeight: '700' },
+  questionMark:        { color: C.yellow, fontWeight: '700', fontSize: 15, marginBottom: 2, fontFamily: ARIMO },
+  costLabel:           { fontSize: 10, color: C.textMuted, marginTop: 6, marginLeft: 2, fontFamily: MONO, letterSpacing: 0.8 },
+  // Tool chip — terminal-style, sharp corners, monospace, accent-tinted surface
+  toolChip:            { backgroundColor: C.accentLight, borderLeftWidth: 2, borderLeftColor: C.accent, borderRadius: 0, paddingHorizontal: 12, paddingVertical: 8 },
+  toolLine:            { fontSize: 12.5, color: C.accent, fontFamily: MONO, letterSpacing: 0.3 },
+  toolChevron:         { fontSize: 14, color: C.accent, marginLeft: 6, fontWeight: '400' },
+  toolOutputBlock:     { marginTop: 8, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
+  toolOutputText:      { fontSize: 11.5, color: C.textSecondary, fontFamily: MONO, lineHeight: 17 },
+  interruptedLine:     { fontSize: 11, lineHeight: 18, color: C.textMuted, fontFamily: MONO, letterSpacing: 2.2, textTransform: 'uppercase', fontWeight: '700' },
+  bgCompleteLine:      { fontSize: 12, lineHeight: 18, color: C.textMuted, fontFamily: MONO, letterSpacing: 0.5, fontStyle: 'italic' },
+  errorLine:           { fontSize: 12, lineHeight: 18, color: C.red, fontFamily: MONO, letterSpacing: 0.6, fontWeight: '700' },
 
   // Input bar
-  completionList: { position: 'absolute', left: 0, right: 0, maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg, zIndex: 10, elevation: 10 },
-  completionItem: { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  completionText: { fontSize: 14, color: C.textPrimary, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  inputFloat:   { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 12, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg },
-  inputRow:     { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
-  input:        { flex: 1, backgroundColor: C.bg, borderWidth: 1, borderColor: C.inputBorder, borderRadius: 24, paddingHorizontal: 20, paddingVertical: 16, color: C.textPrimary, fontSize: 16, lineHeight: 24, minHeight: 56, maxHeight: 140, fontFamily: ARIMO },
-  sendBtn:      { width: 48, height: 48, borderRadius: 24, backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center', marginBottom: 4, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
-  sendBtnDisabled: { backgroundColor: C.inputBorder },
-  sendBtnIcon:  { fontSize: 22, color: '#fff', fontWeight: '700', lineHeight: 26 },
+  completionList:  { position: 'absolute', left: 0, right: 0, maxHeight: 180, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg, zIndex: 10, elevation: 10 },
+  completionItem:  { paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  completionText:  { fontSize: 13, color: C.textPrimary, fontFamily: MONO },
+  inputFloat:      { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 10, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg },
+  inputRow:        { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  // Input — slightly raised paper tone with a sharper corner radius
+  input:           { flex: 1, backgroundColor: '#FBF8EE', borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 16, paddingVertical: 17, color: C.textPrimary, fontSize: 15.5, lineHeight: 22, minHeight: 56, maxHeight: 140, fontFamily: ARIMO },
+  // Send button is squared to match the input box; bg matches the app icon
+  sendBtn:         { width: 56, height: 56, borderRadius: 6, backgroundColor: '#4A90E2', alignItems: 'center', justifyContent: 'center', marginBottom: 0 },
+  sendBtnDisabled: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  sendBtnIcon:     { fontSize: 22, color: '#FFFFFF', fontWeight: '700', lineHeight: 24, fontFamily: ARIMO },
+  // Paper-plane send icon — built from two border-triangles. See PaperPlane
+  // component for the geometry.
+  paperPlaneWrap:  { width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
+  paperPlaneTilt:  { transform: [{ rotate: '-22deg' }], marginLeft: 1 },
+  paperPlaneWing:  { width: 0, height: 0, borderTopWidth: 8, borderBottomWidth: 8, borderLeftWidth: 19, borderTopColor: 'transparent', borderBottomColor: 'transparent' },
+  paperPlaneNotch: { position: 'absolute', top: 8, left: 0, width: 0, height: 0, borderTopWidth: 5, borderLeftWidth: 11, borderTopColor: 'transparent' },
   // Streaming-state stop button — same footprint as sendBtn so the layout
-  // doesn't shift between idle and streaming. An OrbitingDot sits behind
+  // doesn't shift between idle and streaming. An OrbitingArc sits behind
   // the stop button and circles around its perimeter.
-  inputBtnSlot:       { width: 48, height: 48, marginBottom: 4, alignItems: 'center', justifyContent: 'center' },
+  inputBtnSlot:       { width: 56, height: 56, marginBottom: 0, alignItems: 'center', justifyContent: 'center' },
   // Only the top edge is colored; the others are transparent. With a circular
   // borderRadius this renders as a ~90° arc, which appears to travel around
   // the button's perimeter when the View itself is rotated.
   orbitArc:           { position: 'absolute', borderColor: 'transparent', borderTopColor: C.accent },
-  stopBtnInline:      { width: 36, height: 36, borderRadius: 18, backgroundColor: C.red, alignItems: 'center', justifyContent: 'center' },
-  stopBtnInlineIcon:  { fontSize: 14, color: '#fff', fontWeight: '700', lineHeight: 16 },
+  stopBtnInline:      { width: 50, height: 50, borderRadius: 25, backgroundColor: '#FF3B30', alignItems: 'center', justifyContent: 'center' },
+  stopBtnInlineIcon:  { fontSize: 18, color: '#FFFFFF', fontWeight: '700', lineHeight: 20 },
 
-  // Header hamburger + right buttons
+  // Header right buttons
   headerRight:              { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  hamburgerBtn:             { paddingVertical: 4, paddingHorizontal: 2, marginRight: 8 },
-  hamburgerBtnText:         { fontSize: 22, color: C.textSecondary, fontFamily: ARIMO },
-  containerDot:             { width: 6, height: 6, borderRadius: 3 },
+  // Hamburger as three deliberate bars (replaces the typographic glyph)
+  hamburgerBtn:             { paddingVertical: 8, paddingHorizontal: 6, marginRight: 4 },
+  hamburgerBars:            { width: 18, height: 12, justifyContent: 'space-between' },
+  hamburgerBar:             { height: 1.5, backgroundColor: C.textPrimary },
+  hamburgerBtnText:         { fontSize: 18, color: C.textPrimary, fontFamily: ARIMO, fontWeight: '700' },
+  containerDot:             { width: 6, height: 6, borderRadius: 0 },
 
-  // Sidebar
-  sidebarBackdrop:          { backgroundColor: 'rgba(0,0,0,0.28)', zIndex: 200 },
-  sidebar:                  { position: 'absolute', top: 0, left: 0, bottom: 0, width: 280, backgroundColor: C.bg, zIndex: 201, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: C.border, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 4, height: 0 }, elevation: 16, flexDirection: 'column' },
-  sidebarSection:           { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10 },
-  sidebarHeader:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  sidebarBrand:             { fontSize: 17, fontWeight: '700', color: C.textPrimary, letterSpacing: 2, fontFamily: NUNITO },
-  sidebarCloseIcon:         { fontSize: 18, color: C.textSecondary, fontFamily: ARIMO },
-  sidebarExitBtn:           { paddingHorizontal: 16, paddingVertical: 16 },
-  settingsMenuSectionTitle: { fontSize: 11, fontWeight: '700', color: C.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, fontFamily: ARIMO },
+  // Sidebar — editorial drawer
+  sidebarBackdrop:          { backgroundColor: 'rgba(14,26,36,0.32)', zIndex: 200 },
+  sidebar:                  { position: 'absolute', top: 0, left: 0, bottom: 0, width: 300, backgroundColor: C.bg, zIndex: 201, borderRightWidth: 1, borderRightColor: C.border, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 20, shadowOffset: { width: 4, height: 0 }, elevation: 16, flexDirection: 'column' },
+  sidebarSection:           { paddingHorizontal: 18, paddingTop: 20, paddingBottom: 8 },
+  sidebarHeader:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  sidebarBrand:             { fontSize: 22, fontWeight: '800', color: C.textPrimary, letterSpacing: 6, fontFamily: NUNITO },
+  sidebarBrandSub:          { fontSize: 9, fontWeight: '800', color: C.textMuted, letterSpacing: 2.5, fontFamily: MONO, textTransform: 'uppercase', marginTop: 4 },
+  sidebarCloseIcon:         { fontSize: 16, color: C.textSecondary, fontFamily: ARIMO, fontWeight: '300' },
+  sidebarExitBtn:           { paddingHorizontal: 18, paddingVertical: 16 },
+  settingsMenuSectionTitle: { fontSize: 10, fontWeight: '800', color: C.textMuted, textTransform: 'uppercase', letterSpacing: 2.5, fontFamily: MONO },
   settingsMenuDivider:      { height: StyleSheet.hairlineWidth, backgroundColor: C.border },
-  settingsMenuLogoutText:   { fontSize: 15, color: C.red, fontFamily: ARIMO },
-  containerMenuItem:        { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
-  containerMenuItemName:    { fontSize: 16, fontWeight: '600', color: C.textPrimary, fontFamily: ARIMO },
-  containerMenuItemUrl:     { fontSize: 12, color: C.textMuted, fontFamily: ARIMO, marginTop: 1 },
-  containerMenuItemStatus:  { fontSize: 12, color: C.textMuted, fontFamily: ARIMO },
-
+  settingsMenuLogoutText:   { fontSize: 11, color: C.red, fontFamily: ARIMO, fontWeight: '800', letterSpacing: 2.8, textTransform: 'uppercase' },
+  containerMenuItem:        { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border },
+  containerMenuItemName:    { fontSize: 14, fontWeight: '700', color: C.textPrimary, fontFamily: ARIMO, letterSpacing: 0.3 },
+  containerMenuItemUrl:     { fontSize: 11, color: C.textMuted, fontFamily: MONO, marginTop: 3, letterSpacing: 0.3 },
+  containerMenuItemStatus:  { fontSize: 9, color: C.textMuted, fontFamily: MONO, letterSpacing: 1.6, textTransform: 'uppercase', fontWeight: '800' },
 })
