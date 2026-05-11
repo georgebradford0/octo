@@ -36,8 +36,21 @@ chmod +x "$INSTALL_DIR/$BIN"
 
 echo "Installed to $INSTALL_DIR/$BIN"
 
-# Note: octo requires Docker on the host. Install Docker via
-# https://docs.docker.com/get-docker/ before running `octo init`.
+# octo orchestrates lair and child agents as Docker containers on this host.
+# Surface the Docker requirement loudly so the user doesn't run `octo init`
+# blind. Soft-warn — don't exit, since some users install the CLI as part of
+# a wider provisioning script that brings Docker up afterwards.
+if ! command -v docker > /dev/null 2>&1; then
+  echo ""
+  echo "Warning: 'docker' was not found on PATH."
+  echo "  octo runs lair and child agents as Docker containers; you'll need"
+  echo "  Docker installed before 'octo init' will work."
+  echo "  See https://docs.docker.com/get-docker/"
+elif ! docker info > /dev/null 2>&1; then
+  echo ""
+  echo "Note: Docker is installed but its daemon isn't reachable."
+  echo "  Start Docker (or the daemon socket) before running 'octo init'."
+fi
 
 # Warn if ~/.local/bin is not in PATH.
 case ":$PATH:" in
@@ -83,5 +96,10 @@ case "$DETECTED_SHELL" in
     echo "Completions: run 'octo completions <bash|zsh|fish>' to generate for your shell."
     ;;
 esac
+
+echo ""
+echo "Next: run 'octo init' to bootstrap a lair Docker container on this host."
+echo "      (Set ANTHROPIC_API_KEY in your env, or pass --anthropic-api-key.)"
+echo ""
 
 "$INSTALL_DIR/$BIN" --help
