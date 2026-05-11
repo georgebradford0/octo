@@ -2,15 +2,16 @@
 name        = "octo"
 version     = "0.0.61"
 edition     = "2021"
-description = "octo cluster management CLI"
+description = "octo lair management CLI"
 
 [[bin]]
 name = "octo"
 path = "src/main.rs"
 
 [dependencies]
-octo-k8s-ops = { path = "../k8s-ops" }
+octo-core         = { path = "../core" }
 anyhow            = "1.0"
+bollard           = "0.17"
 clap              = { version = "4", features = ["derive", "env"] }
 clap_complete     = "4"
 serde             = { version = "1.0", features = ["derive"] }
@@ -20,3 +21,6 @@ snow              = "0.9"
 hex               = "0.4"
 data-encoding     = "2"
 qrcode            = "0.14"
+reqwest           = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures-util      = "0.3"
+tracing           = "0.1"

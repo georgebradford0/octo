@@ -1,23 +1,29 @@
-use std::collections::HashMap;
+//! `octo mcp …` — manage the per-container `mcp.json`.
+//!
+//! For lair: write directly to `<lair_data_dir>/mcp.json` (bind-mounted into
+//! the container, hot-reloaded by lair's MCP poller).
+//!
+//! For an agent: child volumes are Docker-named (not bind-mounted), so
+//! manipulate the file via `docker cp` against the running container.
+
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result};
-use octo_k8s_ops::k8s;
+use bollard::Docker;
 use serde::{Deserialize, Serialize};
 
-const MCP_PATH: &str = "/data/mcp.json";
+use crate::dockerd;
 
-/// Expand a `${VAR}` reference from the host environment.
-/// If the variable is not set, warn and return the original string unexpanded.
+const MCP_PATH_IN_CONTAINER: &str = "/data/mcp.json";
+const LAIR_AGENT_NAME:       &str = "lair";
+
 fn expand_host_var(v: &str) -> String {
     if v.starts_with("${") && v.ends_with('}') {
         let var = &v[2..v.len() - 1];
-        match std::env::var(var) {
-            Ok(val) => val,
-            Err(_) => {
-                eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded");
-                v.to_string()
-            }
-        }
+        std::env::var(var).unwrap_or_else(|_| {
+            eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded");
+            v.to_string()
+        })
     } else {
         v.to_string()
     }
@@ -38,39 +44,100 @@ struct McpServerConfig {
     headers: HashMap<String, String>,
 }
 
-async fn read_config(pod_name: &str) -> Result<Vec<McpServerConfig>> {
-    let raw = k8s::exec_in_pod(pod_name, &["cat", MCP_PATH]).await;
-    match raw {
-        Ok(text) if !text.trim().is_empty() => {
-            serde_json::from_str(&text).context("parse mcp.json")
+fn lair_mcp_path() -> PathBuf {
+    dockerd::lair_data_dir().join("mcp.json")
+}
+
+async fn read_mcp(d: &Docker, agent: &str) -> Result<Vec<McpServerConfig>> {
+    let text = if agent == LAIR_AGENT_NAME {
+        match std::fs::read_to_string(lair_mcp_path()) {
+            Ok(t) if !t.trim().is_empty() => t,
+            _ => return Ok(Vec::new()),
         }
-        _ => Ok(vec![]),
-    }
+    } else {
+        // `docker cp <agent>:/data/mcp.json -` streams the file as a tar.
+        // Simpler: docker exec cat.
+        use bollard::exec::{CreateExecOptions, StartExecResults};
+        use futures_util::StreamExt;
+        let exec = d
+            .create_exec(
+                agent,
+                CreateExecOptions {
+                    cmd: Some(vec!["cat", MCP_PATH_IN_CONTAINER]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("create exec in {agent}"))?;
+        let mut out = String::new();
+        if let StartExecResults::Attached { mut output, .. } =
+            d.start_exec(&exec.id, None).await.with_context(|| format!("start exec in {agent}"))?
+        {
+            while let Some(item) = output.next().await {
+                if let Ok(msg) = item {
+                    out.push_str(&format!("{msg}"));
+                }
+            }
+        }
+        if out.trim().is_empty() { return Ok(Vec::new()); }
+        out
+    };
+    serde_json::from_str(&text).context("parse mcp.json")
 }
 
-async fn write_config(pod_name: &str, configs: &[McpServerConfig]) -> Result<()> {
+async fn write_mcp(d: &Docker, agent: &str, configs: &[McpServerConfig]) -> Result<()> {
     let json = serde_json::to_string_pretty(configs)?;
-    k8s::write_pod_file(pod_name, MCP_PATH, &json).await
-}
+    if agent == LAIR_AGENT_NAME {
+        let path = lair_mcp_path();
+        std::fs::create_dir_all(path.parent().unwrap()).ok();
+        std::fs::write(&path, json)
+            .with_context(|| format!("write {}", path.display()))?;
+    } else {
+        use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
+        use bollard::container::DownloadFromContainerOptions;
+        let _ = d.download_from_container(agent, None::<DownloadFromContainerOptions<String>>);
 
-async fn running_pod(agent: &str) -> Result<String> {
-    let client = k8s::build_client().await?;
-    k8s::get_running_pod(&client, agent).await
+        // Pipe the JSON in via `sh -c "cat > /data/mcp.json"`.
+        let exec = d
+            .create_exec(
+                agent,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh", "-c", &format!("cat > {MCP_PATH_IN_CONTAINER}")]),
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("create exec in {agent}"))?;
+        let started = d
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions { detach: false, ..Default::default() }),
+            )
+            .await
+            .with_context(|| format!("start exec in {agent}"))?;
+        if let StartExecResults::Attached { mut input, .. } = started {
+            use tokio::io::AsyncWriteExt;
+            input.write_all(json.as_bytes()).await.context("write mcp.json via stdin")?;
+            input.shutdown().await.ok();
+        }
+    }
+    Ok(())
 }
 
 pub async fn list(agent: &str) -> Result<()> {
-    let pod_name = running_pod(agent).await?;
-    let configs  = read_config(&pod_name).await?;
+    let docker = dockerd::build_client()?;
+    let configs = read_mcp(&docker, agent).await?;
     if configs.is_empty() {
         println!("No MCP servers configured in '{agent}'.");
         return Ok(());
     }
     for c in &configs {
-        let args = if c.args.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", c.args.join(" "))
-        };
+        let args = if c.args.is_empty() { String::new() } else { format!(" {}", c.args.join(" ")) };
         println!("{}: {}{}", c.name, c.command, args);
         for k in c.env.keys() {
             println!("    {k}");
@@ -81,13 +148,13 @@ pub async fn list(agent: &str) -> Result<()> {
 
 pub async fn add(
     agent: &str,
-    name: &str,
+    name:  &str,
     command: &str,
     args: &[String],
     env_pairs: &[String],
 ) -> Result<()> {
-    let pod_name = running_pod(agent).await?;
-    let mut configs = read_config(&pod_name).await?;
+    let docker = dockerd::build_client()?;
+    let mut configs = read_mcp(&docker, agent).await?;
 
     if configs.iter().any(|c| c.name == name) {
         anyhow::bail!("MCP server '{name}' already exists in '{agent}'");
@@ -110,7 +177,7 @@ pub async fn add(
     });
 
     println!("→ writing config to '{agent}'");
-    write_config(&pod_name, &configs).await?;
+    write_mcp(&docker, agent, &configs).await?;
 
     let connected_marker  = format!("[mcp] '{name}' connected");
     let spawn_fail_marker = format!("[mcp] failed to spawn '{name}'");
@@ -121,11 +188,7 @@ pub async fn add(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     let logs = loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let logs = tokio::process::Command::new("kubectl")
-            .args(["logs", "-n", k8s::NAMESPACE, &format!("deployment/{agent}"), "--since=75s"])
-            .output().await
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
+        let logs = dockerd::logs_since(&docker, agent, 75).await.unwrap_or_default();
         let done = logs.contains(&connected_marker)
             || logs.contains(&no_tools_marker)
             || logs.contains(&spawn_fail_marker)
@@ -135,7 +198,6 @@ pub async fn add(
         }
     };
 
-    // Print any [mcp] lines relevant to this server so the user can see what happened.
     for line in logs.lines() {
         if line.contains("[mcp]") && (line.contains(&format!("'{name}'")) || line.contains("hot-reload")) {
             println!("  {line}");
@@ -146,14 +208,13 @@ pub async fn add(
 
     if !success {
         configs.retain(|c| c.name != name);
-        let current_pod_name = running_pod(agent).await.unwrap_or(pod_name);
-        write_config(&current_pod_name, &configs).await?;
+        write_mcp(&docker, agent, &configs).await?;
     }
 
     if logs.contains(&connected_marker) {
-        println!("✓ MCP server '{name}' connected successfully.");
+        println!("MCP server '{name}' connected successfully.");
     } else if logs.contains(&no_tools_marker) {
-        println!("⚠ MCP server '{name}' connected but advertised no tools.");
+        println!("MCP server '{name}' connected but advertised no tools.");
     } else if logs.contains(&spawn_fail_marker) {
         anyhow::bail!("MCP server '{name}' failed to spawn — command not found or not executable.");
     } else if logs.contains(&init_fail_marker) {
@@ -167,40 +228,36 @@ pub async fn add(
 
 pub async fn import_from_file(agent: &str, path: &std::path::Path) -> Result<()> {
     let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read '{}'", path.display()))?;
+        .with_context(|| format!("read {}", path.display()))?;
     let entries: Vec<McpServerConfig> = serde_json::from_str(&text)
-        .context("failed to parse JSON — expected an array of MCP server objects")?;
-
+        .context("parse JSON — expected an array of MCP server objects")?;
     if entries.is_empty() {
         println!("No entries found in '{}'.", path.display());
         return Ok(());
     }
 
-    let pod_name = running_pod(agent).await?;
-
-    // Expand ${VAR} references from the host environment before writing to the agent.
+    let docker = dockerd::build_client()?;
     let resolved: Vec<McpServerConfig> = entries.into_iter().map(|mut e| {
         e.env     = e.env    .into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
         e.headers = e.headers.into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
         e
     }).collect();
 
-    // Replace the entire config with the contents of the file.
     println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", resolved.len());
-    write_config(&pod_name, &resolved).await?;
-    println!("✓ imported successfully.");
+    write_mcp(&docker, agent, &resolved).await?;
+    println!("Imported successfully.");
     Ok(())
 }
 
 pub async fn remove(agent: &str, name: &str) -> Result<()> {
-    let pod_name = running_pod(agent).await?;
-    let mut configs = read_config(&pod_name).await?;
+    let docker = dockerd::build_client()?;
+    let mut configs = read_mcp(&docker, agent).await?;
     let before = configs.len();
     configs.retain(|c| c.name != name);
     if configs.len() == before {
         anyhow::bail!("MCP server '{name}' not found in '{agent}'");
     }
-    write_config(&pod_name, &configs).await?;
+    write_mcp(&docker, agent, &configs).await?;
     println!("Removed MCP server '{name}' from '{agent}'.");
     Ok(())
 }

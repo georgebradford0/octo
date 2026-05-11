@@ -5,7 +5,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +22,7 @@ use axum::{
 };
 use octo_core::{
     self,
-    build_agent_system_prompt, build_ephemeral_system_prompt, build_system_prompt,
+    build_agent_system_prompt, build_system_prompt,
     build_tools_with_mcp, cancel_task as core_cancel_task, chain_executor_with_mcp,
     completion_chat_event, data_dir, finalize_task, now_secs, register_task, tasks_wire_json,
     TaskRecord, TaskStatus,
@@ -40,7 +39,21 @@ use tokio::sync::mpsc;
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
-const NOISE_KEY_FILE: &str = "/etc/octo/noise_key.bin";
+const NOISE_KEY_FILE: &str = "/data/noise_key.bin";
+
+/// Write `<data_dir>/agent-info.json` with this agent's externally-visible
+/// identity. Idempotent — overwritten on each boot. Read by lair via SSH
+/// during remote-agent registration.
+fn write_agent_info(dir: &std::path::Path, pubkey_b32: &str, public_port: u16) -> std::io::Result<()> {
+    let info = serde_json::json!({
+        "pubkey":   pubkey_b32,
+        "port":     public_port,
+        "ready_at": octo_core::now_secs(),
+    });
+    let path = dir.join("agent-info.json");
+    std::fs::create_dir_all(dir).ok();
+    std::fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default())
+}
 
 // ── Session persistence ───────────────────────────────────────────────────────
 //
@@ -87,50 +100,6 @@ async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json:
     // sends `ready { resumed }` on connect, which is what mobile uses to
     // decide whether to enter the 'streaming' UI state.
     Json(serde_json::json!({ "messages": msgs }))
-}
-
-#[derive(Deserialize)]
-struct PostMessage { text: String }
-
-async fn message_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body):   Json<PostMessage>,
-) -> impl IntoResponse {
-    let preview: String = body.text.chars().take(120).collect();
-    info!("[agent/message_handler] received ({} chars): {preview}", body.text.len());
-    let start = Instant::now();
-
-    let api_key = match resolve_api_key() {
-        Some(k) => k,
-        None    => {
-            error!("[agent/message_handler] no API key configured");
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                           Json(serde_json::json!({"error": "no API key configured"}))).into_response();
-        }
-    };
-    let model = resolve_model();
-
-    // Ephemeral loop — does not touch the shared conversation history.
-    let messages = vec![ApiMessage {
-        role:    "user".to_string(),
-        content: vec![ContentBlock::Text { text: body.text }],
-    }];
-
-    info!("[agent/message_handler] calling ephemeral send_message");
-    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
-    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor(state.clone()));
-    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, &state.cwd, None, CancellationToken::new(), &extra_tools, executor).await {
-        Ok((text, cost_usd, _)) => {
-            let elapsed = start.elapsed().as_millis();
-            info!("[agent/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
-            (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
-        }
-        Err((e, _)) => {
-            let elapsed = start.elapsed().as_millis();
-            error!("[agent/message_handler] error in {elapsed}ms: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response()
-        }
-    }
 }
 
 async fn stream_handler(
@@ -481,101 +450,19 @@ async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
     StatusCode::OK
 }
 
-// ── Parent messaging tools ─────────────────────────────────────────────────────
-
-fn message_lair_tool() -> AnthropicTool {
-    AnthropicTool {
-        name: "message_lair".to_string(),
-        description: "Send a message to the parent (lair) container's agent and wait for its \
-                       response. Use this to request secrets, configuration, or other information \
-                       held by the parent. The parent will respond with a text reply."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "The message to send to the parent agent."
-                }
-            },
-            "required": ["text"]
-        }),
-        display_label: Some("Messaging lair".into()),
-    }
-}
-
 fn make_extra_tools() -> Vec<AnthropicTool> {
-    let mut tools = vec![run_background_task_tool()];
-    if std::env::var("LAIR_URL").is_ok() {
-        tools.push(message_lair_tool());
-    }
-    tools
+    vec![run_background_task_tool()]
 }
 
 fn make_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_json::Value)
     -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
     + Send + Sync>>
 {
-    let lair_url = std::env::var("LAIR_URL").ok();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .pool_idle_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("failed to build agent extra-tools HTTP client");
     Some(Arc::new(move |name: String, input: serde_json::Value| {
-        let lair_url = lair_url.clone();
-        let client = client.clone();
         let state  = state.clone();
         Box::pin(async move {
             match name.as_str() {
                 "run_background_task" => exec_run_background_task(state, input).await,
-                "message_lair" => {
-                    let lair_url = match lair_url {
-                        Some(u) => u,
-                        None => return "error: message_lair not configured (LAIR_URL unset)".to_string(),
-                    };
-                    let text = match input.get("text").and_then(|v| v.as_str()) {
-                        Some(t) => t.to_string(),
-                        None => return "error: missing 'text' field".to_string(),
-                    };
-                    let preview: String = text.chars().take(120).collect();
-                    let url = format!("{}/message", lair_url.trim_end_matches('/'));
-                    info!("[agent/message_lair] → POST {url} ({} chars): {preview}", text.len());
-                    let start = Instant::now();
-                    match client
-                        .post(&url)
-                        .json(&serde_json::json!({ "text": text }))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            let status = resp.status();
-                            let elapsed = start.elapsed().as_millis();
-                            info!("[agent/message_lair] ← HTTP {status} in {elapsed}ms");
-                            match resp.json::<serde_json::Value>().await {
-                                Ok(body) => {
-                                    let result = body
-                                        .get("text")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("(no response text)")
-                                        .to_string();
-                                    let rpreview: String = result.chars().take(120).collect();
-                                    info!("[agent/message_lair] response ({} chars): {rpreview}", result.len());
-                                    result
-                                }
-                                Err(e) => {
-                                    error!("[agent/message_lair] parse error: {e}");
-                                    format!("error parsing parent response: {e}")
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let elapsed = start.elapsed().as_millis();
-                            error!("[agent/message_lair] request failed in {elapsed}ms: {e}");
-                            format!("error contacting parent: {e}")
-                        }
-                    }
-                }
                 other => format!("unknown tool: {other}"),
             }
         })
@@ -726,15 +613,17 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let noise_port:  u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
     let public_port: u16 = std::env::var("PUBLIC_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(noise_port);
     let http_port:   u16 = 8000;
-    let lair_url    = std::env::var("LAIR_URL").unwrap_or_default();
     let public_host = crate::bootstrap::resolve_public_host("agent").await?;
     let pubkey_b32  = to_base32(&static_public);
 
     info!("[agent] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port}");
-    if lair_url.is_empty() {
-        info!("[agent] LAIR_URL not set — message_lair tool disabled");
-    } else {
-        info!("[agent] LAIR_URL={lair_url} — message_lair tool enabled");
+
+    // Publish a small JSON file so a parent lair on a different host can
+    // SSH-pull our identity (pubkey + port) post-bootstrap. The remote
+    // registration flow (`mint_bootstrap_userdata` + `register_remote_agent`)
+    // reads this from `/data/agent-info.json` over SSH.
+    if let Err(e) = write_agent_info(&data_dir(), &pubkey_b32, public_port) {
+        warn!("[agent] could not write agent-info.json: {e}");
     }
 
     // Workspace + optional git repo. With GIT_URL set, behaviour matches the
@@ -757,30 +646,6 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     crate::bootstrap::run_startup_script("agent").await?;
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
-
-    // Children no longer have k8s API access, so stamping the deployment's
-    // `octo.image-version` annotation is delegated to lair: we POST our name
-    // and compiled version to lair's `/child-version` endpoint and lair patches
-    // the annotation. Best-effort — log on failure but don't fail boot.
-    if let (Ok(deployment_name), Ok(lair_url_for_stamp)) = (
-        std::env::var("DEPLOYMENT_NAME"),
-        std::env::var("LAIR_URL"),
-    ) {
-        tokio::spawn(async move {
-            let url = format!("{}/child-version", lair_url_for_stamp.trim_end_matches('/'));
-            let body = serde_json::json!({
-                "name":    deployment_name,
-                "version": env!("CARGO_PKG_VERSION"),
-            });
-            match reqwest::Client::new().post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    info!("[agent] reported version {} to lair (deployment/{deployment_name})", env!("CARGO_PKG_VERSION"));
-                }
-                Ok(resp) => warn!("[agent] lair rejected version report: {}", resp.status()),
-                Err(e)   => warn!("[agent] could not report version to lair: {e}"),
-            }
-        });
-    }
 
     let cwd       = workspace.to_string_lossy().to_string();
     let system    = if has_repo {
@@ -820,7 +685,6 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health",      get(health_handler))
         .route("/history",     get(history_handler))
-        .route("/message",     post(message_handler))
         .route("/stream",      get(stream_handler))
         .route("/interrupt",   post(interrupt_handler))
         .route("/clear",       post(clear_handler))

@@ -19,3 +19,4 @@ tracing      = "0.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand         = "0.8"
 base64       = "0.22"
+ssh-key      = { version = "0.6", features = ["ed25519", "rand_core"] }

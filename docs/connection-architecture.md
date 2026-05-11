@@ -38,7 +38,6 @@ Mobile (React Native)
       axum HTTP (port 8000)
         GET /history
         GET /stream  (WebSocket)
-        POST /message
 ```
 
 Traffic path in full:
@@ -776,7 +775,7 @@ pub fn load_or_generate_keypair(path: &str) -> (Vec<u8>, Vec<u8>) {
 }
 ```
 
-If the key file is deleted or the PVC is re-provisioned, a new keypair is generated
+If the key file is deleted or the lair data volume is wiped, a new keypair is generated
 and the old QR codes become invalid (the client will throw `identityMismatch` at
 message 2 of the handshake). This is the expected and correct behavior — it's the
 server proving its identity.

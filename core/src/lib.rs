@@ -34,6 +34,12 @@ pub use background::{
 pub mod relay;
 pub use relay::{RelaySigner, notify as relay_notify};
 
+pub mod ssh;
+pub use ssh::{ensure_ssh_keypair, SSH_PRIVATE_KEY_FILE, SSH_PUBLIC_KEY_FILE};
+
+pub mod registry;
+pub use registry::{AgentRecord, AgentStatus, Registry, status_from_docker};
+
 // ── Shared HTTP client ────────────────────────────────────────────────────────
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -320,8 +326,7 @@ pub enum ChatEvent {
     UserMessage        { text: String },
     /// Client → server interrupt of the current turn.
     Interrupt,
-    /// Client → server request to scale a child Deployment to 1 replica.
-    /// Replaces the deprecated POST /containers/start.
+    /// Client → server request to start a stopped child agent container by name.
     StartContainer     { id: String },
     /// Client → server request to cancel a running background task by id.
     /// Both lair and agent honour this against their per-chat task registry.
@@ -1685,18 +1690,6 @@ pub async fn run_startup_prompt(
 
 // ── System Prompt ─────────────────────────────────────────────────────────────
 
-/// System prompt for the ephemeral loop that handles inbound message_lair /
-/// message_child calls.  The loop runs to completion and its final text is
-/// returned as the HTTP response — so the model MUST always emit a text block
-/// in the last turn.
-pub fn build_ephemeral_system_prompt() -> &'static str {
-    "You are responding to a query from another container in the octo network. \
-     Use whatever tools are available to answer fully. \
-     IMPORTANT: you MUST end your response with a text message that directly answers \
-     the query — even if you used tools to gather information, always write a final \
-     text summary before stopping. Never end on a tool_use turn."
-}
-
 /// Tool-use + verbosity guidelines appended to every system prompt regardless
 /// of role / repo state.
 fn shared_tool_guidance() -> &'static str {
@@ -1715,17 +1708,6 @@ fn shared_tool_guidance() -> &'static str {
      \n- Only write prose when you have a direct answer or question for the user.\
      \n- Never use filler phrases like \"I'll now...\", \"Let me...\", \"I've completed...\", \"Sure!\" etc.\
      \n- Never pad responses."
-}
-
-/// Optional `message_lair` tool note. Appended only when `LAIR_URL` is set.
-fn parent_tool_note() -> &'static str {
-    if std::env::var("LAIR_URL").is_ok() {
-        "\n\nYou have a message_lair(text) tool available. Use it to send a message to the parent \
-         (lair) container's agent and receive a response — for example to request secrets, \
-         configuration, or to hand off a task."
-    } else {
-        ""
-    }
 }
 
 /// Background-task tool note shared by every role that exposes
@@ -1749,13 +1731,12 @@ pub fn build_system_prompt(repo_path: &str) -> String {
         .unwrap_or_default();
 
     let tool_guidance    = shared_tool_guidance();
-    let parent_tool_note  = parent_tool_note();
     let bg_task_note      = background_task_note();
 
     format!(
         "You are an AI assistant helping manage the git repository at {repo_path}.\
          You can inspect code, answer questions, and help coordinate work across branches.\
-         Any path preceded by '@' (e.g. @src/main.rs) is a reference to a file path in the git repository.{claude_md}{tool_guidance}{parent_tool_note}{bg_task_note}"
+         Any path preceded by '@' (e.g. @src/main.rs) is a reference to a file path in the git repository.{claude_md}{tool_guidance}{bg_task_note}"
     )
 }
 
@@ -1773,14 +1754,13 @@ pub fn build_agent_system_prompt(workspace: &str) -> String {
         None    => String::new(),
     };
     let tool_guidance    = shared_tool_guidance();
-    let parent_tool_note  = parent_tool_note();
     let bg_task_note      = background_task_note();
 
     format!(
         "You are an AI agent running in a containerized workspace at {workspace}.\
          You have bash, file-system, and (when configured) MCP-server tools available.\
          You are not bound to any specific git repository — treat the workspace as scratch \
-         space unless the user gives you something else to work on.{purpose_block}{tool_guidance}{parent_tool_note}{bg_task_note}"
+         space unless the user gives you something else to work on.{purpose_block}{tool_guidance}{bg_task_note}"
     )
 }
 

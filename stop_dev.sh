@@ -1,39 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PID_FILE="/tmp/octo-dev-portforward.pid"
+# Tear down every container started by start_dev.sh — lair plus all managed
+# child agents — and reap their named volumes. The dev-data/ bind mount on
+# the host is preserved so a follow-up start_dev.sh keeps the Noise keypair.
 
-if [ -f "${PID_FILE}" ]; then
-    while IFS= read -r pid; do
-        if kill -0 "${pid}" 2>/dev/null; then
-            echo "▸ Stopping port-forward supervisor (pid ${pid})..."
-            kill "${pid}" 2>/dev/null || true
-        fi
-    done < "${PID_FILE}"
-    rm -f "${PID_FILE}"
+# Stop and remove every managed agent container (label octo.managed=1).
+managed=$(docker ps -aq --filter "label=octo.managed=1" 2>/dev/null || true)
+if [ -n "${managed}" ]; then
+    echo "▸ Removing managed containers..."
+    docker rm -f ${managed} >/dev/null 2>&1 || true
 fi
 
-# Belt and suspenders: kill any orphaned `kubectl port-forward` that might
-# have been left behind if the supervisor's signal didn't propagate.
-if pgrep -f 'kubectl port-forward.*lair-noise' >/dev/null; then
-    echo "▸ Reaping orphaned kubectl port-forward processes..."
-    pkill -f 'kubectl port-forward.*lair-noise' 2>/dev/null || true
-fi
-
-echo "▸ Deleting all resources in octo namespace..."
-kubectl delete namespace octo --ignore-not-found
-
-# Sweep up PVs that were bound to octo claims and got left in Released/Failed
-# state. Docker Desktop's hostpath provisioner sometimes ignores the Delete
-# reclaim policy, which blocks the next dev run from binding a fresh PVC.
-released_pvs=$(kubectl get pv \
-    -o custom-columns='NAME:.metadata.name,NS:.spec.claimRef.namespace,PHASE:.status.phase' \
-    --no-headers 2>/dev/null \
-    | awk '$2 == "octo" && ($3 == "Released" || $3 == "Failed") { print $1 }')
-if [ -n "${released_pvs}" ]; then
-    echo "▸ Reaping released PVs from prior octo claims..."
-    echo "${released_pvs}" | xargs kubectl delete pv
+# Reap orphaned agent volumes (named `agent-<name>-data` and
+# `agent-<name>-workspace`).
+agent_vols=$(docker volume ls -q --filter 'name=agent-' 2>/dev/null || true)
+if [ -n "${agent_vols}" ]; then
+    echo "▸ Removing agent volumes..."
+    docker volume rm ${agent_vols} >/dev/null 2>&1 || true
 fi
 
 echo ""
 echo "✓ Dev environment stopped."
+echo "  (dev-data/ on the host preserved; remove it manually for a clean restart.)"

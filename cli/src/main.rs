@@ -1,10 +1,12 @@
-mod containers;
+mod agents;
+mod dockerd;
 mod init;
 mod mcp;
 
-use octo_k8s_ops;
-
 use anyhow::Result;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
+use octo_core::Config;
 
 /// Mask all but the first 4 and last 4 chars of a secret string.
 fn mask(s: &str) -> String {
@@ -12,8 +14,7 @@ fn mask(s: &str) -> String {
     format!("{}...{}", &s[..4], &s[s.len()-4..])
 }
 
-/// Validate the effective config that will be written to lair-secrets / child-secrets.
-/// Runs before any cluster mutation in both `init` and `reload`.
+/// Validate the effective config that will be written to the lair env file.
 fn validate_resolved_config(
     api_key:        &str,
     openai_api_key: Option<&str>,
@@ -51,11 +52,9 @@ fn validate_resolved_config(
     }
     Ok(())
 }
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
 
 #[derive(Parser)]
-#[command(name = "octo", about = "octo cluster management CLI")]
+#[command(name = "octo", about = "octo lair management CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -63,7 +62,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Bootstrap lair on a Kubernetes cluster
+    /// Bootstrap lair as a Docker container on this host
     Init {
         /// Anthropic API key
         #[arg(long, env = "ANTHROPIC_API_KEY")]
@@ -73,17 +72,19 @@ enum Command {
         #[arg(long, env = "GH_TOKEN")]
         gh_token: Option<String>,
 
-        /// NodePort to expose lair's Noise endpoint (default: 30900)
-        #[arg(long, default_value_t = 30900)]
+        /// Host port that publishes lair's Noise endpoint
+        #[arg(long, default_value_t = 8443)]
         noise_port: u16,
 
-        /// Port advertised in the QR code (default: 8443).
-        /// A socat proxy is automatically configured to forward this port to
-        /// the NodePort. Set to the same value as --noise-port to skip the proxy.
-        #[arg(long, default_value_t = 8443)]
-        public_port: u16,
+        /// Host port that publishes lair's HTTP endpoint (127.0.0.1 only)
+        #[arg(long, default_value_t = 8000)]
+        http_port: u16,
 
-        /// Path to an mcp.json file to seed lair's MCP tool list on first startup
+        /// Container image tag for lair
+        #[arg(long, default_value = dockerd::LAIR_DEFAULT_IMAGE)]
+        image: String,
+
+        /// Path to an mcp.json file to seed lair's MCP tool list
         #[arg(long)]
         mcp_config: Option<std::path::PathBuf>,
 
@@ -98,29 +99,27 @@ enum Command {
         action: AgentsAction,
     },
 
-    /// Delete the entire octo namespace and all data (irreversible)
+    /// Remove the lair container, every managed agent container, and all of
+    /// lair's bind-mounted data on the host (irreversible)
     Destroy {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
     },
 
-    /// Reload containers (default: lair only)
+    /// Pull the latest image and restart lair (and optionally agents)
     Reload {
-        /// Specific child containers to reload (by name)
+        /// Specific agent containers to also restart (by name)
         #[arg(long, value_name = "NAME", num_args = 1..)]
         containers: Vec<String>,
-        /// Reload all containers (lair + all managed children)
+        /// Reload lair + every managed agent
         #[arg(long, conflicts_with = "containers")]
         all: bool,
-        /// Path to a config.json to sync into lair-secrets (defaults to ~/.octo/config.json)
-        #[arg(long, value_name = "FILE")]
-        config: Option<std::path::PathBuf>,
     },
 
     /// Show logs for a container (all containers if no name given)
     Logs {
-        /// Deployment name (e.g. lair, my-repo). Omit for all.
+        /// Container name (e.g. lair, lair-foo). Omit for all.
         name: Option<String>,
 
         /// Follow log output
@@ -153,13 +152,7 @@ enum Command {
         action: McpAction,
     },
 
-    /// Run kubectl get for octo resources
-    Get {
-        #[command(subcommand)]
-        resource: GetResource,
-    },
-
-    /// View or update cluster config (model, API key, endpoint)
+    /// View or update operator config (model, API key, endpoint)
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -168,17 +161,16 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Show current lair-secrets config values
+    /// Show the current operator config
     Show,
 
-    /// Update one or more config values in lair-secrets (and ~/.octo/config.json)
+    /// Update one or more config values (~/.octo/config.json + ~/.octo/lair-env)
     Set {
-        /// Claude model to use (e.g. claude-opus-4-5)
+        /// Claude model to use (e.g. claude-sonnet-4-6)
         #[arg(long)]
         model: Option<String>,
 
-        /// Full OpenAI-compatible chat-completions URL, e.g.
-        /// https://api.openai.com/v1/chat/completions (leave empty to use Anthropic)
+        /// Full OpenAI-compatible chat-completions URL
         #[arg(long)]
         api_url: Option<String>,
 
@@ -197,50 +189,17 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
-enum GetResource {
-    /// Get agents (Deployments)
-    Agents,
-    /// Get deployments
-    Deployments,
-    /// Get services
-    Services,
-    /// Get persistent volume claims
-    Pvc,
-    /// Get secrets
-    Secrets,
-}
-
-#[derive(Subcommand)]
 enum AgentsAction {
     /// List all managed child agents
     List,
 
-    /// Create a new child agent
-    Create {
-        /// Git repository URL
-        #[arg(long)]
-        git_url: Option<String>,
+    /// Start a stopped agent
+    Start { name: String },
 
-        /// Agent name (auto-derived from repo if omitted)
-        #[arg(long)]
-        name: Option<String>,
+    /// Stop a running agent
+    Stop  { name: String },
 
-        /// NodePort to assign (auto-assigned if omitted)
-        #[arg(long)]
-        noise_port: Option<u16>,
-    },
-
-    /// Scale a stopped agent up to 1 replica
-    Start {
-        name: String,
-    },
-
-    /// Scale a running agent down to 0 replicas
-    Stop {
-        name: String,
-    },
-
-    /// Delete an agent and all its data (irreversible)
+    /// Delete an agent and both of its named volumes (irreversible)
     Delete {
         name: String,
         /// Skip confirmation prompt
@@ -319,7 +278,6 @@ fn remove_completions() {
         }
     }
 
-    // Remove the `. .../octo` source line added to ~/.bashrc.
     let bashrc = home.join(".bashrc");
     if let Ok(content) = std::fs::read_to_string(&bashrc) {
         let cleaned = content
@@ -344,7 +302,6 @@ async fn update() -> Result<()> {
         _ => anyhow::bail!("unsupported platform: {OS}/{ARCH}"),
     };
 
-    // Fetch the latest release tag from GitHub API.
     let api_output = Command::new("curl")
         .args(["-fsSL", "https://api.github.com/repos/georgebradford0/octo/releases/latest"])
         .output()
@@ -362,9 +319,7 @@ async fn update() -> Result<()> {
         return Ok(());
     }
 
-    let url = format!(
-        "https://github.com/georgebradford0/octo/releases/latest/download/{artifact}"
-    );
+    let url = format!("https://github.com/georgebradford0/octo/releases/latest/download/{artifact}");
 
     println!("Downloading {artifact}...");
     let status = Command::new("curl")
@@ -373,13 +328,11 @@ async fn update() -> Result<()> {
         .await?;
     anyhow::ensure!(status.success(), "download failed");
 
-    // Determine current binary path.
     let current = std::env::current_exe()?;
     let dest = current.to_str().unwrap_or("/usr/local/bin/octo");
 
     Command::new("chmod").args(["+x", "/tmp/octo-update"]).status().await?;
 
-    // Try direct move, fall back to sudo.
     let mv = Command::new("mv")
         .args(["/tmp/octo-update", dest])
         .status()
@@ -413,7 +366,6 @@ async fn uninstall(yes: bool) -> Result<()> {
 
     remove_completions();
 
-    // Try direct removal, fall back to sudo.
     let path = current.to_str().unwrap_or("");
     let removed = std::fs::remove_file(&current);
     if removed.is_err() {
@@ -432,41 +384,17 @@ async fn uninstall(yes: bool) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { anthropic_api_key: api_key, gh_token, noise_port, public_port, mcp_config, config } => {
-            // Explicit --config errors hard if missing/invalid; otherwise fall back to
-            // ~/.octo/config.json, which read_config() returns as default if absent or malformed.
-            let cfg = match &config {
-                Some(path) => {
-                    if !path.exists() {
-                        eprintln!("error: config file not found: {}", path.display());
-                        std::process::exit(1);
-                    }
-                    println!("Loading config from {}...", path.display());
-                    let text = std::fs::read_to_string(path)
-                        .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
-                    serde_json::from_str::<octo_k8s_ops::Config>(&text)
-                        .map_err(|e| anyhow::anyhow!("invalid JSON in config file {}: {e}", path.display()))?
-                }
-                None => {
-                    let p = octo_k8s_ops::config_path();
-                    if p.exists() {
-                        println!("Loading config from {}...", p.display());
-                    } else {
-                        println!("No config file found at {}; using built-in defaults.", p.display());
-                    }
-                    octo_k8s_ops::read_config()
-                }
-            };
+        Command::Init { anthropic_api_key, gh_token, noise_port, http_port, image, mcp_config, config } => {
+            let cfg: Config = init::load_config(config.as_deref())?;
 
-            // anthropic_api_key: --anthropic-api-key flag > config file > error
-            let resolved_api_key = api_key
-                .or(cfg.anthropic_api_key)
+            let api_key = anthropic_api_key
+                .or(cfg.anthropic_api_key.clone())
                 .ok_or_else(|| anyhow::anyhow!(
                     "Anthropic API key is required: pass --anthropic-api-key, set ANTHROPIC_API_KEY, or include anthropic_api_key in --config or ~/.octo/config.json"
                 ))?;
 
             if let Err(e) = validate_resolved_config(
-                &resolved_api_key,
+                &api_key,
                 cfg.openai_api_key.as_deref(),
                 cfg.api_url.as_deref(),
                 cfg.model.as_deref(),
@@ -475,21 +403,22 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            init::run(
-                &resolved_api_key,
-                gh_token.as_deref(),
+            init::run(init::InitOptions {
+                api_key:        &api_key,
+                gh_token:       gh_token.as_deref(),
                 noise_port,
-                public_port,
-                mcp_config.as_deref(),
-                cfg.model.as_deref(),
-                cfg.api_url.as_deref(),
-                cfg.openai_api_key.as_deref(),
-            ).await?;
+                http_port,
+                image:          &image,
+                mcp_config:     mcp_config.as_deref(),
+                model:          cfg.model.as_deref(),
+                api_url:        cfg.api_url.as_deref(),
+                openai_api_key: cfg.openai_api_key.as_deref(),
+            }).await?;
         }
         Command::Destroy { yes } => {
             if !yes {
                 use std::io::Write;
-                print!("This will delete the entire octo namespace and all PVC data. Type 'yes' to confirm: ");
+                print!("This will remove lair, every managed agent container and named volume, and lair's host data dir. Type 'yes' to confirm: ");
                 std::io::stdout().flush()?;
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
@@ -498,169 +427,111 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             }
+            let docker = dockerd::build_client()?;
+            dockerd::ensure_docker_reachable(&docker).await?;
+
+            // Tear down every managed agent container + volumes.
+            for (name, _state) in dockerd::list_managed(&docker).await? {
+                if name == dockerd::LAIR_CONTAINER_NAME { continue; }
+                println!("Removing agent '{name}'...");
+                let _ = dockerd::delete_agent_full(&docker, &name).await;
+            }
+            // Tear down lair itself.
+            if let Err(e) = dockerd::remove_container_force(&docker, dockerd::LAIR_CONTAINER_NAME).await {
+                eprintln!("warning: remove lair: {e:#}");
+            }
+
+            // Wipe host data dir.
+            let data_dir = dockerd::lair_data_dir();
+            if data_dir.exists() {
+                println!("Removing {}...", data_dir.display());
+                if let Err(e) = std::fs::remove_dir_all(&data_dir) {
+                    eprintln!("warning: remove {}: {e}", data_dir.display());
+                }
+            }
+            // Wipe env file too.
+            let env_file = dockerd::env_file_path();
+            if env_file.exists() {
+                let _ = std::fs::remove_file(&env_file);
+            }
             remove_completions();
-            use std::io::Write;
-            use std::time::Instant;
-            use octo_k8s_ops::k8s;
-            let client = k8s::build_client().await?;
-
-            println!("Deleting namespace '{}'...", k8s::NAMESPACE);
-            k8s::delete_namespace(&client).await?;
-            println!("Waiting for all agents and PVCs to terminate...");
-            let start = Instant::now();
-            while k8s::namespace_exists(&client).await {
-                print!("\r  Still terminating... {}s", start.elapsed().as_secs());
-                std::io::stdout().flush()?;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-            println!("\rNamespace removed.                              ");
-            println!("Done. All resources removed.");
+            println!("Done.");
         }
-        Command::Agents { action } => match action {
-            AgentsAction::List => containers::list().await?,
-            AgentsAction::Create { git_url, name, noise_port } => {
-                containers::create(git_url.as_deref(), name.as_deref(), noise_port).await?;
+        Command::Agents { action } => {
+            match action {
+                AgentsAction::List => agents::list().await?,
+                AgentsAction::Start  { name }      => {
+                    let d = dockerd::build_client()?;
+                    agents::start(&d, &name).await?;
+                }
+                AgentsAction::Stop   { name }      => {
+                    let d = dockerd::build_client()?;
+                    agents::stop(&d, &name).await?;
+                }
+                AgentsAction::Delete { name, yes } => {
+                    let d = dockerd::build_client()?;
+                    agents::delete(&d, &name, yes).await?;
+                }
             }
-            AgentsAction::Start { name } => containers::start(&name).await?,
-            AgentsAction::Stop  { name } => containers::stop(&name).await?,
-            AgentsAction::Delete { name, yes } => containers::delete(&name, yes).await?,
-        },
-        Command::Reload { containers, all, config } => {
-            use octo_k8s_ops::k8s;
-            let client = k8s::build_client().await?;
+        }
+        Command::Reload { containers, all } => {
+            let docker = dockerd::build_client()?;
+            dockerd::ensure_docker_reachable(&docker).await?;
 
-            // Sync config into lair-secrets before restarting so agents pick up
-            // the latest model/endpoint/api-key on the new image.
-            // If --config is given, load from that file; otherwise use ~/.octo/config.json.
-            let local = match config {
-                Some(path) => {
-                    println!("Loading config from {}...", path.display());
-                    let text = std::fs::read_to_string(&path)
-                        .map_err(|e| anyhow::anyhow!("failed to read config file {}: {e}", path.display()))?;
-                    serde_json::from_str::<octo_k8s_ops::Config>(&text)
-                        .map_err(|e| anyhow::anyhow!("invalid JSON in config file {}: {e}", path.display()))?
-                }
-                None => {
-                    let p = octo_k8s_ops::config_path();
-                    if p.exists() {
-                        println!("Loading config from {}...", p.display());
-                    } else {
-                        println!("No config file found at {}; using cluster values only.", p.display());
-                    }
-                    octo_k8s_ops::read_config()
-                }
-            };
-            match k8s::read_lair_secrets(&client).await {
-                Ok(current) => {
-                    let api_key        = local.anthropic_api_key.unwrap_or(current.anthropic_api_key);
-                    let model          = local.model         .or(current.model);
-                    let api_url        = local.api_url       .or(current.api_url);
-                    let openai_api_key = local.openai_api_key.or(current.openai_api_key);
+            // Pull the same image lair was started with (re-derive from cfg).
+            let image = dockerd::LAIR_DEFAULT_IMAGE; // TODO: persist image tag at init time
+            println!("Pulling {image}...");
+            dockerd::pull_image(&docker, image).await?;
 
-                    if let Err(e) = validate_resolved_config(
-                        &api_key,
-                        openai_api_key.as_deref(),
-                        api_url.as_deref(),
-                        model.as_deref(),
-                    ) {
-                        eprintln!("error: invalid config: {e}");
-                        std::process::exit(1);
-                    }
+            // Always restart lair.
+            println!("Restarting lair...");
+            dockerd::restart_container(&docker, dockerd::LAIR_CONTAINER_NAME).await?;
+            dockerd::wait_for_health(8000, std::time::Duration::from_secs(60)).await?;
+            println!("lair ready.");
 
-                    k8s::upsert_secret(
-                        &client,
-                        &api_key,
-                        current.gh_token.as_deref(),
-                        &current.noise_private_key,
-                        current.mcp_config_json.as_deref(),
-                        model.as_deref(),
-                        api_url.as_deref(),
-                        openai_api_key.as_deref(),
-                    ).await?;
-                    k8s::ensure_child_rbac(&client).await?;
-                    k8s::upsert_child_secret(
-                        &client,
-                        &api_key,
-                        current.gh_token.as_deref(),
-                        model.as_deref(),
-                        api_url.as_deref(),
-                        openai_api_key.as_deref(),
-                    ).await?;
-                    println!("Config synced to lair-secrets and child-secrets.");
-                }
-                Err(e) => eprintln!("Warning: could not sync config ({e}); proceeding with reload."),
-            }
-
-            let updated = if all {
-                k8s::update_and_restart_all(&client).await?
-            } else if !containers.is_empty() {
-                let names: Vec<&str> = containers.iter().map(|s| s.as_str()).collect();
-                k8s::restart_deployments(&client, &names).await?
+            // Optionally restart agents.
+            let targets: Vec<String> = if all {
+                dockerd::list_managed(&docker).await?
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .filter(|n| n != dockerd::LAIR_CONTAINER_NAME)
+                    .collect()
             } else {
-                k8s::restart_deployments(&client, &["lair"]).await?
+                containers
             };
-            if updated.is_empty() {
-                println!("Nothing restarted.");
-            } else {
-                println!("Restarting {} ...", updated.join(", "));
-                for name in &updated {
-                    let old_ver = k8s::get_deployment_version(&client, name).await
-                        .unwrap_or_else(|| "unknown".to_string());
-                    print!("  {name} ... ");
-                    std::io::Write::flush(&mut std::io::stdout())?;
-                    k8s::wait_for_deployment_ready(&client, name, 120).await?;
-                    k8s::wait_for_pod_http_ready(&client, name, 30).await?;
-                    let new_ver = k8s::get_deployment_version(&client, name).await
-                        .unwrap_or_else(|| "unknown".to_string());
-                    if old_ver != new_ver {
-                        println!("{old_ver} → {new_ver} ready.");
-                    } else {
-                        println!("{new_ver} ready.");
-                    }
+            for name in &targets {
+                print!("  {name} ... ");
+                use std::io::Write; std::io::stdout().flush().ok();
+                if let Err(e) = dockerd::restart_container(&docker, name).await {
+                    println!("error: {e:#}");
+                } else {
+                    println!("restarted.");
                 }
             }
         }
         Command::Logs { name, follow } => {
-            use octo_k8s_ops::k8s;
-            let client = k8s::build_client().await?;
+            let docker = dockerd::build_client()?;
+            dockerd::ensure_docker_reachable(&docker).await?;
 
-            // Build list of deployment names to show logs for.
             let names: Vec<String> = if let Some(n) = name {
                 vec![n]
             } else {
-                let mut list = k8s::list_managed_deployments(&client).await?
-                    .into_iter().map(|c| c.name).collect::<Vec<_>>();
-                list.push("lair".to_string());
+                let mut list: Vec<String> = dockerd::list_managed(&docker).await?
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .filter(|n| n != dockerd::LAIR_CONTAINER_NAME)
+                    .collect();
+                list.push(dockerd::LAIR_CONTAINER_NAME.to_string());
                 list
             };
 
             let multi = names.len() > 1;
-            for deployment in &names {
-                let (pod_name, is_running) = match k8s::get_running_pod(&client, deployment).await {
-                    Ok(p)  => (p, true),
-                    Err(_) => match k8s::get_any_pod(&client, deployment).await {
-                        Ok((p, phase)) => {
-                            eprintln!("[{deployment}] agent is {phase} (not Running) — showing available logs:");
-                            (p, false)
-                        }
-                        Err(e) => { eprintln!("[{deployment}] {e}"); continue; }
-                    }
-                };
-
-                if multi { println!("\n=== {deployment} ==="); }
-
-                let mut args = vec!["logs", "-n", k8s::NAMESPACE, &pod_name];
-                if follow && is_running { args.push("-f"); }
-
-                let status = tokio::process::Command::new("kubectl")
-                    .args(&args)
-                    .status().await?;
-                if !status.success() {
-                    eprintln!("[{deployment}] kubectl logs exited with {status}");
+            for name in &names {
+                if multi { println!("\n=== {name} ==="); }
+                if let Err(e) = dockerd::stream_logs(&docker, name, follow && !multi).await {
+                    eprintln!("[{name}] {e:#}");
                 }
-
-                // Can't follow multiple pods simultaneously; warn and move on.
-                if follow && multi { break; }
+                if follow && multi { break; } // can't follow multiple at once
             }
         }
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
@@ -669,70 +540,80 @@ async fn main() -> Result<()> {
         Command::Completions { shell } => {
             generate(shell, &mut Cli::command(), "octo", &mut std::io::stdout());
         }
-        Command::Get { resource } => {
-            let kind = match resource {
-                GetResource::Agents      => "deployments",
-                GetResource::Deployments => "deployments",
-                GetResource::Services    => "services",
-                GetResource::Pvc         => "pvc",
-                GetResource::Secrets     => "secrets",
-            };
-            tokio::process::Command::new("kubectl")
-                .args(["get", kind, "-n", octo_k8s_ops::k8s::NAMESPACE])
-                .status()
-                .await?;
-        }
         Command::Mcp { action } => match action {
-            McpAction::List { agent } => mcp::list(&agent).await?,
-            McpAction::Add { agent, name, command, args, env } => {
+            McpAction::List   { agent }                       => mcp::list(&agent).await?,
+            McpAction::Add    { agent, name, command, args, env } => {
                 mcp::add(&agent, &name, &command, &args, &env).await?;
             }
-            McpAction::Remove { agent, name } => mcp::remove(&agent, &name).await?,
-            McpAction::Import { agent, file } => mcp::import_from_file(&agent, &file).await?,
+            McpAction::Remove { agent, name }                 => mcp::remove(&agent, &name).await?,
+            McpAction::Import { agent, file }                 => mcp::import_from_file(&agent, &file).await?,
         },
         Command::Config { action } => {
-            use octo_k8s_ops::k8s;
-            let client = k8s::build_client().await?;
             match action {
                 ConfigAction::Show => {
-                    let s = k8s::read_lair_secrets(&client).await?;
-                    println!("anthropic_api_key: {}", mask(&s.anthropic_api_key));
-                    println!("openai_api_key:    {}", s.openai_api_key.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
-                    println!("model:             {}", s.model.as_deref().unwrap_or("(default)"));
-                    println!("api_url:           {}", s.api_url.as_deref().unwrap_or("(Anthropic)"));
-                    println!("gh_token:          {}", s.gh_token.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
+                    let cfg = octo_core::read_config();
+                    println!("anthropic_api_key: {}", cfg.anthropic_api_key.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
+                    println!("openai_api_key:    {}", cfg.openai_api_key.as_deref().map(mask).unwrap_or_else(|| "(not set)".into()));
+                    println!("model:             {}", cfg.model.as_deref().unwrap_or("(default)"));
+                    println!("api_url:           {}", cfg.api_url.as_deref().unwrap_or("(Anthropic)"));
                 }
-                ConfigAction::Set { model, api_url, anthropic_api_key: api_key, openai_api_key, gh_token } => {
-                    let current = k8s::read_lair_secrets(&client).await?;
-                    let new_api_key        = api_key       .unwrap_or(current.anthropic_api_key);
-                    let new_gh_token       = gh_token      .or(current.gh_token);
-                    let new_model          = model         .or(current.model);
-                    let new_api_url        = api_url       .or(current.api_url);
-                    let new_openai_api_key = openai_api_key.or(current.openai_api_key);
+                ConfigAction::Set { model, api_url, anthropic_api_key, openai_api_key, gh_token } => {
+                    let mut cfg = octo_core::read_config();
+                    if anthropic_api_key.is_some() { cfg.anthropic_api_key = anthropic_api_key; }
+                    if openai_api_key.is_some()    { cfg.openai_api_key    = openai_api_key; }
+                    if model.is_some()             { cfg.model             = model; }
+                    if api_url.is_some()           { cfg.api_url           = api_url; }
+                    octo_core::write_config(&cfg);
 
-                    k8s::upsert_secret(
-                        &client,
-                        &new_api_key,
-                        new_gh_token.as_deref(),
-                        &current.noise_private_key,
-                        current.mcp_config_json.as_deref(),
-                        new_model.as_deref(),
-                        new_api_url.as_deref(),
-                        new_openai_api_key.as_deref(),
-                    ).await?;
+                    // Rewrite the env file with the merged values so the next
+                    // `octo reload` (or `docker restart lair`) picks them up.
+                    if let Some(api_key) = cfg.anthropic_api_key.as_deref() {
+                        // Reuse the existing NOISE_PRIVATE_KEY/PUBLIC_PORT from
+                        // the current env file so we don't clobber lair's keypair.
+                        let existing = std::fs::read_to_string(dockerd::env_file_path()).unwrap_or_default();
+                        let noise_private_key = extract_env_value(&existing, "NOISE_PRIVATE_KEY")
+                            .unwrap_or_default();
+                        let public_port = extract_env_value(&existing, "PUBLIC_PORT")
+                            .and_then(|v| v.parse::<u16>().ok())
+                            .unwrap_or(8443);
 
-                    // Also persist to ~/.octo/config.json so reload picks it up.
-                    let mut local = octo_k8s_ops::read_config();
-                    local.anthropic_api_key = Some(new_api_key);
-                    local.openai_api_key    = new_openai_api_key;
-                    local.model             = new_model;
-                    local.api_url           = new_api_url;
-                    octo_k8s_ops::write_config(&local);
+                        let env_text = init::build_env_file(&init::EnvFileInput {
+                            api_key,
+                            gh_token:          gh_token.as_deref(),
+                            model:             cfg.model.as_deref(),
+                            api_url:           cfg.api_url.as_deref(),
+                            openai_api_key:    cfg.openai_api_key.as_deref(),
+                            noise_private_key: &noise_private_key,
+                            public_port,
+                        });
+                        std::fs::write(dockerd::env_file_path(), &env_text)?;
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let path = dockerd::env_file_path();
+                            if let Ok(mut perms) = std::fs::metadata(&path).map(|m| m.permissions()) {
+                                perms.set_mode(0o600);
+                                let _ = std::fs::set_permissions(&path, perms);
+                            }
+                        }
+                    }
 
-                    println!("Config updated in lair-secrets and ~/.octo/config.json.");
+                    println!("Config updated. Run `octo reload` to apply.");
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Pull a single `KEY=VALUE` line out of an env-file body.
+fn extract_env_value(body: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    for line in body.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix(&prefix) {
+            return Some(v.to_string());
+        }
+    }
+    None
 }

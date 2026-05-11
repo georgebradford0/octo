@@ -1,38 +1,50 @@
 # octo
 
-`octo` is a mobile agent management system which manages a fleet of LLM agents using Kubernetes.  It was originally designed for coding but can be used to deploy any type of agent.  
+`octo` is a mobile agent management system that runs a fleet of LLM agents as Docker containers on a host machine. It was originally designed for coding but can be used to deploy any type of agent.
 
 ## Architecture
 
-The system consists of a mobile client which connects to a Kubernetes cluster using the Noise Protocol.  Using the mobile client, a user can deploy new agents in the cluster from a main chat which connects to the Kubernetes control plane and interact with them through dedicated chats.  
+The system runs a single `lair` Docker container on a host with a static IP. The mobile client connects to lair over an encrypted Noise tunnel. From the lair chat the user creates, messages, and tears down "child" agent containers; each child also exposes its own Noise endpoint, so the mobile client can talk to a child directly once it knows about it.
 
 ## Install the CLI
-The CLI is a Rust command line client `octo` that is used for setting up the Kubernetes cluster and is mostly a thin wrapper around it, along with support for adding MCPs.
+
+The CLI is a Rust binary `octo` that bootstraps lair on the host and manages the per-container MCP config.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/georgebradford0/octo/main/scripts/get-cli.sh | sh
 ```
 
+`octo` requires [Docker](https://docs.docker.com/get-docker/) on the host. Install it before running `octo init`.
+
 ## Setup
-`init` must be run on a host with static IP.  It assumes there are `ANTHROPIC_API_KEY` and `GH_TOKEN` vars present in the environment.  If not they can be passed with fields `--api-key` and `--gh-token`.  Port 8443 is used by default as it is not blocked by mobile providers but can be changed with field `--public-port`.
+
+`octo init` must be run on a host with a static IP. It expects `ANTHROPIC_API_KEY` and (optionally) `GH_TOKEN` in the environment, or via `--anthropic-api-key` / `--gh-token`. The default Noise port is 8443; override with `--noise-port`.
+
 ```sh
 octo init
 ```
-The `init` will install k3s if no cluster is reachable, create `octo` namespace and RBAC, generate Noise keypair, download `lair` image and run it.   When `lair` is ready, a QR code will be printed to the screen.
 
-The QR code contains host, port and Noise pubkey.  Please be aware, anyone who has the QR data can connect to the cluster.
+`init` will:
 
-`mobile` directory contains a React Native app, which is currently only available in production for iOS -here- (TODO: publish iOS app and post link).   At the moment, Android users must build it
-```
-// TODO generate instructions for building React Native android app.
-```
-Open the mobile app and press the pulsing icon and scan QR printed by `octo init`.  It will establish a connection and open the main `lair` chat.
+1. Verify Docker is reachable.
+2. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels into remote-provisioned VMs, e.g. tailing logs).
+3. Write an env file (`~/.octo/lair-env`) and persist config to `~/.octo/config.json`.
+4. Pull the lair image and start the lair container, bind-mounting `~/.octo/lair/` → `/data` and the host's Docker socket so lair can manage child containers.
+5. Wait for lair's health check, then print a QR code containing the host, port, and Noise pubkey.
+
+Anyone with the QR data can connect, so treat it like a credential.
+
+The `mobile/` directory contains a React Native app, available in production for iOS (TODO: publish link). Android users must build it themselves for now. Open the app, tap the pulsing icon, and scan the QR. The connection opens to the lair chat.
 
 ## MCP Support
-MCP servers can be setup at initialization by passing an MCP JSON file to `init`.  
+
+MCP servers can be seeded at init time by passing an MCP JSON file:
+
+```sh
+octo init --mcp-config <path_to_mcp_json>
 ```
-octo init --mcp-config <path_to_mcp_json_file>
-```
-They can also be added at runtime in any container (including the `lair` container) and are hot reloaded. Below are some examples for 'uvx', 'npx' and 'uv run' (when package doesn't support 'uvx').  
+
+They can also be added at runtime against any container (lair by default) and are hot-reloaded:
 
 ```sh
 # uvx-based server
@@ -54,9 +66,12 @@ octo mcp list
 octo mcp remove --name github
 ```
 
-`mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. The server config is stored in `/data/mcp.json` inside the container and hot-reloaded within a few seconds — you can also ask lair to add MCP servers directly from chat, though I've found the cli is usually easier because Claude sometimes hallucinates package names for MCP servers.  Best practice is to ask to do a web search to verify package names before adding.
+`mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. The server config is stored at `/data/mcp.json` inside the container (for lair, that's `~/.octo/lair/mcp.json` on the host); lair hot-reloads it within a few seconds. You can also ask lair to add MCP servers directly from chat, though I've found the CLI is usually easier because Claude sometimes hallucinates package names — best practice is to ask for a web search to verify package names before adding.
 
-If the `--agent` field is not set the MCP will be added by default to `lair`.
+If `--agent` is omitted the MCP is added to `lair`.
 
 ## Startup Scripts
-New agents are created via a built-in tool `create_agent` in the `lair` main chat.  `create_agent` can take arguments for startup scripts and startup prompts. The startup script runs before the server starts (good for git config, package installs, etc.). The startup prompt is a first message sent to the agent once the server is ready, which will run an agentic loop to completion (or max turns).  These scripts are usually generated by the `lair` main chat when user directs lair to create a new agent.  Be aware that these are stored as env vars in the Deployment spec so they should not contain sensitive data.  The tool description explains this but it's good practice never to direct the agent to include them (your request may override the tool description).
+
+New agents are created via the built-in `create_agent` tool in the lair main chat. `create_agent` accepts `startup_script` and `startup_prompt` arguments. The startup script runs before the agent's server starts (good for git config, package installs, etc.). The startup prompt is the first message sent to the agent once the server is ready and triggers an agentic loop to completion (or max turns). These are usually generated by the lair chat when the user asks lair to create a new agent.
+
+Both fields are stored as plaintext env vars on the container — they should not contain sensitive data. The tool description explains this, but it's good practice never to direct the agent to include secrets; your request may override the tool description.

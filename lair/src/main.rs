@@ -1,13 +1,16 @@
 //! Merged binary that runs either the lair (parent / orchestrator) or agent
 //! (child / per-agent agentic loop) role. The Docker image ships one binary;
-//! the image's ENTRYPOINT runs the lair role, and child Deployments override
-//! `command:` to flip the role to `agent`.
+//! the image's ENTRYPOINT runs the lair role, and lair starts child
+//! containers with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]`
+//! to flip the role.
 
 use clap::{Parser, ValueEnum};
 
 mod bootstrap;
+mod docker;
 mod lair;
 mod agent;
+mod ssh;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Role {

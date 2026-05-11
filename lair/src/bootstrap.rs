@@ -65,12 +65,14 @@ pub async fn run_startup_script(role_log_prefix: &str) -> Result<()> {
 
 /// Ensure `workspace` exists on disk, optionally cloning a git repo into it.
 ///
-/// - `git_url = None`: just `mkdir -p workspace`. The agent runs there as a
-///   general-purpose workspace; no git involvement.
+/// - `git_url = None` + empty workspace: just `mkdir -p`. Agent runs as a
+///   generic workspace; no git involvement.
+/// - `git_url = None` + `.git` already present: the workspace was populated
+///   externally (typically by lair over SSH during remote-agent registration).
+///   Set the git user identity and treat the agent as repo-bound.
 /// - `git_url = Some(url)`: clone (or fetch if the workspace already has a
-///   .git dir), set the configured user identity, and install a git
-///   credential.helper if a `gh_token` is provided. Mirrors the bash
-///   entrypoint 1:1, including the HTTPS URL token-rewrite.
+///   .git dir), set user identity, and install a git credential.helper if a
+///   `gh_token` is provided. Mirrors the bash entrypoint 1:1.
 ///
 /// Returns `true` if a git repo is present in `workspace` after the call,
 /// `false` if the agent runs without one. This is the signal the caller
@@ -84,6 +86,23 @@ pub async fn ensure_workspace(
         .with_context(|| format!("create workspace {}", workspace.display()))?;
 
     let Some(url) = git_url.map(str::trim).filter(|s| !s.is_empty()) else {
+        // No GIT_URL — but the workspace may have been populated by lair
+        // out-of-band (remote-agent flow: lair clones via SSH after the
+        // container is up). Detect that and surface it as a repo so the
+        // system prompt is correct.
+        if workspace.join(".git").is_dir() {
+            info!(
+                "[agent] no GIT_URL set, but workspace at {} already contains a .git — \
+                 treating as repo-bound",
+                workspace.display(),
+            );
+            let workspace_str = workspace.to_string_lossy().to_string();
+            let user_name  = std::env::var("GIT_USER_NAME").unwrap_or_else(|_| "octo".to_string());
+            let user_email = std::env::var("GIT_USER_EMAIL").unwrap_or_else(|_| "octo@localhost".to_string());
+            run_git(&["-C", &workspace_str, "config", "user.name",  &user_name]).await?;
+            run_git(&["-C", &workspace_str, "config", "user.email", &user_email]).await?;
+            return Ok(true);
+        }
         info!("[agent] no GIT_URL set — running as a generic agent in {}", workspace.display());
         return Ok(false);
     };

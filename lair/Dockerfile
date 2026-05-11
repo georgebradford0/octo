@@ -9,24 +9,21 @@ WORKDIR /build
 
 # Workspace manifest includes the crates needed to build the merged lair binary.
 # tests/ and cli/ are not built inside the image — they're for local use only.
-RUN printf '[workspace]\nmembers = ["core", "lair", "k8s-ops"]\nresolver = "2"\n' > Cargo.toml
+RUN printf '[workspace]\nmembers = ["core", "lair"]\nresolver = "2"\n' > Cargo.toml
 
 COPY Cargo.lock ./
 COPY core/Cargo.toml    core/
 COPY lair/Cargo.toml    lair/
-COPY k8s-ops/Cargo.toml k8s-ops/
 
 # Stub sources for dep-caching layer.
-RUN mkdir -p core/src lair/src k8s-ops/src && \
+RUN mkdir -p core/src lair/src && \
     echo '' > core/src/lib.rs && \
-    echo 'fn main() {}' > lair/src/main.rs && \
-    echo '' > k8s-ops/src/lib.rs
+    echo 'fn main() {}' > lair/src/main.rs
 
 RUN cargo fetch
 
 COPY core/src    core/src
 COPY lair/src    lair/src
-COPY k8s-ops/src k8s-ops/src
 
 RUN cargo build --release -p octo-lair
 
@@ -45,6 +42,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl git gpg && \
     gh \
     jq \
     nodejs \
+    openssh-client \
     qrencode \
     && rm -rf /var/lib/apt/lists/* && \
     # uvx (via uv)
@@ -59,6 +57,7 @@ ENV OCTO_SKIP_SHELL_ENV=1
 ENV OCTO_DATA_DIR=/data
 ENV NOISE_KEY_FILE=/data/noise_key.bin
 
-# Default ENTRYPOINT runs the parent (lair) role. Child Deployments override
-# this with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]`.
+# Default ENTRYPOINT runs the parent (lair) role. Child containers run the
+# same image with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]`
+# (lair sets this when it `docker create`s an agent container).
 ENTRYPOINT ["/usr/local/bin/octo-lair", "--role", "lair"]

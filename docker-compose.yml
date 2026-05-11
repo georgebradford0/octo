@@ -1,67 +1,34 @@
 services:
-  # ── Master control node ────────────────────────────────────────────────────
-  # Single entry point for the mobile app.  Manages child repo containers via
-  # the Docker socket.  Scan its QR code once; child containers appear in-app.
+  # Single lair container. Manages child agent containers via the host's
+  # Docker socket; child containers appear inside the mobile app once mobile
+  # has scanned lair's QR. `octo init` is the recommended entry point — this
+  # compose file is for operators who prefer to manage lair via compose.
   lair:
     container_name: lair
     image: ghcr.io/georgebradford0/lair:latest
     build:
       context: .
       dockerfile: lair/Dockerfile
+    labels:
+      octo.managed: "1"
+      octo.role:    "lair"
     ports:
-      - "${MASTER_PORT:-9000}:${MASTER_PORT:-9000}"
+      - "${LAIR_NOISE_PORT:-8443}:9000"
+      - "127.0.0.1:${LAIR_HTTP_PORT:-8000}:8000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY_OCTO}
       - GH_TOKEN=${GH_TOKEN:-}
+      - MODEL=${MODEL:-}
+      - OPENAI_API_URL=${OPENAI_API_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - PUBLIC_HOST=${PUBLIC_HOST:-}
-      - NOISE_PORT=${MASTER_PORT:-9000}
-      - CHILD_PORT_RANGE=${CHILD_PORT_RANGE:-9100-9199}
+      - PUBLIC_PORT=${LAIR_NOISE_PORT:-8443}
+      - NOISE_PORT=9000
+      - OCTO_DATA_DIR=/data
+      - NOISE_KEY_FILE=/data/noise_key.bin
+      - OCTO_SKIP_SHELL_ENV=1
       - OCTO_DEV=${OCTO_DEV:-0}
-      - STARTUP_SCRIPT=${STARTUP_SCRIPT:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - octo-lair-data:/data
-    networks:
-      - octo-net
-
-  # ── Standalone child server (optional / dev) ───────────────────────────────
-  # Use this to run a single repo server without master, or as a template for
-  # understanding the env vars master uses when spawning child containers.
-  octo:
-    build:
-      context: .
-      dockerfile: lair/Dockerfile
-    entrypoint: ["/usr/local/bin/docker-entrypoint-server.sh"]
-    ports:
-      - "${NOISE_PORT:-9100}:${NOISE_PORT:-9100}"
-    environment:
-      - GIT_URL=${GIT_URL:-}
-      - GH_TOKEN=${GH_TOKEN:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GIT_USER_NAME=${GIT_USER_NAME:-octo}
-      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-octo@localhost}
-      - PUBLIC_HOST=${PUBLIC_HOST:-}
-      - NOISE_PORT=${NOISE_PORT:-9100}
-      - OCTO_DEV=${OCTO_DEV:-0}
-    volumes:
-      - workspace:/workspace
-      - octo-data:/data
-      # Uncomment to use SSH key auth instead of GH_TOKEN:
-      # - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
-    networks:
-      - octo-net
-    labels:
-      octo.managed: "1"
-      octo.git_url: "${GIT_URL}"
-    profiles:
-      - standalone
-
-networks:
-  octo-net:
-    name: octo-net
-    driver: bridge
-
-volumes:
-  workspace:
-  octo-data:
-  octo-lair-data:
+      - ${LAIR_DATA_DIR:-./lair-data}:/data
+    restart: unless-stopped

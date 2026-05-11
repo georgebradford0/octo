@@ -1,84 +1,148 @@
-use anyhow::{Context, Result};
-use octo_k8s_ops::k8s;
-use data_encoding::BASE32_NOPAD;
-use tokio::process::Command;
+//! `octo init` — bootstrap a lair Docker container on the local host.
 
-pub async fn run(
-    api_key:        &str,
-    gh_token:       Option<&str>,
-    noise_port:     u16,
-    public_port:    u16,
-    mcp_config:     Option<&std::path::Path>,
-    model:          Option<&str>,
-    api_url:        Option<&str>,
-    openai_api_key: Option<&str>,
-) -> Result<()> {
-    ensure_kubernetes().await?;
+use std::{
+    fs,
+    path::Path,
+};
+
+use anyhow::{Context, Result};
+use data_encoding::BASE32_NOPAD;
+use octo_core::{ensure_ssh_keypair, Config};
+
+use crate::dockerd;
+
+pub struct InitOptions<'a> {
+    pub api_key:        &'a str,
+    pub gh_token:       Option<&'a str>,
+    pub noise_port:     u16,
+    pub http_port:      u16,
+    pub image:          &'a str,
+    pub mcp_config:     Option<&'a Path>,
+    pub model:          Option<&'a str>,
+    pub api_url:        Option<&'a str>,
+    pub openai_api_key: Option<&'a str>,
+}
+
+pub async fn run(opts: InitOptions<'_>) -> Result<()> {
+    let docker = dockerd::build_client()?;
+    dockerd::ensure_docker_reachable(&docker).await?;
+
+    let lair_dir = dockerd::lair_data_dir();
+    fs::create_dir_all(&lair_dir)
+        .with_context(|| format!("create {}", lair_dir.display()))?;
+
+    // SSH keypair for ops backchannels (e.g. remote-VM agents — see CLAUDE.md).
+    match ensure_ssh_keypair(&lair_dir) {
+        Ok((priv_path, pub_path)) => {
+            println!("SSH keypair ready:");
+            println!("  private: {}", priv_path.display());
+            println!("  public:  {}", pub_path.display());
+        }
+        Err(e) => eprintln!("warning: could not ensure SSH keypair: {e:#}"),
+    }
 
     let (noise_private_key_hex, pubkey_b32) = generate_keypair()?;
 
-    let mcp_config_json: Option<String> = match mcp_config {
-        None => None,
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("read mcp config {}", path.display()))?;
-            let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
-                .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
-            // Expand ${VAR} references in env values using the local environment,
-            // since the pod won't have access to the user's shell environment.
-            for server in &mut servers {
-                if let Some(env) = server.get_mut("env").and_then(|e| e.as_object_mut()) {
-                    for (_, val) in env.iter_mut() {
-                        if let Some(s) = val.as_str() {
-                            if s.starts_with("${") && s.ends_with('}') {
-                                let var = &s[2..s.len() - 1];
-                                match std::env::var(var) {
-                                    Ok(resolved) => *val = serde_json::Value::String(resolved),
-                                    Err(_) => eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded"),
-                                }
+    // Persist the operator's config (model, API key, etc.) so subsequent
+    // CLI invocations have a sensible default.
+    let mut cfg = octo_core::read_config();
+    cfg.anthropic_api_key = Some(opts.api_key.to_string());
+    if opts.openai_api_key.is_some() { cfg.openai_api_key = opts.openai_api_key.map(str::to_string); }
+    if opts.model.is_some()          { cfg.model          = opts.model.map(str::to_string); }
+    if opts.api_url.is_some()        { cfg.api_url        = opts.api_url.map(str::to_string); }
+    octo_core::write_config(&cfg);
+    println!("Wrote operator config to {}.", octo_core::config_path().display());
+
+    // Seed mcp.json if the operator provided one. `${VAR}` references are
+    // expanded against the *host* env so the operator can use the same file
+    // the agent will end up reading.
+    if let Some(path) = opts.mcp_config {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read mcp config {}", path.display()))?;
+        let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
+        for server in &mut servers {
+            if let Some(env) = server.get_mut("env").and_then(|e| e.as_object_mut()) {
+                for (_, val) in env.iter_mut() {
+                    if let Some(s) = val.as_str() {
+                        if s.starts_with("${") && s.ends_with('}') {
+                            let var = &s[2..s.len() - 1];
+                            match std::env::var(var) {
+                                Ok(resolved) => *val = serde_json::Value::String(resolved),
+                                Err(_) => eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded"),
                             }
                         }
                     }
                 }
             }
-            Some(serde_json::to_string(&servers)?)
         }
-    };
-
-    let client = k8s::build_client().await?;
-
-    println!("Ensuring octo namespace...");
-    k8s::ensure_namespace(&client).await?;
-    println!("Configuring RBAC...");
-    k8s::ensure_rbac(&client).await?;
-    k8s::ensure_child_rbac(&client).await?;
-    println!("Storing API keys and keypair in cluster secret...");
-    k8s::upsert_secret(&client, api_key, gh_token, &noise_private_key_hex, mcp_config_json.as_deref(), model, api_url, openai_api_key).await?;
-    k8s::upsert_child_secret(&client, api_key, gh_token, model, api_url, openai_api_key).await?;
-    println!("Configuring GHCR image pull credentials...");
-    k8s::ensure_ghcr_pull_secret(&client, gh_token).await?;
-    println!("Provisioning lair data volume...");
-    k8s::ensure_lair_pvc(&client).await?;
-    println!("Applying lair Deployment...");
-    k8s::upsert_lair_deployment(&client, public_port).await?;
-    println!("Configuring ClusterIP and NodePort services...");
-    k8s::ensure_lair_services(&client, noise_port).await?;
-
-    if public_port != noise_port {
-        println!("Setting up socat proxy ({public_port} -> {noise_port})...");
-        ensure_socat_proxy(public_port, noise_port).await?;
+        let dest = lair_dir.join("mcp.json");
+        fs::write(&dest, serde_json::to_string_pretty(&servers)?)
+            .with_context(|| format!("write {}", dest.display()))?;
+        println!("Seeded MCP config: {}", dest.display());
     }
 
-    // Restart so the pod loads the new keypair from the secret before we print the QR.
-    println!("Restarting lair to load new keypair...");
-    k8s::rollout_restart_deployment(&client, "lair").await?;
+    // Drop a copy of the Noise keypair into the bind-mounted dir so lair can
+    // load it without an env var. Same 32-byte format `load_or_generate_keypair`
+    // expects.
+    let key_file = lair_dir.join("noise_key.bin");
+    if !key_file.exists() {
+        let private_bytes = hex::decode(&noise_private_key_hex[..64])
+            .context("decode noise private key")?;
+        fs::write(&key_file, &private_bytes)
+            .with_context(|| format!("write {}", key_file.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&key_file)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&key_file, perms).ok();
+        }
+        println!("Wrote Noise keypair to {}.", key_file.display());
+    }
+
+    // Compose the env file fed to `docker run --env-file`.
+    let env_path = dockerd::env_file_path();
+    fs::create_dir_all(env_path.parent().unwrap()).ok();
+    let env_text = build_env_file(&EnvFileInput {
+        api_key:           opts.api_key,
+        gh_token:          opts.gh_token,
+        model:             opts.model,
+        api_url:           opts.api_url,
+        openai_api_key:    opts.openai_api_key,
+        noise_private_key: &noise_private_key_hex,
+        public_port:       opts.noise_port,
+    });
+    write_secret_file(&env_path, &env_text)?;
+    println!("Wrote env file: {}", env_path.display());
+
+    // Pull and (re)start lair.
+    println!("Pulling image {}...", opts.image);
+    dockerd::pull_image(&docker, opts.image).await?;
+
+    let launch = dockerd::LairLaunch {
+        image:           opts.image,
+        host_noise_port: opts.noise_port,
+        host_http_port:  opts.http_port,
+        data_dir:        &lair_dir,
+        env_file:        &env_path,
+        docker_socket:   resolve_docker_socket(),
+    };
+    println!("Starting lair container...");
+    dockerd::start_lair(&docker, &launch).await?;
+
     println!("Waiting for lair to be ready...");
-    k8s::wait_for_deployment_ready(&client, "lair", 180).await?;
+    dockerd::wait_for_health(opts.http_port, std::time::Duration::from_secs(60)).await?;
 
-    let ip = k8s::get_public_ip_via_pod(&client, "lair").await?;
-    let qr_data = format!("2:{ip}:{public_port}:{pubkey_b32}");
-
-    println!("\nlair is live at {ip} (Noise NodePort {noise_port}, QR port {public_port})");
+    let ip = match dockerd::detect_public_ip().await {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("warning: could not detect public IP ({e:#}). Falling back to 127.0.0.1.");
+            "127.0.0.1".to_string()
+        }
+    };
+    let qr_data = format!("2:{ip}:{}:{pubkey_b32}", opts.noise_port);
+    println!("\nlair is live at {ip}:{}\n", opts.noise_port);
     println!("QR data: {qr_data}\n");
 
     let code = qrcode::QrCode::new(&qr_data).context("generate QR code")?;
@@ -97,136 +161,67 @@ fn generate_keypair() -> Result<(String, String)> {
     let builder = snow::Builder::new(
         "Noise_XX_25519_ChaChaPoly_SHA256".parse().context("parse noise params")?,
     );
-    let keypair = builder.generate_keypair().context("generate keypair")?;
-    let mut combined = keypair.private.clone();
-    combined.extend_from_slice(&keypair.public);
-    Ok((hex::encode(&combined), BASE32_NOPAD.encode(&keypair.public)))
+    let kp = builder.generate_keypair().context("generate keypair")?;
+    let mut combined = kp.private.clone();
+    combined.extend_from_slice(&kp.public);
+    Ok((hex::encode(&combined), BASE32_NOPAD.encode(&kp.public)))
 }
 
-#[cfg(target_os = "linux")]
-async fn ensure_socat_proxy(public_port: u16, noise_port: u16) -> Result<()> {
-    // Install socat if missing.
-    let has_socat = Command::new("which").arg("socat").output().await
-        .map(|o| o.status.success()).unwrap_or(false);
-    if !has_socat {
-        run_sh("apt-get install -y socat").await?;
-    }
-
-    let unit = format!(
-        "[Unit]\nDescription=Noise TCP proxy {public_port} -> {noise_port}\nAfter=network.target\n\n\
-         [Service]\nExecStart=/usr/bin/socat TCP-LISTEN:{public_port},fork,reuseaddr TCP:127.0.0.1:{noise_port}\n\
-         Restart=always\nRestartSec=3\n\n\
-         [Install]\nWantedBy=multi-user.target\n"
-    );
-    run_sh(&format!(
-        "echo '{}' | sudo tee /etc/systemd/system/noise-proxy.service > /dev/null",
-        unit.replace('\'', "'\\''")
-    )).await.context("write noise-proxy.service")?;
-    run_sh("sudo systemctl daemon-reload && sudo systemctl enable --now noise-proxy").await?;
-    Ok(())
+pub struct EnvFileInput<'a> {
+    pub api_key:           &'a str,
+    pub gh_token:          Option<&'a str>,
+    pub model:             Option<&'a str>,
+    pub api_url:           Option<&'a str>,
+    pub openai_api_key:    Option<&'a str>,
+    pub noise_private_key: &'a str,
+    pub public_port:       u16,
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn ensure_socat_proxy(_public_port: u16, _noise_port: u16) -> Result<()> {
-    println!("  (skipping socat setup — not Linux; proxy must be configured manually)");
-    Ok(())
+pub fn build_env_file(i: &EnvFileInput) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("ANTHROPIC_API_KEY={}\n", i.api_key));
+    out.push_str(&format!("NOISE_PRIVATE_KEY={}\n", i.noise_private_key));
+    out.push_str(&format!("PUBLIC_PORT={}\n", i.public_port));
+    out.push_str("NOISE_PORT=9000\n");
+    out.push_str("OCTO_DATA_DIR=/data\n");
+    out.push_str("NOISE_KEY_FILE=/data/noise_key.bin\n");
+    out.push_str("OCTO_SKIP_SHELL_ENV=1\n");
+    if let Some(v) = i.gh_token       { out.push_str(&format!("GH_TOKEN={v}\n")); }
+    if let Some(v) = i.model          { out.push_str(&format!("MODEL={v}\n")); }
+    if let Some(v) = i.api_url        { out.push_str(&format!("OPENAI_API_URL={v}\n")); }
+    if let Some(v) = i.openai_api_key { out.push_str(&format!("OPENAI_API_KEY={v}\n")); }
+    out
 }
 
-async fn ensure_kubernetes() -> Result<()> {
-    if !kubectl_available().await {
-        install_kubectl().await?;
-    }
-    if !cluster_reachable().await {
-        install_k3s().await?;
-    }
-    Ok(())
-}
-
-async fn kubectl_available() -> bool {
-    Command::new("kubectl")
-        .args(["version", "--client", "--output=json"])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-async fn cluster_reachable() -> bool {
-    Command::new("kubectl")
-        .arg("cluster-info")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "linux")]
-async fn run_sh(cmd: &str) -> Result<()> {
-    let status = Command::new("sh")
-        .args(["-c", cmd])
-        .status()
-        .await
-        .context("sh")?;
-    if !status.success() {
-        anyhow::bail!("command failed: {cmd}");
+fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
+    fs::write(path, contents)
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms).ok();
     }
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-async fn install_kubectl() -> Result<()> {
-    println!("kubectl not found, installing...");
-    let arch = if cfg!(target_arch = "x86_64") { "amd64" } else { "arm64" };
-    run_sh(&format!(
-        r#"set -e
-VER=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
-curl -fsSL "https://dl.k8s.io/release/$VER/bin/linux/{arch}/kubectl" -o /tmp/kubectl
-sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-rm /tmp/kubectl"#
-    ))
-    .await?;
-    println!("kubectl installed.");
-    Ok(())
+pub fn resolve_docker_socket() -> &'static str {
+    "/var/run/docker.sock"
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn install_kubectl() -> Result<()> {
-    anyhow::bail!(
-        "kubectl not found.\n  macOS:  brew install kubectl\n  Other:  https://kubernetes.io/docs/tasks/tools/"
-    )
-}
-
-#[cfg(target_os = "linux")]
-async fn install_k3s() -> Result<()> {
-    println!("No Kubernetes cluster found, installing k3s...");
-    // --write-kubeconfig-mode=644 makes the kubeconfig readable by non-root users.
-    run_sh("curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--write-kubeconfig-mode=644' sh -").await?;
-
-    let kubeconfig = "/etc/rancher/k3s/k3s.yaml";
-    std::env::set_var("KUBECONFIG", kubeconfig);
-
-    println!("Waiting for k3s to be ready...");
-    for i in 0..60 {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        if cluster_reachable().await {
-            println!("k3s is ready.");
-            println!("  Add to your shell: export KUBECONFIG={kubeconfig}");
-            return Ok(());
+/// Hydrate `Config` from `~/.octo/config.json` or a `--config` override path.
+pub fn load_config(explicit: Option<&Path>) -> Result<Config> {
+    match explicit {
+        Some(p) => {
+            if !p.exists() {
+                anyhow::bail!("config file not found: {}", p.display());
+            }
+            let text = fs::read_to_string(p)
+                .with_context(|| format!("read {}", p.display()))?;
+            serde_json::from_str::<Config>(&text)
+                .with_context(|| format!("invalid JSON in {}", p.display()))
         }
-        if i > 0 && i % 5 == 0 {
-            println!("  Still waiting... ({}s)", (i + 1) * 3);
-        }
+        None => Ok(octo_core::read_config()),
     }
-    anyhow::bail!("k3s installed but cluster did not become reachable within 180s")
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn install_k3s() -> Result<()> {
-    anyhow::bail!(
-        "No Kubernetes cluster reachable.\n\
-         Options:\n\
-         • Docker Desktop: enable Kubernetes in settings\n\
-         • k3d:      brew install k3d && k3d cluster create\n\
-         • minikube: brew install minikube && minikube start"
-    )
 }

@@ -10,15 +10,15 @@ Do **not** commit debug/diagnostic logging (`println!`, `console.log`, etc. adde
 
 ## Docker images
 
-One image, one binary, two roles. Both parent (lair) and child (agent) containers run the same `octo-lair` binary; the image's ENTRYPOINT runs the lair role, and child Deployments override `command:` to flip the role to `agent`.
+One image, one binary, two roles. Both the parent (lair) and child (agent) containers run the same `octo-lair` binary. The image's ENTRYPOINT runs the lair role; lair creates child containers with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]` to flip the role.
 
 | Image | Used by |
 |-------|---------|
-| `ghcr.io/georgebradford0/lair` | lair (parent) and all child containers |
+| `ghcr.io/georgebradford0/lair` | lair (parent) and every child container |
 
-The image's ENTRYPOINT is `["/usr/local/bin/octo-lair", "--role", "lair"]`. Child Deployments override it with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]` in the pod spec. There are no shell entrypoint scripts — `lair/src/bootstrap.rs` does the public-IP detection, optional git clone, STARTUP_SCRIPT execution, and post-listen QR rendering directly in Rust. Each child gets its own Deployment, two PVCs (`{name}-data`, `{name}-workspace`), a ClusterIP Service (port 8000), and a NodePort Service (port 9000, assigned from range 30100–30199).
+There are no shell entrypoint scripts — `lair/src/bootstrap.rs` does the public-IP detection, optional git clone, STARTUP_SCRIPT execution, and post-listen QR rendering directly in Rust.
 
-A child container is **not** required to clone a git repo. If `GIT_URL` is set the workspace is populated from that repo (with `GH_TOKEN` for HTTPS); if unset, the workspace is just `mkdir -p /workspace` and the agent runs there as a general-purpose agent. Set `AGENT_PURPOSE` (env var) to give a no-repo agent a specific mission in its system prompt.
+Each child gets two Docker named volumes (`agent-<name>-data`, `agent-<name>-workspace`) and its Noise port (9000 inside the container) published on a host port from the 30100–30199 range. A child container is **not** required to clone a git repo: if `GIT_URL` is set the workspace is populated from that repo (with `GH_TOKEN` for HTTPS); if unset, the workspace is just `mkdir -p /workspace` and the agent runs there as a general-purpose agent. Set `AGENT_PURPOSE` (env var) to give a no-repo agent a specific mission in its system prompt.
 
 Build and push from the **repo root** (replace `X.Y.Z` with the new version). Always use `buildx` with `--platform` so both `linux/amd64` and `linux/arm64` are included in the manifest:
 
@@ -37,17 +37,39 @@ docker buildx build \
 
 ## Architecture overview
 
-Octo is an agentic coding assistant: a server runs an AI loop against a git repo and clients (mobile, desktop) connect to it via an encrypted tunnel.
+Octo is an agentic coding assistant: a single `lair` Docker container runs on a host machine, manages child agent containers via the local Docker daemon, and exposes itself to a mobile client over an encrypted tunnel.
 
 ### Components
 
 | Directory | Language | Role |
 |-----------|----------|------|
-| `core/` | Rust | Shared library: agentic loop, Claude API streaming, git/worktree ops, config, HTTP/WS plumbing (`core::app`) |
-| `lair/` | Rust + Axum | Merged binary `octo-lair` with `--role lair\|agent`. `lair/src/lair.rs` is the parent (orchestrates child Deployments); `lair/src/agent.rs` is the child (general-purpose agent, optionally repo-scoped). Both are reachable from `lair/src/main.rs`'s argparse dispatch. |
-| `k8s-ops/` | Rust | Kubernetes primitives shared by lair role + CLI: Deployment / Secret / RBAC helpers, child-secrets, pod readiness waits. |
-| `cli/` | Rust | `octo` CLI for managing the cluster (init, reload, pods, logs, config). |
+| `core/` | Rust | Shared library: agentic loop, Claude API streaming, git/worktree ops, config, HTTP/WS plumbing (`core::app`), agent **registry** types (`AgentRecord`, `Registry`), SSH keygen, MCP plumbing |
+| `lair/` | Rust + Axum | Merged binary `octo-lair` with `--role lair\|agent`. `lair/src/lair.rs` is the parent (orchestrates child containers via `lair/src/docker.rs`); `lair/src/agent.rs` is the child (general-purpose agent, optionally repo-scoped). Both are reachable from `lair/src/main.rs`'s argparse dispatch. |
+| `cli/` | Rust | `octo` CLI for managing the local Docker host (init, reload, agents, logs, mcp, config). |
 | `mobile/` | React Native (TS) | iOS/Android client: QR scan → native Noise tunnel → WebSocket UI |
+
+### Agent registry
+
+The list of agents lair owns lives in `<lair_data_dir>/agents.json` (`/data/agents.json` inside the container, bind-mounted to `~/.octo/lair/agents.json` on the host by default). Lair is the sole writer; the CLI reads it for `octo agents list`. Schema is `octo_core::AgentRecord`: `name`, `container_id`, `host`, `port`, `pubkey`, `git_url`, `status`, `image_version`, `created_at`, `last_seen`, `instance_id`, `provider`, `metadata`. `AgentRecord::is_remote()` returns true when the record represents a VM-backed agent (no `container_id`).
+
+Lair's poller runs every 10 s, calls `docker list_containers` for things labelled `octo.managed=1`, and reconciles each *local* row's status. Containers that have disappeared from Docker are dropped from the registry on the next poll (so `octo agents delete <name>` from the CLI cleans up cleanly). Remote rows are skipped — they're surfaced to mobile as-is and stay in the registry until `forget_agent` removes them.
+
+### Remote agents
+
+Lair can also register agents that live on a VM provisioned via a third-party cloud-provisioning MCP (AWS, Hetzner, GCP, etc.). It's a three-step LLM-driven flow, with the operator's API keys *never* flowing through the cloud provider or the provisioning MCP — lair owns the SSH connection and finishes the bootstrap directly:
+
+1. `mint_bootstrap_userdata(name, agent_purpose?, startup_script?, public_port?)` returns a cloud-init bash script. The userdata is **credentials-free** — it only trusts lair's SSH public key, installs Docker + git, prepares bind-mount dirs (`/var/lib/octo/agent-data` ↔ `/data`, `/var/lib/octo/agent-workspace` ↔ `/workspace`), and starts the agent container with non-secret env (PUBLIC_PORT, NOISE_PORT, OCTO_DATA_DIR, …). The agent boots without API keys, writes its `agent-info.json`, and waits.
+2. The LLM hands the userdata to whichever provisioning MCP is configured. The MCP returns a public IP and instance id.
+3. `register_remote_agent(name, host, git_url?, provider?, instance_id?, metadata?)` runs everything secret-bearing over SSH using lair's private key (`/data/ssh_id_ed25519`):
+   a. polls `/var/lib/octo/agent-data/agent-info.json` until the agent publishes its identity (cloud-init delays absorbed),
+   b. writes `/var/lib/octo/agent-data/config.json` with API keys harvested from lair's own env (Anthropic / OpenAI keys + model),
+   c. if `git_url` is given, clones it into the workspace using lair's `GH_TOKEN` (URL-spliced, plus a `credential.helper` for `git push`),
+   d. `docker restart`s the agent so it re-runs `ensure_workspace` (detects the freshly-cloned repo → repo-bound system prompt) and picks up `config.json`,
+   e. inserts an `AgentRecord` with `host=Some(<public_ip>)`, `instance_id=Some(...)`, and any provider `metadata`.
+
+Mobile reads the new row from its usual `containers` event and opens a Noise tunnel directly to `<public_ip>:<port>` — no `octo init`-style QR scan needed.
+
+Termination is the reverse: lair has no embedded cloud SDK, so the LLM calls the provisioning MCP's terminate-instance method with `instance_id` from `list_agents`, then `forget_agent(name)` clears the registry row.
 
 ### Transport
 
@@ -77,21 +99,20 @@ Wire frames (server → client unless noted):
 | `user_message`    | c → s     | `text: string`. Start a new agentic turn. |
 | `interrupt`       | c → s     | (no fields) Cancel the in-flight turn. |
 | `pong`            | c → s     | `id: number`. Reply to `ping`. After `KEEPALIVE_MAX_MISSED` (2) unacked pings the server evicts the WS. |
-| `start_container` | c → s     | `id: string`. **Lair only.** Scale a child Deployment to 1. |
+| `start_container` | c → s     | `id: string`. **Lair only.** Start the named (stopped) agent container. |
 
-Mobile auto-reconnects with exponential backoff (1 s → 30 s, capped) on unintentional close; the counter resets on the next `ready`. The deprecated `GET /containers` and `POST /containers/start` HTTP endpoints have been removed (use the equivalent `/stream` events instead).
+Mobile auto-reconnects with exponential backoff (1 s → 30 s, capped) on unintentional close; the counter resets on the next `ready`.
 
-Server listens on port 9000 (`NOISE_PORT`). The Curve25519 keypair is persisted in `/data`.
+Lair listens on port 9000 (`NOISE_PORT`) inside the container; the host publishes it on whatever port `octo init` set (default 8443). Lair's Curve25519 keypair and registry are persisted in `/data` (bind-mounted from `~/.octo/lair/` on the host).
 
 ### lair (parent container)
 
 `lair` is the parent orchestration node. The mobile client connects to it first via the QR-scanned Noise tunnel. It:
 
-- Polls Kubernetes (every 10 s) for Deployments in the `octo` namespace labelled `octo.managed=1`
-- Caches each child's Noise public key in `/data/pubkey_registry.json`
-- Pushes the current container list as a `containers` event over `/stream` on every poller state-change (mobile subscribes; no HTTP polling)
-- Accepts `start_container` frames from the client over `/stream`, which scale the child Deployment to 1 replica and trigger an immediate re-poll
-- Runs its own agentic loop (via `core`) so the user can ask it to create/manage child containers
+- Polls Docker (every 10 s) for containers labelled `octo.managed=1` and reconciles them against `/data/agents.json`
+- Pushes the current container list as a `containers` event over `/stream` on every state-change (mobile subscribes; no HTTP polling)
+- Accepts `start_container` frames from the client over `/stream`, which `docker start` the named agent and trigger an immediate re-poll
+- Runs its own agentic loop (via `core`) so the user can ask it to create / inspect / terminate child containers from chat
 
 Image: `ghcr.io/georgebradford0/lair`
 
@@ -99,10 +120,14 @@ Image: `ghcr.io/georgebradford0/lair`
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | yes | Claude API access for parent loop |
-| `GH_TOKEN` | yes | Passed to child containers on creation |
-| `PUBLIC_HOST` | no | Advertised host in QR (auto-detected if unset) |
-| `NOISE_PORT` | no | Listening port (default: 9000) |
+| `ANTHROPIC_API_KEY` | yes | Claude API access (also forwarded to children) |
+| `GH_TOKEN` | no  | Forwarded to children for repo clones / PRs |
+| `MODEL` / `OPENAI_API_URL` / `OPENAI_API_KEY` | no | OpenAI-compatible provider for both lair and children |
+| `NOISE_PRIVATE_KEY` | no | Hex-encoded 64-byte (private ++ public) keypair. Falls back to generating + persisting in `/data/noise_key.bin`. |
+| `PUBLIC_HOST` | no | Advertised host in QR (auto-detected via `api.ipify.org` if unset) |
+| `PUBLIC_PORT` | no | Externally-reachable port (defaults to `NOISE_PORT`) |
+| `NOISE_PORT` | no | Listening port inside the container (default: 9000) |
+| `OCTO_AGENT_IMAGE` | no | Image tag used when lair creates child containers (default: `ghcr.io/georgebradford0/lair:latest`) |
 
 ### agent (child container) environment variables
 
@@ -119,8 +144,6 @@ Image: `ghcr.io/georgebradford0/lair`
 | `PUBLIC_PORT` | no | Externally-reachable port (defaults to `NOISE_PORT`) |
 | `NOISE_PORT` | no | Listening port (default: 9000) |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | no | Commit author identity |
-| `LAIR_URL` | no | HTTP URL of the parent lair container (e.g. `http://lair:8000`); when set, enables the `message_lair` tool so the agent can ask lair for information or secrets |
-| `DEPLOYMENT_NAME` | no | This pod's Deployment name. When set together with `LAIR_URL`, the agent POSTs its compiled version to lair's `/child-version` endpoint at boot so `octo reload` can show the version transition. |
 
 ### CI/CD workflows (all manual dispatch)
 

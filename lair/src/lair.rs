@@ -1,5 +1,3 @@
-use octo_k8s_ops::k8s;
-
 use std::{
     fs,
     path::PathBuf,
@@ -7,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -23,12 +21,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bollard::Docker;
 use octo_core::{
     self,
-    build_ephemeral_system_prompt, build_tools_with_mcp, chain_executor_with_mcp,
-    cancel_task as core_cancel_task, completion_chat_event, finalize_task, init_mcp_pool,
-    init_shell_env, load_or_generate_keypair, now_secs, register_task, tasks_wire_json,
-    TaskRecord, TaskStatus,
+    build_tools_with_mcp, chain_executor_with_mcp,
+    cancel_task as core_cancel_task, completion_chat_event, ensure_ssh_keypair, finalize_task,
+    init_mcp_pool, init_shell_env, load_or_generate_keypair, now_secs, register_task,
+    tasks_wire_json, TaskRecord, TaskStatus,
     relay as relay_client, RelaySigner,
     resolve_api_key, resolve_model, run_noise_proxy, run_background_task_tool, send_message,
     spawn_background_task, to_base32, ApiMessage, AnthropicTool, BackgroundTaskParams, ChatEvent,
@@ -39,10 +38,13 @@ use octo_core::{
 };
 use hex;
 use futures_util::{SinkExt, StreamExt};
-use octo_k8s_ops::Client;
 use tokio::sync::{mpsc, watch, Notify};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
+
+use crate::docker as docker_ops;
+use crate::ssh as ssh_ops;
+use octo_core::{AgentRecord, AgentStatus, Registry, status_from_docker};
 
 // ── Noise Protocol ────────────────────────────────────────────────────────────
 
@@ -92,7 +94,7 @@ struct AppState {
     messages:             Arc<Mutex<Vec<ApiMessage>>>,
     last_cost_usd:        Mutex<Option<f64>>,
     system:               String,
-    /// Watch channel published by the K8s poller. Each /stream WS subscribes
+    /// Watch channel published by the Docker poller. Each /stream WS subscribes
     /// and re-sends a `containers` event whenever the list changes.
     containers_tx:        watch::Sender<Vec<ContainerInfo>>,
     /// Receiver kept alongside the sender so `containers_tx` always has at
@@ -103,8 +105,12 @@ struct AppState {
     /// Hex-encoded 64-byte keypair (32 private + 32 public); injected into children.
     noise_private_key_hex: String,
     public_host:          String,
-    lair_url:             String,
-    kube_client:          Client,
+    /// Local Docker daemon client. Cheap to clone.
+    docker:               Arc<Docker>,
+    /// Source-of-truth list of agents lair owns. Persisted to
+    /// `<data_dir>/agents.json`. Docker is the runtime source of truth for
+    /// status; the poller reconciles the two.
+    registry:             Arc<Mutex<Registry>>,
     mcp_pool:              McpPool,
     /// Cancellation token for the current streaming turn. Replaced at the start of each turn.
     cancel:               Mutex<CancellationToken>,
@@ -146,77 +152,10 @@ async fn info_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
     }))
 }
 
-#[derive(Deserialize)]
-struct ChildVersion { name: String, version: String }
-
-/// Children call this on startup to report their compiled version. Lair stamps
-/// the `octo.image-version` annotation on their Deployment so `octo reload`
-/// can show the version transition. Cluster-internal endpoint — children can
-/// only reach it via the in-cluster `lair:8000` Service. Only deployments
-/// labelled `octo.managed=1` are accepted.
-async fn child_version_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body):   Json<ChildVersion>,
-) -> StatusCode {
-    let known = state.containers_rx.borrow().iter().any(|c| c.name == body.name);
-    if !known {
-        warn!("[lair/child-version] unknown deployment '{}'", body.name);
-        return StatusCode::NOT_FOUND;
-    }
-    if let Err(e) = k8s::stamp_deployment_version(&state.kube_client, &body.name, &body.version).await {
-        error!("[lair/child-version] stamp failed: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-    info!("[lair/child-version] stamped deployment/{} version={}", body.name, body.version);
-    StatusCode::OK
-}
-
 async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cost = *state.last_cost_usd.lock().unwrap();
     let msgs = messages_to_history(&state.messages.lock().unwrap(), cost);
     Json(serde_json::json!({ "messages": msgs }))
-}
-
-#[derive(Deserialize)]
-struct PostMessage { text: String }
-
-async fn message_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body):   Json<PostMessage>,
-) -> impl IntoResponse {
-    let preview: String = body.text.chars().take(120).collect();
-    info!("[lair/message_handler] received ({} chars): {preview}", body.text.len());
-    let start = Instant::now();
-
-    let api_key = match resolve_api_key() {
-        Some(k) => k,
-        None    => {
-            error!("[lair/message_handler] no API key configured");
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                           Json(serde_json::json!({"error": "no API key configured"}))).into_response();
-        }
-    };
-    let model = resolve_model();
-
-    let messages = vec![ApiMessage {
-        role:    "user".to_string(),
-        content: vec![ContentBlock::Text { text: body.text }],
-    }];
-
-    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &lair_extra_tools()).await;
-    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), lair_extra_executor(state.clone()));
-    match send_message(messages, build_ephemeral_system_prompt(), &model, &api_key, "/", None, CancellationToken::new(), &extra_tools, executor).await {
-        Ok((text, cost_usd, _)) => {
-            let elapsed = start.elapsed().as_millis();
-            info!("[lair/message_handler] done in {elapsed}ms cost=${cost_usd:.4} response=({} chars)", text.len());
-            (StatusCode::OK, Json(serde_json::json!({ "text": text, "cost_usd": cost_usd }))).into_response()
-        }
-        Err((e, _)) => {
-            let elapsed = start.elapsed().as_millis();
-            error!("[lair/message_handler] error in {elapsed}ms: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response()
-        }
-    }
 }
 
 async fn stream_handler(
@@ -603,8 +542,8 @@ async fn clear_handler(State(state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::OK
 }
 
-/// Scale the named child Deployment to 1 replica. Shared between the deprecated
-/// HTTP handler (kept for one release) and the `start_container` /stream frame.
+/// Resume a stopped agent container. Backs the `start_container` /stream
+/// frame mobile sends when the user taps a non-running child.
 async fn start_container_by_id(state: &AppState, id: &str) -> Result<(), String> {
     let name = state
         .containers_rx
@@ -614,16 +553,19 @@ async fn start_container_by_id(state: &AppState, id: &str) -> Result<(), String>
         .map(|c| c.name.clone())
         .ok_or_else(|| format!("container '{id}' not found"))?;
 
-    k8s::scale_deployment(&state.kube_client, &name, 1)
+    docker_ops::start_container(&state.docker, &name)
         .await
         .map_err(|e| e.to_string())?;
-    info!("[containers] scaled {name} to 1, triggering re-poll");
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    {
+        let mut reg = state.registry.lock().unwrap();
+        let _ = reg.update_status(&name, AgentStatus::Running);
+    }
+    info!("[containers] started {name}, triggering re-poll");
     state.poll_trigger.notify_one();
     Ok(())
 }
 
-/// Delete the named child Deployment, both Services, and both PVCs. Backs the
+/// Remove the named agent container and both of its named volumes. Backs the
 /// `terminate_agent` /stream frame so the mobile UI can long-press to terminate.
 async fn terminate_agent_by_id(state: &AppState, id: &str) -> Result<(), String> {
     let name = state
@@ -634,9 +576,13 @@ async fn terminate_agent_by_id(state: &AppState, id: &str) -> Result<(), String>
         .map(|c| c.name.clone())
         .ok_or_else(|| format!("agent '{id}' not found"))?;
 
-    k8s::delete_child_resources(&state.kube_client, &name)
+    docker_ops::destroy_container(&state.docker, &name, /*remove_volumes=*/true)
         .await
         .map_err(|e| e.to_string())?;
+    {
+        let mut reg = state.registry.lock().unwrap();
+        let _ = reg.remove(&name);
+    }
     info!("[containers] terminated {name}, triggering re-poll");
     state.poll_trigger.notify_one();
     Ok(())
@@ -644,30 +590,76 @@ async fn terminate_agent_by_id(state: &AppState, id: &str) -> Result<(), String>
 
 // ── Container poller ──────────────────────────────────────────────────────────
 
+/// Reconcile the registry against Docker every 10s (and on demand via
+/// `poll_trigger`). Docker is authoritative for runtime status; the registry
+/// is authoritative for identity (name, port, pubkey, git_url, …). Anything in
+/// Docker that the registry doesn't know about is ignored (e.g. an admin
+/// `docker run` outside lair's control); anything in the registry that's
+/// missing from Docker is treated as `Stopped` and the in-memory copy is
+/// updated so mobile sees the dead row.
 async fn poll_containers(state: Arc<AppState>, ready_tx: watch::Sender<bool>) {
     info!("[containers] poller starting, initial delay 5s");
     tokio::time::sleep(Duration::from_secs(5)).await;
     let mut first_iter = true;
     loop {
-        debug!("[containers] polling K8s for managed deployments");
-        match k8s::list_managed_deployments(&state.kube_client).await {
-            Ok(children) => {
-                debug!("[containers] K8s returned {} deployment(s)", children.len());
-                let new_containers: Vec<ContainerInfo> = children
-                    .into_iter()
-                    .map(|c| {
-                        debug!("[containers]   {} status={} port={}", c.name, c.status, c.noise_port);
-                        ContainerInfo {
-                            id:          c.name.clone(),
-                            name:        c.name.clone(),
-                            git_url:     c.git_url.clone(),
-                            status:      c.status.clone(),
-                            host:        state.public_host.clone(),
-                            port:        c.noise_port,
-                            pubkey:      state.pubkey_b32.clone(),
-                        }
-                    })
+        debug!("[containers] polling Docker for managed containers");
+        match docker_ops::list_managed(&state.docker).await {
+            Ok(docker_list) => {
+                debug!("[containers] Docker returned {} container(s)", docker_list.len());
+                let live: std::collections::HashMap<String, String> = docker_list
+                    .iter()
+                    .map(|c| (c.name.clone(), c.state.clone()))
                     .collect();
+
+                let new_containers: Vec<ContainerInfo> = {
+                    let mut reg = state.registry.lock().unwrap();
+                    let now = octo_core::now_secs();
+                    let snapshot = reg.list().to_vec();
+                    let mut out = Vec::with_capacity(snapshot.len());
+                    for record in snapshot {
+                        // Remote agents aren't managed by the local Docker
+                        // daemon — they live on whatever VM `register_remote_agent`
+                        // pointed lair at. Surface them as-is; the LLM /
+                        // operator is responsible for marking them
+                        // stopped (via `forget_agent`).
+                        if record.is_remote() {
+                            out.push(ContainerInfo {
+                                id:      record.name.clone(),
+                                name:    record.name.clone(),
+                                git_url: record.git_url.clone().unwrap_or_default(),
+                                status:  record.status.as_wire_str().to_string(),
+                                host:    record.host.clone().unwrap_or_else(|| state.public_host.clone()),
+                                port:    record.port,
+                                pubkey:  record.pubkey.clone(),
+                            });
+                            continue;
+                        }
+                        match live.get(&record.name) {
+                            Some(state_str) => {
+                                let status = status_from_docker(state_str);
+                                let _ = reg.update_status(&record.name, status);
+                                let _ = reg.update_last_seen(&record.name, now);
+                                out.push(ContainerInfo {
+                                    id:      record.name.clone(),
+                                    name:    record.name.clone(),
+                                    git_url: record.git_url.clone().unwrap_or_default(),
+                                    status:  status.as_wire_str().to_string(),
+                                    host:    record.host.clone().unwrap_or_else(|| state.public_host.clone()),
+                                    port:    record.port,
+                                    pubkey:  record.pubkey.clone(),
+                                });
+                            }
+                            None => {
+                                // Local container disappeared from Docker —
+                                // assume it was removed out-of-band (e.g. by
+                                // `octo agents delete`). Drop the registry row.
+                                let _ = reg.remove(&record.name);
+                                info!("[containers] dropped registry entry '{}' (container absent)", record.name);
+                            }
+                        }
+                    }
+                    out
+                };
 
                 let changed = *state.containers_tx.borrow() != new_containers;
                 if changed {
@@ -701,48 +693,57 @@ async fn poll_containers(state: Arc<AppState>, ready_tx: watch::Sender<bool>) {
 
 fn build_system_prompt() -> String {
     r#"# Identity & context
-You are "lair" — the control-plane agent of an octo cluster, a Kubernetes-managed fleet of LLM agents. You run inside the parent pod in the `octo` namespace. The user is talking to you over an encrypted Noise tunnel from a mobile or desktop client; you are usually the first agent they reach. From here they create, message, and tear down "child" agents (each a separate Deployment, typically pinned to one git repository).
+You are "lair" — the control-plane agent of an octo deployment. You run as a process on a single host machine; sibling "child" agent containers run on the same host and you orchestrate them via the local Docker daemon. The user is talking to you over an encrypted Noise tunnel from a mobile or desktop client; you are usually the first agent they reach. From here they create, inspect, and tear down children (each a separate Docker container, typically pinned to one git repository). To talk *to* a child the user opens its own chat in the mobile app — you do not relay messages.
 
 octo can host any kind of agent workload, not only coding agents — don't assume the user is doing software work unless they say so.
 
 # What you help with
-1. Cluster orchestration — spin up, tear down, and inspect children.
-2. Delegation — route repo- or workload-specific tasks to the right child via `message_child`.
-3. Direct work — answer questions, run shell commands, read external resources, and handle small fixes that don't require a child's repo.
+1. Orchestration — spin up, tear down, and inspect children.
+2. Direct work — answer questions, run shell commands, read external resources, and handle small fixes that don't require a child's repo.
 
 # Environment
-- Kubernetes pod in namespace `octo`; RBAC covers Deployments, Services, and PVCs in that namespace. Use the dedicated tools below for cluster mutations; fall back to `kubectl` via `bash` only for read-only diagnostics they don't cover.
+- Docker host. Children are containers managed via the Docker API; each has its own pair of named volumes (`agent-<name>-data`, `agent-<name>-workspace`) that survive restarts.
 - `gh` is installed and `GH_TOKEN` is set — no login step needed.
-- Children expose NodePort 30100–30199 (mobile client / Noise) and in-cluster port 8000 (where `message_child` POSTs).
+- Each child publishes its Noise port on a host port in the 30100–30199 range; mobile reaches the child directly via that port.
 - MCP servers may be configured at init time or hot-added at runtime; their tools appear alongside the built-ins. `web_fetch` (and `web_search` when Brave is configured) cover external lookups.
-- A path prefixed with `@` (e.g. `@k8s/child.rs`) is a file reference inside a repo — treat it as a path.
+- A path prefixed with `@` (e.g. `@core/src/lib.rs`) is a file reference inside a repo — treat it as a path.
 
 # Orchestration tools (lair-specific)
-- **`list_agents`** — all known children and their status. Cheap; call before guessing a name.
-- **`create_agent`** — args: `git_url?`, `name?`, `noise_port?`, `startup_script?`, `startup_prompt?`.
+- **`list_agents`** — all known agents (local + remote) with their full registry rows (status, host, port, pubkey, git_url, instance_id, provider, metadata). Cheap; call before guessing a name.
+- **`create_agent`** — args: `git_url?`, `name?`, `noise_port?`, `startup_script?`, `startup_prompt?`. Creates a *local* Docker container on this host.
   - Omit `git_url` for a repo-less workload (default name `lair-workload`); otherwise default name is `lair-<repo-slug>`.
   - `noise_port` auto-assigns from 30100–30199 if omitted.
   - `startup_script` runs before the child's server boots — good for `apt-get`, package installs, git config.
   - `startup_prompt` is sent as the child's first user message once it's ready and triggers a full agentic loop.
-  - **Both fields are stored as plaintext env vars on the Deployment spec.** Never put API keys, tokens, or other secrets in them. If the user asks you to, push back and suggest a safer route (MCP env, runtime secret, or having the child call `message_lair` to ask for the value).
-- **`message_child(container_name, text)`** — send a message to a child's agent and wait for its reply. Use this to delegate work or get status. The child has its own shell, repo, and tools.
-- **`terminate_agent(name)`** — *destructive.* Deletes the Deployment, both Services, and both PVCs (`<name>-data`, `<name>-workspace`). All workspace state is lost. Always run `list_agents` first to confirm the exact name — don't guess from the user's shorthand. Confirm with the user before calling unless the request was unambiguous and explicit.
-- **`restart_all_containers`** — rollout-restarts every managed Deployment and lair itself. Use only after a new image push; not for routine flakes.
+  - **Both fields are stored as plaintext env vars on the container.** Never put API keys, tokens, or other secrets in them. If the user asks for that, push back and suggest a safer route (MCP env).
+- **`mint_bootstrap_userdata`** — args: `name`, `agent_purpose?`, `startup_script?`, `public_port?`. Returns a cloud-init bash script for a **remote** agent. The userdata is **credentials-free**: it trusts lair's SSH pubkey, installs Docker + git, and starts the agent container in a minimal mode (no API keys, no git_url). Hand the returned `userdata` to whichever provisioning MCP they have configured (AWS, Hetzner, etc.). The MCP will return the new VM's IP — then call `register_remote_agent`, which finishes the bootstrap over SSH.
+- **`register_remote_agent`** — args: `name`, `host`, `provider?`, `instance_id?`, `git_url?`, `metadata?`. Call this after the provisioning MCP returns the new VM's IP. Lair SSHes in (using its operator key) and: (a) waits for the agent container to publish `/var/lib/octo/agent-data/agent-info.json`, (b) drops `config.json` with the API keys lair has in its own env, (c) clones `git_url` into the workspace if given (using lair's `GH_TOKEN` — never sent through the cloud provider), (d) `docker restart`s the agent so it picks everything up. Total timeout ~6 minutes. `name` must match what you passed to `mint_bootstrap_userdata`.
+- **`terminate_agent(name)`** — *destructive, local agents only.* Removes the container and both named volumes (`agent-<name>-data`, `agent-<name>-workspace`). For remote agents, returns instructions to terminate the VM via the provisioning MCP first, then call `forget_agent`. Always run `list_agents` first to confirm the exact name; confirm with the user before calling unless the request was unambiguous.
+- **`forget_agent(name)`** — *registry-only.* Removes the row without touching Docker or the VM. Used after terminating a remote instance via a provisioning MCP. Don't use on a live local agent; use `terminate_agent` instead.
+- **`restart_all_containers`** — restart every local agent container. Use after pulling a new image; not for routine flakes. Has no effect on remote agents.
 - **`run_background_task(task_description)`** — spawn a long-running task in the background and return immediately. The user is notified when it finishes. Use for work that would otherwise block the current turn for minutes (long builds, multi-step research, repo-wide refactors). The task description must be self-contained — the background loop does not inherit conversation history.
   - When a background task completes, the result is injected into this conversation as a "Background task … completed" message and you'll be invoked autonomously to react. **If no follow-up action is genuinely useful, reply with one short line acknowledging the result** (e.g. "Background task done — no further action needed.") rather than producing prose. Only continue working if the result clearly demands it (a reported failure to investigate, a ready artefact the user would want to use next, etc).
 
 # General tools (shared with children)
-- `bash` — shell commands; use for git, gh, kubectl, curl, one-offs.
+- `bash` — shell commands; use for git, gh, curl, docker (read-only diagnostics only — never mutate), one-offs.
 - `read_file(path, offset?, limit?)` — pair with `grep` first; never read a whole file just to skim.
 - `grep(pattern, path?, context?)` — returns `file:line` you can feed back into `read_file`.
 - `glob(pattern)` — file-path search. Anchor from a known root; never start a path argument with `**`.
 - `edit_file(path, old_str, new_str)` — exact string replace; `old_str` must match exactly once. Prefer over `write_file` on existing files.
 - `write_file(path, content)` — new files only.
 
-# When to delegate vs act
-- Anything inside a specific child's repo → delegate with `message_child`. Don't try to kubectl-exec or mirror the repo locally.
-- Cluster-wide, parent-side, or repo-agnostic → handle it yourself.
-- "Do X in <child>" → delegate, even if X looks simple.
+# Working with children
+- You orchestrate children (create / inspect / terminate); you do **not** message them. If the user asks "have child X do Y", tell them to open the child's own chat in the mobile app — that's the direct path. You can still answer cluster-wide questions about the child (status, port, git_url) from `list_agents`.
+- Don't try to `docker exec` into a child to do its work for it. Direct work in a child's repo belongs to that child's own chat.
+
+# Local vs remote agents
+- **Local**: `create_agent` → Docker container on this host. Reachable on `host:30100–30199`. Default for "spin up an agent" unless the user specifies a cloud / instance type.
+- **Remote**: a 3-step LLM-driven flow that uses the user's configured cloud MCP. **Userdata carries no credentials** — lair finishes the bootstrap over SSH after the VM is up, so the cloud provider and the provisioning MCP never see API keys.
+  1. `mint_bootstrap_userdata(name=…, agent_purpose?=…, …)` — get the credentials-free userdata blob.
+  2. Call the provisioning MCP (`aws_run_instances`, `hetzner_create_server`, etc.) with that userdata, plus whatever the user specified (instance type, region, security group with TCP 22 + 9000 inbound from this host). The MCP returns a public IP and instance id.
+  3. `register_remote_agent(name=…, host=<public_ip>, git_url?=…, provider=…, instance_id=…)` — lair SSHes in, waits for the agent to publish its identity, drops `config.json` with the API keys, clones `git_url` if given (using lair's GH_TOKEN), restarts the agent, registers. The `name` must match step 1; pass `git_url` here (not to `mint_bootstrap_userdata`).
+- Termination mirrors creation. For remote agents `terminate_agent` will *not* clean up the VM — call the provisioning MCP's terminate-instance method first (using `instance_id` from `list_agents`), then `forget_agent(name)`.
+- Trigger the remote flow when the user names a cloud / instance type / region, OR when they ask for hardware lair doesn't have locally (GPUs, etc.).
 
 # Response style
 - Concise and direct; the user is often on a phone screen.
@@ -754,42 +755,18 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 # Safety
 - Never commit or push git changes unless the user explicitly asked.
 - Confirm before `terminate_agent` or `restart_all_containers` unless the user just told you to.
-- If a request would put a secret into plaintext Deployment config (`startup_script`, `startup_prompt`, env), flag it and offer a safer alternative.
+- If a request would put a secret into plaintext container config (`startup_script`, `startup_prompt`, env), flag it and offer a safer alternative.
 - Trust your judgment on small choices; only ask when ambiguity would actually change the outcome."#
         .to_string()
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-fn message_child_tool() -> AnthropicTool {
-    AnthropicTool {
-        name: "message_child".to_string(),
-        description: "Send a message to a child container's agent and wait for its response. \
-                       Use this to delegate tasks or ask questions to a specific child."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "container_name": {
-                    "type": "string",
-                    "description": "The name of the child to message."
-                },
-                "text": {
-                    "type": "string",
-                    "description": "The message to send to the child agent."
-                }
-            },
-            "required": ["container_name", "text"]
-        }),
-        display_label: Some("Messaging agent".into()),
-    }
-}
-
 fn create_agent_tool() -> AnthropicTool {
     AnthropicTool {
         name: "create_agent".to_string(),
-        description: "Create and start a new octo child for a Git repository on Kubernetes. \
-                       Handles port assignment (NodePorts 30100–30199), PVCs, Deployment, and Services."
+        description: "Create and start a new octo child agent as a Docker container on the lair host. \
+                       Handles host-port assignment (30100–30199), per-agent named volumes, and the container itself."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -804,15 +781,15 @@ fn create_agent_tool() -> AnthropicTool {
                 },
                 "noise_port": {
                     "type": "integer",
-                    "description": "Optional NodePort (30100–30199). Auto-assigned if omitted."
+                    "description": "Optional host port for Noise traffic (30100–30199). Auto-assigned if omitted."
                 },
                 "startup_script": {
                     "type": "string",
-                    "description": "Optional shell script run inside the child before the server starts. Never include sensitive data such as API keys or tokens — these are stored as plaintext in the Kubernetes Deployment spec."
+                    "description": "Optional shell script run inside the child before the server starts. Never include sensitive data such as API keys or tokens — these are stored as plaintext env vars on the container."
                 },
                 "startup_prompt": {
                     "type": "string",
-                    "description": "Optional initial prompt sent to the child's agentic loop once ready. Never include sensitive data such as API keys or tokens — these are stored as plaintext in the Kubernetes Deployment spec."
+                    "description": "Optional initial prompt sent to the child's agentic loop once ready. Never include sensitive data such as API keys or tokens — these are stored as plaintext env vars on the container."
                 }
             },
             "required": []
@@ -824,8 +801,8 @@ fn create_agent_tool() -> AnthropicTool {
 fn terminate_agent_tool() -> AnthropicTool {
     AnthropicTool {
         name: "terminate_agent".to_string(),
-        description: "Permanently terminate a child and delete all its Kubernetes resources \
-                       (Deployment, Services, PVCs). Irreversible — all PVC data is lost."
+        description: "Permanently terminate a child agent: remove its Docker container and \
+                       delete both named volumes. Irreversible — all data in /data and /workspace is lost."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -844,7 +821,10 @@ fn terminate_agent_tool() -> AnthropicTool {
 fn list_agents_tool() -> AnthropicTool {
     AnthropicTool {
         name: "list_agents".to_string(),
-        description: "List all known child containers and their current status.".to_string(),
+        description: "List every known agent — local and remote — with the full registry row \
+                       (status, host, port, pubkey, git_url, instance_id, provider, metadata). \
+                       Cheap; call before guessing a name."
+            .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {},
@@ -854,12 +834,120 @@ fn list_agents_tool() -> AnthropicTool {
     }
 }
 
+fn mint_bootstrap_userdata_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "mint_bootstrap_userdata".to_string(),
+        description: "Mint a cloud-init bash script (\"user data\") for bootstrapping a remote \
+                       octo agent on a freshly-provisioned VM. The userdata contains **no \
+                       credentials** — only lair's SSH public key, a Docker install, and a \
+                       `docker run` that starts the agent in a minimal mode. After the MCP \
+                       returns the VM's IP, call `register_remote_agent`; lair will SSH in and \
+                       finish bootstrapping (drop the config.json with API keys, clone the repo \
+                       if `git_url` was given, restart the agent so it picks everything up). \
+                       Returns the userdata blob plus the agent name."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Logical name for the new agent; reused in register_remote_agent."
+                },
+                "agent_purpose": {
+                    "type": "string",
+                    "description": "One-line mission baked into the agent's system prompt (used only if no git_url is later supplied)."
+                },
+                "startup_script": {
+                    "type": "string",
+                    "description": "Optional bash run inside the agent container at boot, before lair finishes the bootstrap. Will not have access to API keys (they arrive later via SSH); use it for package installs and similar."
+                },
+                "public_port": {
+                    "type": "integer",
+                    "description": "Host port on the VM that publishes the agent's Noise endpoint (default 9000). Security group must allow inbound TCP on this port plus SSH (22) from lair's IP."
+                }
+            },
+            "required": ["name"]
+        }),
+        display_label: Some("Minting userdata".into()),
+    }
+}
+
+fn register_remote_agent_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "register_remote_agent".to_string(),
+        description: "Finish bootstrapping a remote agent and register it with lair. SSHes in \
+                       (using lair's operator key), waits for the agent container to publish \
+                       `/var/lib/octo/agent-data/agent-info.json`, drops a `config.json` with the \
+                       API keys, optionally clones `git_url` into the workspace, and `docker \
+                       restart`s the agent so it picks everything up. Total timeout ~6 minutes \
+                       (cloud-init can take a few). `name` must match what you passed to \
+                       `mint_bootstrap_userdata`. Each SSH op retries internally with exponential \
+                       backoff to absorb sshd-during-cloud-init flakes. A `Pending` registry row \
+                       is inserted as soon as the agent's identity is known, so the row is \
+                       visible to mobile (and to `list_agents`) while the rest of the bootstrap \
+                       runs. On a hard SSH error mid-flow the row stays Pending — re-call the \
+                       tool with the same `name` and `host` to resume (all phases are idempotent)."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Logical agent name — must match mint_bootstrap_userdata."
+                },
+                "host": {
+                    "type": "string",
+                    "description": "Public IP or DNS name of the VM (from the provisioning MCP's response)."
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "Free-form provider tag (e.g. aws, gcp, hetzner). Used by future terminate flows."
+                },
+                "instance_id": {
+                    "type": "string",
+                    "description": "Cloud instance id (e.g. i-0abc...). Stored verbatim for later terminate calls."
+                },
+                "git_url": {
+                    "type": "string",
+                    "description": "Optional Git URL to clone into the agent's workspace after the container is up. Lair uses its own GH_TOKEN for HTTPS clones — the URL itself stays out of the cloud-provider's view."
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Opaque provider-specific blob (region, instance_type, image id, ...). Stored alongside the row."
+                }
+            },
+            "required": ["name", "host"]
+        }),
+        display_label: Some("Registering remote agent".into()),
+    }
+}
+
+fn forget_agent_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "forget_agent".to_string(),
+        description: "Remove an agent's registry row without touching Docker or any VM. Use this \
+                       after the provisioning MCP has terminated a remote instance, to clean up the \
+                       dangling row. Don't use on a live local agent — use `terminate_agent` instead."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Agent name to forget."
+                }
+            },
+            "required": ["name"]
+        }),
+        display_label: Some("Forgetting agent".into()),
+    }
+}
+
 fn restart_all_containers_tool() -> AnthropicTool {
     AnthropicTool {
         name: "restart_all_containers".to_string(),
-        description: "Rollout-restart all managed child Deployments and lair itself so that \
-                       they pick up the latest image. Use this after pushing a new container image \
-                       to apply the update across the cluster."
+        description: "Restart every managed agent container so they pick up new state. \
+                       Use this after pulling a new image to apply the update; not for routine flakes."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -873,9 +961,11 @@ fn restart_all_containers_tool() -> AnthropicTool {
 fn lair_extra_tools() -> Vec<AnthropicTool> {
     vec![
         list_agents_tool(),
-        message_child_tool(),
         create_agent_tool(),
+        mint_bootstrap_userdata_tool(),
+        register_remote_agent_tool(),
         terminate_agent_tool(),
+        forget_agent_tool(),
         restart_all_containers_tool(),
         run_background_task_tool(),
     ]
@@ -885,22 +975,18 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
     -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>
     + Send + Sync>>
 {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .pool_idle_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("failed to build message_child HTTP client");
     Some(Arc::new(move |name: String, input: serde_json::Value| {
-        let client = client.clone();
         let state  = state.clone();
         Box::pin(async move {
             match name.as_str() {
-                "list_agents" => exec_list_agents(state.clone()).await,
-                "message_child" => exec_message_child(client, input).await,
-                "create_agent" => exec_create_agent(state, input).await,
-                "terminate_agent" => exec_terminate_agent(state, input).await,
-                "restart_all_containers" => exec_restart_all_containers(state).await,
-                "run_background_task" => exec_run_background_task(state, input).await,
+                "list_agents"              => exec_list_agents(state.clone()).await,
+                "create_agent"             => exec_create_agent(state, input).await,
+                "mint_bootstrap_userdata"  => exec_mint_bootstrap_userdata(state, input).await,
+                "register_remote_agent"    => exec_register_remote_agent(state, input).await,
+                "terminate_agent"          => exec_terminate_agent(state, input).await,
+                "forget_agent"             => exec_forget_agent(state, input).await,
+                "restart_all_containers"   => exec_restart_all_containers(state).await,
+                "run_background_task"      => exec_run_background_task(state, input).await,
                 other => format!("unknown tool: {other}"),
             }
         })
@@ -908,48 +994,10 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
 }
 
 async fn exec_list_agents(state: Arc<AppState>) -> String {
-    let containers = state.containers_rx.borrow().clone();
-    serde_json::to_string_pretty(&containers).unwrap_or_else(|e| format!("error: {e}"))
-}
-
-async fn exec_message_child(client: reqwest::Client, input: serde_json::Value) -> String {
-    let container_name = match input.get("container_name").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
-        None => return "error: missing 'container_name' field".to_string(),
-    };
-    let text = match input.get("text").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => return "error: missing 'text' field".to_string(),
-    };
-    let preview: String = text.chars().take(120).collect();
-    let url = format!("http://{}:8000/message", container_name);
-    info!("[lair/message_child] → POST {url} ({} chars): {preview}", text.len());
-    let start = Instant::now();
-    match client.post(&url).json(&serde_json::json!({ "text": text })).send().await {
-        Ok(resp) => {
-            let status  = resp.status();
-            let elapsed = start.elapsed().as_millis();
-            info!("[lair/message_child] ← HTTP {status} in {elapsed}ms from {container_name}");
-            match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    let result = body.get("text").and_then(|v| v.as_str())
-                        .unwrap_or("(no response text)").to_string();
-                    let rpreview: String = result.chars().take(120).collect();
-                    info!("[lair/message_child] response ({} chars): {rpreview}", result.len());
-                    result
-                }
-                Err(e) => {
-                    error!("[lair/message_child] parse error from {container_name}: {e}");
-                    format!("error parsing child response: {e}")
-                }
-            }
-        }
-        Err(e) => {
-            let elapsed = start.elapsed().as_millis();
-            error!("[lair/message_child] request to {container_name} failed in {elapsed}ms: {e}");
-            format!("error contacting child '{container_name}': {e}")
-        }
-    }
+    // Surface full registry rows so the LLM has access to instance_id, provider,
+    // and metadata when working with remote agents.
+    let records = state.registry.lock().unwrap().list().to_vec();
+    serde_json::to_string_pretty(&records).unwrap_or_else(|e| format!("error: {e}"))
 }
 
 async fn exec_create_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
@@ -973,39 +1021,76 @@ async fn exec_create_agent(state: Arc<AppState>, input: serde_json::Value) -> St
         });
 
     let pub_host          = state.public_host.clone();
-    let lair_url          = state.lair_url.clone();
     let noise_private_key = state.noise_private_key_hex.clone();
     let startup_script = input.get("startup_script").and_then(|v| v.as_str()).map(str::to_string);
     let startup_prompt = input.get("startup_prompt").and_then(|v| v.as_str()).map(str::to_string);
 
-    // Assign NodePort
-    let noise_port = match input.get("noise_port").and_then(|v| v.as_u64()) {
+    // Resolve host port — explicit override or first free slot in the
+    // conventional 30100–30199 range, scoped to the registry.
+    let noise_port: u16 = match input.get("noise_port").and_then(|v| v.as_u64()) {
         Some(p) => p as u16,
-        None => match k8s::assign_nodeport(&state.kube_client).await {
-            Ok(p) => p,
-            Err(e) => return format!("error: {e}"),
+        None => match state.registry.lock().unwrap().assign_free_port(30100..=30199) {
+            Some(p) => p,
+            None    => return "error: no free host ports in 30100–30199".to_string(),
         },
     };
 
     info!("[lair/create_agent] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
 
-    let params = k8s::CreateChildParams {
+    // Inherit provider credentials from lair's own env so children can run
+    // their loops without a separate secret store. Mirrors what the old
+    // `child-secrets` envFrom did, just sourced from the parent process.
+    let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    let gh_token          = std::env::var("GH_TOKEN").ok();
+    let model             = std::env::var("MODEL").ok();
+    let openai_api_url    = std::env::var("OPENAI_API_URL").ok();
+    let openai_api_key    = std::env::var("OPENAI_API_KEY").ok();
+
+    let image = std::env::var("OCTO_AGENT_IMAGE")
+        .unwrap_or_else(|_| docker_ops::DEFAULT_AGENT_IMAGE.to_string());
+
+    let params = docker_ops::CreateAgentParams {
         name:              &child_name,
+        image:             &image,
         git_url:           git_url.as_deref(),
-        noise_port,
-        pub_host:          &pub_host,
-        lair_url:          &lair_url,
+        host_noise_port:   noise_port,
+        public_host:       &pub_host,
+        noise_private_key: &noise_private_key,
         startup_script:    startup_script.as_deref(),
         startup_prompt:    startup_prompt.as_deref(),
-        noise_private_key: &noise_private_key,
+        anthropic_api_key: anthropic_api_key.as_deref(),
+        gh_token:          gh_token.as_deref(),
+        model:             model.as_deref(),
+        openai_api_url:    openai_api_url.as_deref(),
+        openai_api_key:    openai_api_key.as_deref(),
+        agent_purpose:     None,
     };
 
-    match k8s::create_child_resources(&state.kube_client, &params).await {
-        Ok(_) => {
+    match docker_ops::create_agent_container(&state.docker, &params).await {
+        Ok(container_id) => {
+            let now = octo_core::now_secs();
+            let record = AgentRecord {
+                name:          child_name.clone(),
+                container_id:  Some(container_id),
+                host:          None,
+                port:          noise_port,
+                pubkey:        state.pubkey_b32.clone(),
+                git_url:       git_url.clone(),
+                status:        AgentStatus::Pending,
+                image_version: image.clone(),
+                created_at:    now,
+                last_seen:     now,
+                instance_id:   None,
+                provider:      None,
+                metadata:      serde_json::Value::Null,
+            };
+            if let Err(e) = state.registry.lock().unwrap().add(record) {
+                error!("[lair/create_agent] registry add failed: {e:#}");
+                return format!("error registering '{child_name}': {e:#}");
+            }
             info!("[lair/create_agent] created {child_name}");
-            tokio::time::sleep(Duration::from_secs(3)).await;
             state.poll_trigger.notify_one();
-            format!("Created child '{child_name}' on NodePort {noise_port}.")
+            format!("Created child '{child_name}' on host port {noise_port}.")
         }
         Err(e) => {
             error!("[lair/create_agent] failed: {e:#}");
@@ -1020,17 +1105,419 @@ async fn exec_terminate_agent(state: Arc<AppState>, input: serde_json::Value) ->
         None => return "error: missing 'name' field".to_string(),
     };
 
-    info!("[lair/terminate_agent] terminating '{name}'");
-    match k8s::delete_child_resources(&state.kube_client, &name).await {
+    let record = state.registry.lock().unwrap().get(&name).cloned();
+    let record = match record {
+        Some(r) => r,
+        None    => return format!("error: no agent named '{name}' in the registry"),
+    };
+
+    if record.is_remote() {
+        let provider    = record.provider.as_deref().unwrap_or("(unknown provider)");
+        let instance_id = record.instance_id.as_deref().unwrap_or("(no instance_id)");
+        return format!(
+            "'{name}' is a remote agent (provider={provider}, instance_id={instance_id}).\n\
+             `terminate_agent` only destroys local Docker containers. To tear this down:\n\
+             1. Use the {provider} provisioning MCP to terminate instance {instance_id}.\n\
+             2. Call `forget_agent` with name='{name}' to remove the registry row.\n\
+             metadata for the MCP call: {}",
+            record.metadata,
+        );
+    }
+
+    info!("[lair/terminate_agent] terminating local '{name}'");
+    match docker_ops::destroy_container(&state.docker, &name, /*remove_volumes=*/true).await {
         Ok(_) => {
+            {
+                let mut reg = state.registry.lock().unwrap();
+                let _ = reg.remove(&name);
+            }
             info!("[lair/terminate_agent] '{name}' deleted, triggering re-poll");
             state.poll_trigger.notify_one();
-            format!("Terminated '{name}' and deleted all resources.")
+            format!("Terminated '{name}' and deleted both named volumes.")
         }
         Err(e) => {
-            error!("[lair/terminate_agent] failed to delete '{name}': {e}");
-            format!("error: {e}")
+            error!("[lair/terminate_agent] failed to delete '{name}': {e:#}");
+            format!("error: {e:#}")
         }
+    }
+}
+
+async fn exec_mint_bootstrap_userdata(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let name = match input.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "error: missing 'name' field".to_string(),
+    };
+    if state.registry.lock().unwrap().get(&name).is_some() {
+        return format!("error: agent '{name}' already exists in the registry");
+    }
+
+    let agent_purpose  = input.get("agent_purpose") .and_then(|v| v.as_str()).map(str::to_string);
+    let startup_script = input.get("startup_script").and_then(|v| v.as_str()).map(str::to_string);
+    let public_port    = input.get("public_port")   .and_then(|v| v.as_u64()).unwrap_or(9000) as u16;
+
+    let lair_pubkey = match ssh_ops::read_lair_public_key() {
+        Ok(k) => k,
+        Err(e) => return format!("error reading lair SSH public key: {e:#}"),
+    };
+
+    let image = std::env::var("OCTO_AGENT_IMAGE")
+        .unwrap_or_else(|_| docker_ops::DEFAULT_AGENT_IMAGE.to_string());
+
+    // Userdata env carries no credentials and no git URL — only the
+    // non-secret bootstrap config that the agent needs at process start.
+    // API keys, the git clone, and `docker restart` all happen later, over
+    // the SSH connection lair opens during `register_remote_agent`.
+    let mut env_lines: Vec<String> = vec![
+        "NOISE_PORT=9000".to_string(),
+        format!("PUBLIC_PORT={public_port}"),
+        "OCTO_DATA_DIR=/data".to_string(),
+        "NOISE_KEY_FILE=/data/noise_key.bin".to_string(),
+        "OCTO_SKIP_SHELL_ENV=1".to_string(),
+    ];
+    if let Some(v) = &agent_purpose  { env_lines.push(format!("AGENT_PURPOSE={v}")); }
+    if let Some(v) = &startup_script { env_lines.push(format!("STARTUP_SCRIPT={v}")); }
+    let env_content = env_lines.join("\n");
+
+    let userdata = format!(r#"#!/bin/bash
+set -eux
+
+# 1. Trust lair's operator SSH key so lair can finish bootstrapping over SSH.
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+cat >> /root/.ssh/authorized_keys <<'OCTO_SSH_PUBKEY_EOF'
+{lair_pubkey}
+OCTO_SSH_PUBKEY_EOF
+chmod 600 /root/.ssh/authorized_keys
+
+# 2. Install Docker + git (git is for the SSH-driven clone lair runs later).
+if ! command -v docker >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com | sh
+fi
+if ! command -v git >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update && apt-get install -y git
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y git
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache git
+    fi
+fi
+
+# 3. Prepare bind-mounted dirs the agent container will see as /data and /workspace.
+mkdir -p /var/lib/octo /var/lib/octo/agent-data /var/lib/octo/agent-workspace
+
+# 4. Env file with the agent's non-secret bootstrap config.
+umask 077
+cat > /var/lib/octo/agent.env <<'OCTO_ENV_EOF'
+{env_content}
+OCTO_ENV_EOF
+umask 022
+
+# 5. Pull and run the agent. It boots without API keys; lair will drop
+#    /data/config.json over SSH and `docker restart` this container to apply.
+docker pull {image}
+docker rm -f octo-agent 2>/dev/null || true
+docker run -d \
+    --name octo-agent \
+    --restart unless-stopped \
+    --label octo.managed=1 \
+    --label octo.role=agent \
+    -p {public_port}:9000 \
+    -v /var/lib/octo/agent-data:/data \
+    -v /var/lib/octo/agent-workspace:/workspace \
+    --env-file /var/lib/octo/agent.env \
+    {image} /usr/local/bin/octo-lair --role agent
+"#);
+
+    let result = serde_json::json!({
+        "name":     name,
+        "image":    image,
+        "userdata": userdata,
+        "instructions": format!(
+            "Hand `userdata` to the provisioning MCP as the new instance's user-data. \
+             Make sure the security group / firewall allows inbound TCP {public_port} (for mobile) \
+             and 22 (for lair's SSH-driven bootstrap). The userdata contains no credentials. \
+             After the MCP returns the public IP, call \
+             register_remote_agent(name='{name}', host=<public_ip>, ...).",
+        ),
+    });
+    serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("error: {e}"))
+}
+
+async fn exec_register_remote_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let name = match input.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "error: missing 'name' field".to_string(),
+    };
+    let host = match input.get("host").and_then(|v| v.as_str()) {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => return "error: missing 'host' field".to_string(),
+    };
+    let provider    = input.get("provider")   .and_then(|v| v.as_str()).map(str::to_string);
+    let instance_id = input.get("instance_id").and_then(|v| v.as_str()).map(str::to_string);
+    let git_url     = input.get("git_url")    .and_then(|v| v.as_str()).map(str::to_string);
+    let metadata    = input.get("metadata")   .cloned().unwrap_or(serde_json::Value::Null);
+
+    let key_path = octo_core::data_dir().join(octo_core::SSH_PRIVATE_KEY_FILE);
+    if !key_path.exists() {
+        return format!(
+            "error: lair has no SSH private key at {}. Run `octo init` (or restart lair) to generate one.",
+            key_path.display(),
+        );
+    }
+
+    // Resumption logic. Three cases:
+    // 1. No prior row → fresh registration.
+    // 2. Prior row is Pending on the same host → resume (re-run all phases;
+    //    each is idempotent, finished work is a no-op).
+    // 3. Anything else (Running, or Pending on a different host) → refuse.
+    let prior = state.registry.lock().unwrap().get(&name).cloned();
+    let (created_at, resuming) = match prior {
+        Some(r) if matches!(r.status, AgentStatus::Pending)
+                && r.host.as_deref() == Some(host.as_str()) => {
+            info!("[lair/register_remote_agent] resuming pending registration of '{name}' at {host}");
+            (r.created_at, true)
+        }
+        Some(r) => {
+            return format!(
+                "error: agent '{name}' is already in the registry (status={}, host={:?}). \
+                 If you need to re-register, call `forget_agent` first.",
+                r.status.as_wire_str(),
+                r.host,
+            );
+        }
+        None => (octo_core::now_secs(), false),
+    };
+
+    // Phase 1: wait for the agent container to publish its identity. The
+    // VM may still be cloud-initting on the first connection attempt.
+    info!("[lair/register_remote_agent] {host}: waiting for agent-info.json");
+    let info = match ssh_ops::await_agent_info(
+        &host,
+        "root",
+        &key_path,
+        Duration::from_secs(300),
+        Duration::from_secs(8),
+    ).await {
+        Ok(i) => i,
+        Err(e) => return format!("error: could not pull agent info from {host}: {e:#}"),
+    };
+
+    // Insert (or refresh) a Pending row now that we know the agent's
+    // pubkey + port. Mobile will pick this up on the next poll and surface
+    // an in-progress agent. Resumption on subsequent register calls will
+    // hit this row and skip straight to the SSH phases.
+    let image = std::env::var("OCTO_AGENT_IMAGE")
+        .unwrap_or_else(|_| docker_ops::DEFAULT_AGENT_IMAGE.to_string());
+    {
+        let pending = AgentRecord {
+            name:          name.clone(),
+            container_id:  None,
+            host:          Some(host.clone()),
+            port:          info.port,
+            pubkey:        info.pubkey.clone(),
+            git_url:       git_url.clone(),
+            status:        AgentStatus::Pending,
+            image_version: image.clone(),
+            created_at,
+            last_seen:     octo_core::now_secs(),
+            instance_id:   instance_id.clone(),
+            provider:      provider.clone(),
+            metadata:      metadata.clone(),
+        };
+        if let Err(e) = state.registry.lock().unwrap().set(pending) {
+            return format!("error inserting pending registry row: {e:#}");
+        }
+        state.poll_trigger.notify_one();
+    }
+
+    // Phase 2: drop /data/config.json with the operator's API keys. The
+    // agent re-reads this on every model call (`resolve_api_key` /
+    // `resolve_model`) so we don't have to restart yet for credentials —
+    // but we will restart for the workspace clone below.
+    let cfg = serde_json::json!({
+        "name":              null,
+        "anthropic_api_key": std::env::var("ANTHROPIC_API_KEY").ok(),
+        "openai_api_key":    std::env::var("OPENAI_API_KEY").ok(),
+        "model":             std::env::var("MODEL").ok(),
+        "api_url":           std::env::var("OPENAI_API_URL").ok(),
+    });
+    let cfg_str = match serde_json::to_string_pretty(&cfg) {
+        Ok(s) => s,
+        Err(e) => return format!("error encoding config.json: {e:#}"),
+    };
+    info!("[lair/register_remote_agent] {host}: dropping /var/lib/octo/agent-data/config.json");
+    if let Err(e) = ssh_ops::write_file(
+        &host, "root", &key_path,
+        "/var/lib/octo/agent-data/config.json",
+        &cfg_str,
+        0o600,
+    ).await {
+        return format!(
+            "error writing config.json to {host}: {e:#}. \
+             Re-run `register_remote_agent(name='{name}', host='{host}', ...)` to retry; \
+             the registry row stays Pending and the SSH phases are idempotent.",
+        );
+    }
+
+    // Phase 3: if the user gave a git_url, clone into the workspace. Token
+    // is interpolated into the script body and piped over SSH stdin — never
+    // lands on disk on the lair side. (The credential.helper config the
+    // script installs DOES persist the token in the VM's workspace .git/config;
+    // that's load-bearing for `git push` and can't be avoided.)
+    if let Some(url) = git_url.clone() {
+        let token = std::env::var("GH_TOKEN").unwrap_or_default();
+        let user_name  = std::env::var("GIT_USER_NAME") .unwrap_or_else(|_| "octo".to_string());
+        let user_email = std::env::var("GIT_USER_EMAIL").unwrap_or_else(|_| "octo@localhost".to_string());
+        let script = build_remote_clone_script(&url, &token, &user_name, &user_email);
+        info!("[lair/register_remote_agent] {host}: cloning {url}");
+        if let Err(e) = ssh_ops::run_script(&host, "root", &key_path, &script).await {
+            return format!(
+                "error cloning git repo on {host}: {e:#}. \
+                 Re-run `register_remote_agent` to retry (row stays Pending).",
+            );
+        }
+    }
+
+    // Phase 4: docker restart octo-agent so the workspace + config.json are
+    // picked up cleanly (correct system prompt for repo-bound agents).
+    info!("[lair/register_remote_agent] {host}: restarting octo-agent");
+    if let Err(e) = ssh_ops::run_script(
+        &host, "root", &key_path,
+        "set -e; docker restart octo-agent >/dev/null",
+    ).await {
+        return format!(
+            "error restarting octo-agent on {host}: {e:#}. \
+             Re-run `register_remote_agent` to retry (row stays Pending).",
+        );
+    }
+
+    // Re-pull agent-info to confirm the restart completed. Same file path;
+    // the agent rewrites it on every boot. Shorter timeout — the restart
+    // should land within ~30 s. Soft-fail: if the second poll times out
+    // (e.g. agent-info.json takes a moment to be re-written), keep the
+    // pre-restart pubkey/port — they should be unchanged anyway.
+    info!("[lair/register_remote_agent] {host}: confirming restart");
+    let info = match ssh_ops::await_agent_info(
+        &host,
+        "root",
+        &key_path,
+        Duration::from_secs(60),
+        Duration::from_secs(4),
+    ).await {
+        Ok(i) => i,
+        Err(_) => {
+            warn!("[lair/register_remote_agent] {host}: restart confirmation timed out; using pre-restart info");
+            info
+        }
+    };
+
+    let record = AgentRecord {
+        name:          name.clone(),
+        container_id:  None,
+        host:          Some(host.clone()),
+        port:          info.port,
+        pubkey:        info.pubkey.clone(),
+        git_url:       git_url.clone(),
+        status:        AgentStatus::Running,
+        image_version: image,
+        created_at,
+        last_seen:     octo_core::now_secs(),
+        instance_id,
+        provider,
+        metadata,
+    };
+    if let Err(e) = state.registry.lock().unwrap().set(record) {
+        return format!("error finalising registry row for '{name}': {e:#}");
+    }
+    state.poll_trigger.notify_one();
+    let verb = if resuming { "Resumed and registered" } else { "Registered" };
+    format!(
+        "{verb} remote agent '{name}' at {host}:{} (pubkey={}). \
+         Mobile will pick it up via the next containers event.",
+        info.port, info.pubkey,
+    )
+}
+
+/// Build a bash blob that clones (or refreshes) `url` into the remote agent's
+/// workspace and wires the git user identity + credential helper. Token is
+/// interpolated verbatim; the script is piped over SSH stdin so it never
+/// lands on disk on the lair side.
+fn build_remote_clone_script(
+    url:        &str,
+    gh_token:   &str,
+    user_name:  &str,
+    user_email: &str,
+) -> String {
+    // Compute the clone URL with the token spliced in for HTTPS. We do this
+    // on lair so the remote script doesn't need to know token-handling rules.
+    let clone_url = if url.starts_with("https://") && !gh_token.is_empty() {
+        let rest = url.trim_start_matches("https://");
+        let rest = match rest.find('@') {
+            Some(i) => &rest[i + 1..],
+            None    => rest,
+        };
+        format!("https://x-token:{gh_token}@{rest}")
+    } else {
+        url.to_string()
+    };
+    let credential_helper = if !gh_token.is_empty() && url.starts_with("https://") {
+        Some(format!("!f() {{ echo username=x-token; echo password={gh_token}; }}; f"))
+    } else {
+        None
+    };
+
+    let mut script = String::new();
+    script.push_str("set -e\n");
+    script.push_str("WORKSPACE=/var/lib/octo/agent-workspace\n");
+    script.push_str(&format!("CLONE_URL='{}'\n", clone_url.replace('\'', "'\\''")));
+    script.push_str(&format!("USER_NAME='{}'\n",  user_name.replace('\'', "'\\''")));
+    script.push_str(&format!("USER_EMAIL='{}'\n", user_email.replace('\'', "'\\''")));
+    script.push_str(r#"if [ -d "$WORKSPACE/.git" ]; then
+    git -C "$WORKSPACE" remote set-url origin "$CLONE_URL"
+    git -C "$WORKSPACE" fetch --all
+else
+    # Workspace may be empty or hold a stale directory from a previous run.
+    find "$WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    git clone "$CLONE_URL" "$WORKSPACE"
+fi
+git -C "$WORKSPACE" config user.name  "$USER_NAME"
+git -C "$WORKSPACE" config user.email "$USER_EMAIL"
+"#);
+    if let Some(helper) = credential_helper {
+        script.push_str(&format!("HELPER='{}'\n", helper.replace('\'', "'\\''")));
+        script.push_str(r#"git -C "$WORKSPACE" config credential.helper "$HELPER"
+"#);
+    }
+    script
+}
+
+async fn exec_forget_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let name = match input.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "error: missing 'name' field".to_string(),
+    };
+
+    let record = state.registry.lock().unwrap().get(&name).cloned();
+    let record = match record {
+        Some(r) => r,
+        None    => return format!("'{name}' was not in the registry"),
+    };
+    if !record.is_remote() {
+        return format!(
+            "error: '{name}' is a local agent. Use `terminate_agent` instead so the Docker \
+             container + volumes are also cleaned up."
+        );
+    }
+
+    let removed = state.registry.lock().unwrap().remove(&name);
+    match removed {
+        Ok(true) => {
+            state.poll_trigger.notify_one();
+            format!("Forgot '{name}' — registry row removed; no Docker or VM action taken.")
+        }
+        Ok(false) => format!("'{name}' was not in the registry"),
+        Err(e)    => format!("error: {e:#}"),
     }
 }
 
@@ -1142,22 +1629,25 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
 }
 
 async fn exec_restart_all_containers(state: Arc<AppState>) -> String {
-    info!("[lair/restart_all] triggering rollout restart for all deployments");
-    match k8s::restart_deployments(&state.kube_client, &[]).await {
-        Ok(restarted) if restarted.is_empty() => {
-            info!("[lair/restart_all] no deployments found");
-            "No deployments found to restart.".to_string()
+    let names: Vec<String> = state.registry.lock().unwrap()
+        .list().iter().map(|r| r.name.clone()).collect();
+    if names.is_empty() {
+        info!("[lair/restart_all] no agents found");
+        return "No agents found to restart.".to_string();
+    }
+    let mut restarted = Vec::new();
+    for name in &names {
+        if let Err(e) = docker_ops::stop_container(&state.docker, name).await {
+            warn!("[lair/restart_all] stop {name}: {e:#}");
         }
-        Ok(restarted) => {
-            info!("[lair/restart_all] restarted: {}", restarted.join(", "));
-            state.poll_trigger.notify_one();
-            format!("Rollout restart triggered for: {}.", restarted.join(", "))
-        }
-        Err(e) => {
-            error!("[lair/restart_all] error: {e}");
-            format!("error: {e}")
+        match docker_ops::start_container(&state.docker, name).await {
+            Ok(_)  => restarted.push(name.clone()),
+            Err(e) => error!("[lair/restart_all] start {name}: {e:#}"),
         }
     }
+    state.poll_trigger.notify_one();
+    info!("[lair/restart_all] restarted: {}", restarted.join(", "));
+    format!("Restarted: {}.", restarted.join(", "))
 }
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
@@ -1222,27 +1712,29 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     let public_host = crate::bootstrap::resolve_public_host("lair").await?;
     crate::bootstrap::run_startup_script("lair").await?;
 
-    let lair_name = std::env::var("LAIR_NAME").unwrap_or_else(|_| "lair".to_string());
-    let lair_url  = format!("http://{}:{}", lair_name, http_port);
-
     info!("[lair] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port} public_host={public_host}");
 
-    let kube_client = k8s::build_client().await
-        .map_err(|e| anyhow::anyhow!("failed to initialize K8s client: {e}"))?;
-    info!("[lair] K8s client initialized");
-
-    // Stamp our own version onto the deployment annotation so `octo reload`
-    // can display the version transition without the CLI hardcoding it.
-    if let Err(e) = k8s::stamp_deployment_version(&kube_client, &lair_name, env!("CARGO_PKG_VERSION")).await {
-        warn!("[lair] could not stamp version annotation: {e}");
-    } else {
-        info!("[lair] stamped version {} on deployment/{lair_name}", env!("CARGO_PKG_VERSION"));
-    }
+    let docker = docker_ops::build_client()
+        .map_err(|e| anyhow::anyhow!("failed to initialize Docker client: {e:#}"))?;
+    info!("[lair] Docker client initialized");
 
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
     let dir = data_dir();
     fs::create_dir_all(&dir).ok();
+
+    // Generate an SSH keypair for ops backchannels (e.g. tailing logs on a
+    // remote-provisioned VM). Idempotent — existing keys are left untouched.
+    match ensure_ssh_keypair(&dir) {
+        Ok((priv_path, _pub_path)) => info!("[lair] SSH keypair ready at {}", priv_path.display()),
+        Err(e) => warn!("[lair] could not ensure SSH keypair: {e:#}"),
+    }
+
+    let registry = Registry::load(dir.join("agents.json"))
+        .map_err(|e| anyhow::anyhow!("load agent registry: {e:#}"))?;
+    info!("[lair] loaded agent registry: {} entries", registry.list().len());
+    let registry = Arc::new(Mutex::new(registry));
+
     let messages = load_messages();
     info!("[lair] loaded {} message(s) from history", messages.len());
 
@@ -1279,8 +1771,8 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         pubkey_b32:            pubkey_b32.clone(),
         noise_private_key_hex,
         public_host:           public_host.clone(),
-        lair_url,
-        kube_client,
+        docker,
+        registry,
         mcp_pool,
         cancel:                Mutex::new(CancellationToken::new()),
         is_streaming:          AtomicBool::new(false),
@@ -1298,7 +1790,7 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
 
     // Soft cap so a stuck poller can't keep the UI in "connecting" forever.
     // 30s is well past the poller's 5s warm-up + a normal first list, but
-    // short enough that mobile recovers if K8s is unreachable.
+    // short enough that mobile recovers if Docker is unreachable.
     let ready_tx_timeout = ready_tx.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -1317,11 +1809,9 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         .route("/health",           get(health_handler))
         .route("/info",             get(info_handler))
         .route("/history",          get(history_handler))
-        .route("/message",          post(message_handler))
         .route("/stream",           get(stream_handler))
         .route("/interrupt",        post(interrupt_handler))
         .route("/clear",            post(clear_handler))
-        .route("/child-version",    post(child_version_handler))
         .with_state(state)
         .layer(cors);
 

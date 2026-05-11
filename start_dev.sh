@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Local dev loop: build lair:dev from the working tree, launch it against a
+# dedicated host data dir (`./dev-data/`), and bind-mount the Docker socket so
+# the dev lair can spawn agent containers exactly like a prod install.
+#
+# Stop with ./stop_dev.sh — that script teardown also rms every managed agent
+# container created during the session.
+
 DEV_IMAGE="lair:dev"
+DEV_DATA_DIR="$(pwd)/dev-data"
+DEV_ENV_FILE="$(pwd)/dev-data.env"
+DEV_NOISE_PORT="${DEV_NOISE_PORT:-9000}"
+DEV_HTTP_PORT="${DEV_HTTP_PORT:-8000}"
 
 # ── Checks ─────────────────────────────────────────────────────────────────────
 if [ -z "${ANTHROPIC_API_KEY_OCTO:-}" ]; then
@@ -9,90 +20,60 @@ if [ -z "${ANTHROPIC_API_KEY_OCTO:-}" ]; then
     exit 1
 fi
 
-if ! kubectl config get-contexts docker-desktop &>/dev/null; then
-    echo "ERROR: docker-desktop kubectl context not found." >&2
-    echo "       Enable Kubernetes in Docker Desktop → Settings → Kubernetes." >&2
+if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: docker daemon not reachable (is Docker Desktop / dockerd running?)" >&2
     exit 1
 fi
-
-kubectl config use-context docker-desktop
 
 # ── Build image locally ────────────────────────────────────────────────────────
 echo "▸ Building local image ${DEV_IMAGE}..."
 docker build -f lair/Dockerfile -t "${DEV_IMAGE}" .
 
-# ── Manifests ──────────────────────────────────────────────────────────────────
-echo "▸ Applying namespace and RBAC..."
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/rbac.yaml
+# ── Dev data dir ───────────────────────────────────────────────────────────────
+mkdir -p "${DEV_DATA_DIR}"
 
-# ── Secrets ────────────────────────────────────────────────────────────────────
-# `lair-secrets` is consumed by the parent lair Deployment via envFrom.
-# `child-secrets` is consumed by every child agent Deployment via envFrom — a
-# strict subset of lair-secrets. In production both are created by
-# `octo init`/`octo reload`; in dev we create them here so child Pods don't
-# fail with CreateContainerConfigError. Keep keys in sync with
-# k8s-ops/src/k8s.rs::upsert_secret and ::upsert_child_secret.
-echo "▸ Creating/updating lair-secrets..."
-kubectl create secret generic lair-secrets \
-    --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY_OCTO}" \
-    --from-literal=GH_TOKEN="${GH_TOKEN:-}" \
-    -n octo \
-    --dry-run=client -o yaml | kubectl apply -f -
+# ── Env file consumed by `docker run --env-file` ──────────────────────────────
+cat > "${DEV_ENV_FILE}" <<EOF
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY_OCTO}
+GH_TOKEN=${GH_TOKEN:-}
+PUBLIC_PORT=${DEV_NOISE_PORT}
+NOISE_PORT=9000
+OCTO_DATA_DIR=/data
+NOISE_KEY_FILE=/data/noise_key.bin
+OCTO_DEV=1
+OCTO_SKIP_SHELL_ENV=1
+EOF
+chmod 600 "${DEV_ENV_FILE}"
 
-echo "▸ Creating/updating child-secrets..."
-kubectl create secret generic child-secrets \
-    --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY_OCTO}" \
-    --from-literal=GH_TOKEN="${GH_TOKEN:-}" \
-    -n octo \
-    --dry-run=client -o yaml | kubectl apply -f -
+# ── Run lair ───────────────────────────────────────────────────────────────────
+echo "▸ Removing any existing lair container..."
+docker rm -f lair >/dev/null 2>&1 || true
 
-# ── Deployment ─────────────────────────────────────────────────────────────────
-echo "▸ Applying lair deployment..."
-kubectl apply -f k8s/lair.yaml
+echo "▸ Running ${DEV_IMAGE}..."
+docker run -d \
+    --name lair \
+    --label octo.managed=1 \
+    --label octo.role=lair \
+    -p "${DEV_NOISE_PORT}:9000" \
+    -p "127.0.0.1:${DEV_HTTP_PORT}:8000" \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "${DEV_DATA_DIR}:/data" \
+    --env-file "${DEV_ENV_FILE}" \
+    --restart unless-stopped \
+    "${DEV_IMAGE}" >/dev/null
 
-echo "▸ Switching to local image (imagePullPolicy: Never)..."
-kubectl set image deployment/lair lair="${DEV_IMAGE}" -n octo
-kubectl patch deployment lair -n octo \
-    -p '{"spec":{"template":{"spec":{"containers":[{"name":"lair","imagePullPolicy":"Never"}]}}}}'
+echo "▸ Waiting for lair to be ready on http://127.0.0.1:${DEV_HTTP_PORT}..."
+for i in $(seq 1 60); do
+    if curl -sf "http://127.0.0.1:${DEV_HTTP_PORT}/health" >/dev/null; then
+        echo ""
+        echo "✓ lair is up. Noise listener on 0.0.0.0:${DEV_NOISE_PORT}; data dir ${DEV_DATA_DIR}."
+        echo "  Tail logs:   docker logs -f lair"
+        echo "  Tear down:   ./stop_dev.sh"
+        exit 0
+    fi
+    sleep 1
+done
 
-echo "▸ Setting OCTO_DEV=1..."
-kubectl set env deployment/lair OCTO_DEV=1 -n octo
-
-# ── Wait ───────────────────────────────────────────────────────────────────────
-echo "▸ Waiting for lair pod to be ready..."
-kubectl rollout status deployment/lair -n octo --timeout=120s
-
-# ── Port-forward lair (background, auto-respawn) ───────────────────────────
-# Docker Desktop on Mac exposes NodePorts natively — no port-forward needed for
-# child containers. We only forward lair's Noise port because DEV_CONN uses
-# port 9000 rather than the NodePort (30090).
-#
-# `kubectl port-forward svc/...` glues to ONE backing pod at start time and dies
-# when that pod terminates (e.g. when lair gets rolled). The loop below
-# respawns it so dev sessions survive `kubectl rollout restart` etc. The PID
-# saved is the supervisor loop, not the inner kubectl — stop_dev.sh kills the
-# loop AND any orphaned `kubectl port-forward` processes for safety.
-PID_FILE="/tmp/octo-dev-portforward.pid"
-PF_LOG="/tmp/octo-portforward.log"
-: >"${PF_LOG}"
-
-(
-    # If our supervisor gets SIGTERM/SIGINT, kill the inner kubectl too —
-    # otherwise it'd be orphaned and keep holding port 9000.
-    trap 'kill $PF_PID 2>/dev/null; exit 0' TERM INT
-    while :; do
-        kubectl port-forward -n octo svc/lair-noise 9000:9000 >>"${PF_LOG}" 2>&1 &
-        PF_PID=$!
-        wait "$PF_PID"
-        echo "[$(date '+%H:%M:%S')] port-forward exited (rc=$?), respawning in 2s..." >>"${PF_LOG}"
-        sleep 2
-    done
-) &
-echo $! > "${PID_FILE}"
-
-echo ""
-echo "✓ lair is running. Noise tunnel port-forwarded → localhost:9000"
-echo "  Child containers are accessible via their NodePorts (30100–30199) directly."
-echo "  Run ./stop_dev.sh to tear down."
-echo ""
+echo "ERROR: lair did not become healthy in 60s. Last logs:" >&2
+docker logs --tail 100 lair >&2 || true
+exit 1
