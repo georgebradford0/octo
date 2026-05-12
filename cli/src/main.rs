@@ -65,11 +65,11 @@ enum Command {
     /// Bootstrap lair as a Docker container on this host
     Init {
         /// Anthropic API key
-        #[arg(long, env = "ANTHROPIC_API_KEY")]
+        #[arg(long)]
         anthropic_api_key: Option<String>,
 
         /// GitHub token (optional, for private repos)
-        #[arg(long, env = "GH_TOKEN")]
+        #[arg(long)]
         gh_token: Option<String>,
 
         /// Host port that publishes lair's Noise endpoint
@@ -390,7 +390,7 @@ async fn main() -> Result<()> {
             let api_key = anthropic_api_key
                 .or(cfg.anthropic_api_key.clone())
                 .ok_or_else(|| anyhow::anyhow!(
-                    "Anthropic API key is required: pass --anthropic-api-key, set ANTHROPIC_API_KEY, or include anthropic_api_key in --config or ~/.octo/config.json"
+                    "Anthropic API key is required: pass --anthropic-api-key or include anthropic_api_key in --config or ~/.octo/config.json"
                 ))?;
 
             let gh_token = gh_token.or(cfg.gh_token.clone());

@@ -58,29 +58,15 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     // persisted previously so repeat `octo init` doesn't quietly drop it.
     let gh_token = opts.gh_token.map(str::to_string).or_else(|| cfg.gh_token.clone());
 
-    // Seed mcp.json if the operator provided one. `${VAR}` references are
-    // expanded against the *host* env so the operator can use the same file
-    // the agent will end up reading.
+    // Seed mcp.json if the operator provided one. Written through verbatim —
+    // any secret values must be inlined directly in the file.
     if let Some(path) = opts.mcp_config {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read mcp config {}", path.display()))?;
-        let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
+        // Parse-then-reserialize so we surface invalid JSON loudly here rather
+        // than handing a broken file to lair.
+        let servers: Vec<serde_json::Value> = serde_json::from_str(&text)
             .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
-        for server in &mut servers {
-            if let Some(env) = server.get_mut("env").and_then(|e| e.as_object_mut()) {
-                for (_, val) in env.iter_mut() {
-                    if let Some(s) = val.as_str() {
-                        if s.starts_with("${") && s.ends_with('}') {
-                            let var = &s[2..s.len() - 1];
-                            match std::env::var(var) {
-                                Ok(resolved) => *val = serde_json::Value::String(resolved),
-                                Err(_) => eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded"),
-                            }
-                        }
-                    }
-                }
-            }
-        }
         let dest = lair_dir.join("mcp.json");
         fs::write(&dest, serde_json::to_string_pretty(&servers)?)
             .with_context(|| format!("write {}", dest.display()))?;
