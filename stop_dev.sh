@@ -2,8 +2,13 @@
 set -euo pipefail
 
 # Tear down every container started by start_dev.sh — lair plus all managed
-# child agents — and reap their named volumes. The dev-data/ bind mount on
-# the host is preserved so a follow-up start_dev.sh keeps the Noise keypair.
+# child agents — reap their named volumes, and delete the host-side dev
+# artefacts (dev-data/, dev-data.env) so the next start_dev.sh is a clean
+# slate. The repo-root config.json is left alone — it's the operator's
+# credentials file, not a per-session artefact.
+
+DEV_DATA_DIR="$(pwd)/dev-data"
+DEV_ENV_FILE="$(pwd)/dev-data.env"
 
 # Stop and remove every managed agent container (label octo.managed=1).
 managed=$(docker ps -aq --filter "label=octo.managed=1" 2>/dev/null || true)
@@ -20,6 +25,15 @@ if [ -n "${agent_vols}" ]; then
     docker volume rm ${agent_vols} >/dev/null 2>&1 || true
 fi
 
+# Remove host-side dev artefacts created by start_dev.sh.
+if [ -d "${DEV_DATA_DIR}" ]; then
+    echo "▸ Removing ${DEV_DATA_DIR}..."
+    rm -rf "${DEV_DATA_DIR}"
+fi
+if [ -f "${DEV_ENV_FILE}" ]; then
+    echo "▸ Removing ${DEV_ENV_FILE}..."
+    rm -f "${DEV_ENV_FILE}"
+fi
+
 echo ""
 echo "✓ Dev environment stopped."
-echo "  (dev-data/ on the host preserved; remove it manually for a clean restart.)"
