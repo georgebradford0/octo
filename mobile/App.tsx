@@ -2194,7 +2194,7 @@ const s = StyleSheet.create({
   inputFloat:      { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 12, paddingBottom: 10, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, backgroundColor: C.bg },
   inputRow:        { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   // Input — slightly raised paper tone with a sharper corner radius
-  input:           { flex: 1, backgroundColor: '#FBF8EE', borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 16, paddingVertical: 17, color: C.textPrimary, fontSize: 15.5, lineHeight: 22, minHeight: 56, maxHeight: 140, fontFamily: ARIMO },
+  input:           { flex: 1, backgroundColor: '#FBF8EE', borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 16, paddingVertical: 15, color: C.textPrimary, fontSize: 15.5, lineHeight: 26, minHeight: 56, maxHeight: 140, fontFamily: ARIMO },
   // Send button is squared to match the input box; bg matches the app icon
   sendBtn:         { width: 56, height: 56, borderRadius: 6, backgroundColor: '#4A90E2', alignItems: 'center', justifyContent: 'center', marginBottom: 0 },
   sendBtnDisabled: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
