@@ -60,17 +60,20 @@ esac
 
 # Install shell completions.
 DETECTED_SHELL=$(basename "${SHELL:-sh}")
+COMPLETIONS_INSTALLED=""
 case "$DETECTED_SHELL" in
   zsh)
     COMP_DIR="$HOME/.zfunc"
+    COMP_FILE="$COMP_DIR/_octo"
     mkdir -p "$COMP_DIR"
-    "$INSTALL_DIR/$BIN" completions zsh > "$COMP_DIR/_octo"
-    echo "Zsh completions installed to $COMP_DIR/_octo"
+    "$INSTALL_DIR/$BIN" completions zsh > "$COMP_FILE"
+    echo "Zsh completions installed to $COMP_FILE"
     ZSHRC="$HOME/.zshrc"
     if ! grep -q 'fpath.*\.zfunc' "$ZSHRC" 2>/dev/null; then
       printf '\nfpath+=~/.zfunc\nautoload -Uz compinit && compinit\n' >> "$ZSHRC"
       echo "Added fpath and compinit to $ZSHRC"
     fi
+    COMPLETIONS_INSTALLED=1
     ;;
   bash)
     COMP_FILE="$HOME/.local/share/bash-completion/completions/octo"
@@ -79,18 +82,22 @@ case "$DETECTED_SHELL" in
     echo "Bash completions installed to $COMP_FILE"
     # Source the file directly from ~/.bashrc so it works even without the
     # bash-completion package (which is required for the XDG directory to be
-    # picked up automatically).
+    # picked up automatically). Match the exact source line so unrelated
+    # mentions of "octo" elsewhere in .bashrc don't suppress the append.
     BASHRC="$HOME/.bashrc"
-    if ! grep -q "octo" "$BASHRC" 2>/dev/null; then
-      printf '\n. %s\n' "$COMP_FILE" >> "$BASHRC"
+    SOURCE_LINE=". $COMP_FILE"
+    if ! grep -qxF "$SOURCE_LINE" "$BASHRC" 2>/dev/null; then
+      printf '\n%s\n' "$SOURCE_LINE" >> "$BASHRC"
       echo "Added completion source to $BASHRC"
     fi
+    COMPLETIONS_INSTALLED=1
     ;;
   fish)
     COMP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
     mkdir -p "$COMP_DIR"
     "$INSTALL_DIR/$BIN" completions fish > "$COMP_DIR/octo.fish"
     echo "Fish completions installed to $COMP_DIR/octo.fish"
+    COMPLETIONS_INSTALLED=1
     ;;
   *)
     echo "Completions: run 'octo completions <bash|zsh|fish>' to generate for your shell."
@@ -98,8 +105,14 @@ case "$DETECTED_SHELL" in
 esac
 
 echo ""
-echo "Next: run 'octo init' to bootstrap a lair Docker container on this host."
-echo "      (Set ANTHROPIC_API_KEY in your env, or pass --anthropic-api-key.)"
+if [ -n "$COMPLETIONS_INSTALLED" ]; then
+  echo "Tab-completions are installed but won't be active in this shell session."
+  echo "Start a new shell (or run 'exec $DETECTED_SHELL') to activate them."
+  echo ""
+fi
+echo "Next: run 'octo init --anthropic-api-key <key>' to bootstrap a lair Docker"
+echo "      container on this host. Optional flags: --gh-token, --openai-api-key,"
+echo "      --api-url, --model. All values persist to ~/.octo/config.json."
 echo ""
 
 "$INSTALL_DIR/$BIN" --help
