@@ -14,6 +14,38 @@ fn mask(s: &str) -> String {
     format!("{}...{}", &s[..4], &s[s.len()-4..])
 }
 
+/// Parse `--env KEY=VALUE` pairs from `octo init`. Rejects malformed pairs,
+/// invalid key names, and reserved keys (the runtime knobs octo writes into
+/// lair-env itself).
+fn parse_extra_env(raw: &[String]) -> Result<Vec<(String, String)>> {
+    const RESERVED: &[&str] = &[
+        "NOISE_PORT", "PUBLIC_PORT", "OCTO_DATA_DIR",
+        "NOISE_KEY_FILE", "OCTO_SKIP_SHELL_ENV",
+    ];
+    let mut out = Vec::with_capacity(raw.len());
+    for pair in raw {
+        let (k, v) = pair.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--env value '{pair}' must be KEY=VALUE")
+        })?;
+        let k = k.trim();
+        if k.is_empty() {
+            anyhow::bail!("--env '{pair}': empty KEY");
+        }
+        let first = k.chars().next().unwrap();
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            anyhow::bail!("--env '{pair}': KEY must start with letter or underscore");
+        }
+        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            anyhow::bail!("--env '{pair}': KEY may only contain letters, digits, and underscores");
+        }
+        if RESERVED.contains(&k) {
+            anyhow::bail!("--env '{k}': reserved name managed by octo; remove the flag");
+        }
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
+}
+
 /// Validate the resolved config before persisting it.
 fn validate_resolved_config(cfg: &Config) -> Result<(), String> {
     let anthropic = cfg.anthropic_api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -68,6 +100,14 @@ enum Command {
         /// GitHub token (optional, for private repos)
         #[arg(long)]
         gh_token: Option<String>,
+
+        /// Extra env var passed to the lair container (KEY=VALUE). Repeatable.
+        /// Operator-supplied; these end up in `docker inspect lair`, so use it
+        /// only for values that have to be in lair's process env (e.g. so an
+        /// MCP server or a `bash` tool call can read $GH_TOKEN). Reserved
+        /// names managed by octo are rejected.
+        #[arg(long = "env", short = 'e', value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
+        env: Vec<String>,
 
         /// Host port that publishes lair's Noise endpoint
         #[arg(long, default_value_t = 8443)]
@@ -383,8 +423,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init {
             anthropic_api_key, openai_api_key, api_url, model, gh_token,
-            noise_port, http_port, image, mcp_config, config,
+            env, noise_port, http_port, image, mcp_config, config,
         } => {
+            let extra_env = parse_extra_env(&env)?;
             // Merge flag values onto the loaded config (flag wins). Result is
             // the effective Config that will be persisted to ~/.octo/config.json
             // and bind-mounted into /data/config.json inside lair.
@@ -409,6 +450,7 @@ async fn main() -> Result<()> {
                 http_port,
                 image:      &image,
                 mcp_config: mcp_config.as_deref(),
+                extra_env:  &extra_env,
             }).await?;
         }
         Command::Destroy { yes } => {

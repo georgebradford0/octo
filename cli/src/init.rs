@@ -16,6 +16,10 @@ pub struct InitOptions<'a> {
     pub http_port:  u16,
     pub image:      &'a str,
     pub mcp_config: Option<&'a Path>,
+    /// Operator-supplied `KEY=VALUE` pairs forwarded into the lair container's
+    /// process env via `--env-file`. Distinct from `config.json` credentials,
+    /// which lair reads from the bind-mounted file at request time.
+    pub extra_env:  &'a [(String, String)],
 }
 
 /// Expand a `"${VAR}"` reference against the operator's process env. Returns
@@ -105,6 +109,7 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     fs::create_dir_all(env_path.parent().unwrap()).ok();
     let env_text = build_env_file(&EnvFileInput {
         public_port: opts.noise_port,
+        extra_env:   opts.extra_env,
     });
     write_secret_file(&env_path, &env_text)?;
     println!("Wrote env file: {}", env_path.display());
@@ -191,15 +196,18 @@ fn ensure_noise_keypair(path: &Path) -> Result<String> {
     Ok(BASE32_NOPAD.encode(&kp.public))
 }
 
-pub struct EnvFileInput {
+pub struct EnvFileInput<'a> {
     pub public_port: u16,
+    /// Operator-supplied extras appended after the managed runtime knobs.
+    pub extra_env:   &'a [(String, String)],
 }
 
-/// Runtime-only env file for the lair container. Credentials (API keys,
-/// `GH_TOKEN`, `MODEL`, etc.) and the Noise private key are NOT written here
-/// — lair picks those up from the bind-mounted `/data/config.json` and
-/// `/data/noise_key.bin` respectively, so `docker inspect lair` no longer
-/// surfaces them.
+/// Runtime-only env file for the lair container. Lair credentials (API keys,
+/// `MODEL`, etc.) and the Noise private key are NOT written here — lair
+/// picks those up from the bind-mounted `/data/config.json` and
+/// `/data/noise_key.bin` respectively. Operator-supplied `--env KEY=VALUE`
+/// extras are appended so `docker inspect lair` does surface them, by the
+/// operator's choice.
 pub fn build_env_file(i: &EnvFileInput) -> String {
     let mut out = String::new();
     out.push_str(&format!("PUBLIC_PORT={}\n", i.public_port));
@@ -207,6 +215,9 @@ pub fn build_env_file(i: &EnvFileInput) -> String {
     out.push_str("OCTO_DATA_DIR=/data\n");
     out.push_str("NOISE_KEY_FILE=/data/noise_key.bin\n");
     out.push_str("OCTO_SKIP_SHELL_ENV=1\n");
+    for (k, v) in i.extra_env {
+        out.push_str(&format!("{k}={v}\n"));
+    }
     out
 }
 
