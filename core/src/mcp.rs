@@ -436,15 +436,29 @@ async fn parse_sse_response(response: reqwest::Response) -> Result<Value, String
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 
-/// Expand `"${VAR}"` → the value of env var `VAR`, returning the original
-/// string if the variable is unset or the format doesn't match.
+/// Expand `"${VAR}"` references in MCP env / header values. Well-known
+/// credential names are resolved against the operator's `config.json`
+/// (`ANTHROPIC_API_KEY` → `config.anthropic_api_key`, etc.) so an mcp.json
+/// like `{"env": {"API_KEY": "${ANTHROPIC_API_KEY}"}}` keeps working after
+/// 0.6.2 moved secrets out of lair's process env. Anything not in that table
+/// falls back to `std::env::var(...)`, then to the literal string.
 fn expand_var(v: &str) -> String {
-    if v.starts_with("${") && v.ends_with('}') {
-        let var = &v[2..v.len() - 1];
-        std::env::var(var).unwrap_or_else(|_| v.to_string())
-    } else {
-        v.to_string()
+    if !(v.starts_with("${") && v.ends_with('}')) {
+        return v.to_string();
     }
+    let var = &v[2..v.len() - 1];
+    let cfg = crate::read_config();
+    let from_cfg = match var {
+        "ANTHROPIC_API_KEY" => cfg.anthropic_api_key,
+        "OPENAI_API_KEY"    => cfg.openai_api_key,
+        "OPENAI_API_URL"    => cfg.api_url,
+        "MODEL"             => cfg.model,
+        "GH_TOKEN"          => cfg.gh_token,
+        _                   => None,
+    };
+    from_cfg
+        .or_else(|| std::env::var(var).ok())
+        .unwrap_or_else(|| v.to_string())
 }
 
 // ── Tool parsing ──────────────────────────────────────────────────────────────

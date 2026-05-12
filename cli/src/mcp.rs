@@ -17,18 +17,6 @@ use crate::dockerd;
 const MCP_PATH_IN_CONTAINER: &str = "/data/mcp.json";
 const LAIR_AGENT_NAME:       &str = "lair";
 
-fn expand_host_var(v: &str) -> String {
-    if v.starts_with("${") && v.ends_with('}') {
-        let var = &v[2..v.len() - 1];
-        std::env::var(var).unwrap_or_else(|_| {
-            eprintln!("warning: ${{{var}}} not set in local environment — storing unexpanded");
-            v.to_string()
-        })
-    } else {
-        v.to_string()
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct McpServerConfig {
     name:    String,
@@ -160,11 +148,15 @@ pub async fn add(
         anyhow::bail!("MCP server '{name}' already exists in '{agent}'");
     }
 
+    // Store `${VAR}` references verbatim. Lair resolves them at MCP-server
+    // spawn time against config.json (well-known credential keys) with env
+    // as a fallback — so `octo config set --gh-token=...` rotates the value
+    // for downstream MCP servers on the next lair restart.
     let mut env = HashMap::new();
     for pair in env_pairs {
         let (k, v) = pair.split_once('=')
             .with_context(|| format!("invalid env pair '{pair}': expected KEY=VALUE"))?;
-        env.insert(k.to_string(), expand_host_var(v));
+        env.insert(k.to_string(), v.to_string());
     }
 
     configs.push(McpServerConfig {
@@ -237,14 +229,10 @@ pub async fn import_from_file(agent: &str, path: &std::path::Path) -> Result<()>
     }
 
     let docker = dockerd::build_client()?;
-    let resolved: Vec<McpServerConfig> = entries.into_iter().map(|mut e| {
-        e.env     = e.env    .into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
-        e.headers = e.headers.into_iter().map(|(k, v)| (k, expand_host_var(&v))).collect();
-        e
-    }).collect();
-
-    println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", resolved.len());
-    write_mcp(&docker, agent, &resolved).await?;
+    // `${VAR}` values in the imported file are stored verbatim — lair resolves
+    // them at MCP-server spawn time (config.json first, env as fallback).
+    println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", entries.len());
+    write_mcp(&docker, agent, &entries).await?;
     println!("Imported successfully.");
     Ok(())
 }

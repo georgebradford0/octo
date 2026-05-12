@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-05-12
+
+### Changed
+
+- **`${VAR}` references in `mcp.json` env / header values now resolve against `/data/config.json` first, falling back to process env.** Well-known credential names map to config fields: `${ANTHROPIC_API_KEY}` → `config.anthropic_api_key`, `${OPENAI_API_KEY}` → `config.openai_api_key`, `${OPENAI_API_URL}` → `config.api_url`, `${MODEL}` → `config.model`, `${GH_TOKEN}` → `config.gh_token`. Other variable names still resolve from env (and fall back to the literal string). Without this, the 0.6.2 env-stripping broke mcp.json files that referenced API keys via `${VAR}`.
+- CLI's `octo mcp add KEY=${VAR}` / `octo mcp import` now store `${VAR}` references verbatim instead of resolving them against the host env at write time. Resolution happens at MCP-server spawn time, so `octo config set --gh-token=...` rotates the value seen by downstream MCP servers on the next lair restart.
+
 ## [0.6.2] - 2026-05-12
 
 ### Changed
