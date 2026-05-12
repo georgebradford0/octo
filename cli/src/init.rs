@@ -18,6 +18,17 @@ pub struct InitOptions<'a> {
     pub mcp_config: Option<&'a Path>,
 }
 
+/// Expand a `"${VAR}"` reference against the operator's process env. Returns
+/// the expanded value on success, or the unresolved variable name on miss.
+/// Strings that don't fit the exact `${...}` form are returned unchanged.
+pub fn expand_host_env(v: &str) -> std::result::Result<String, String> {
+    if !(v.starts_with("${") && v.ends_with('}')) {
+        return Ok(v.to_string());
+    }
+    let var = &v[2..v.len() - 1];
+    std::env::var(var).map_err(|_| var.to_string())
+}
+
 pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     let docker = dockerd::build_client()?;
     dockerd::ensure_docker_reachable(&docker).await?;
@@ -43,15 +54,41 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     // bind-mounted into /data/config.json when the lair container starts.
     println!("Operator config: {}.", octo_core::config_path().display());
 
-    // Seed mcp.json if the operator provided one. Written through verbatim —
-    // any secret values must be inlined directly in the file.
+    // Seed mcp.json if the operator provided one. `${VAR}` references in env
+    // / headers values are expanded against the operator's process env at
+    // write time so secrets get baked in before the file lands inside the
+    // lair container (which can't see the host env). If any referenced var
+    // is unset, surface every missing one and abort.
     if let Some(path) = opts.mcp_config {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read mcp config {}", path.display()))?;
-        // Parse-then-reserialize so we surface invalid JSON loudly here rather
-        // than handing a broken file to lair.
-        let servers: Vec<serde_json::Value> = serde_json::from_str(&text)
+        let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
             .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
+
+        let mut missing: Vec<String> = Vec::new();
+        for server in &mut servers {
+            for key in ["env", "headers"] {
+                let Some(obj) = server.get_mut(key).and_then(|e| e.as_object_mut()) else { continue };
+                for (_, val) in obj.iter_mut() {
+                    let Some(s) = val.as_str() else { continue };
+                    match expand_host_env(s) {
+                        Ok(resolved) => *val = serde_json::Value::String(resolved),
+                        Err(var)     => missing.push(var),
+                    }
+                }
+            }
+        }
+        if !missing.is_empty() {
+            missing.sort();
+            missing.dedup();
+            anyhow::bail!(
+                "mcp config {} references env var(s) not set in this shell: {}. \
+                 Export them and re-run, or inline the values in the file.",
+                path.display(),
+                missing.join(", "),
+            );
+        }
+
         let dest = lair_dir.join("mcp.json");
         fs::write(&dest, serde_json::to_string_pretty(&servers)?)
             .with_context(|| format!("write {}", dest.display()))?;
