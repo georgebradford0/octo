@@ -116,18 +116,30 @@ Lair listens on port 9000 (`NOISE_PORT`) inside the container; the host publishe
 
 Image: `ghcr.io/georgebradford0/lair`
 
-#### lair environment variables
+#### lair credentials (read from `/data/config.json`)
+
+Lair reads its API keys and provider settings from `/data/config.json` —
+the operator's `~/.octo/config.json` bind-mounted read-only into the
+container. `docker inspect lair` therefore does NOT expose them. The CLI
+writes this file (`octo init` / `octo config set`); lair re-reads it on
+every model call, so credential rotation is live, no restart needed.
+
+| Field in `config.json` | Required | Purpose |
+|----------|----------|---------|
+| `anthropic_api_key` | yes | Claude API access (also forwarded to children) |
+| `gh_token` | no  | Forwarded to children for repo clones / PRs |
+| `model` / `api_url` / `openai_api_key` | no | OpenAI-compatible provider for both lair and children |
+
+#### lair runtime environment variables (non-secret)
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | yes | Claude API access (also forwarded to children) |
-| `GH_TOKEN` | no  | Forwarded to children for repo clones / PRs |
-| `MODEL` / `OPENAI_API_URL` / `OPENAI_API_KEY` | no | OpenAI-compatible provider for both lair and children |
-| `NOISE_PRIVATE_KEY` | no | Hex-encoded 64-byte (private ++ public) keypair. Falls back to generating + persisting in `/data/noise_key.bin`. |
 | `PUBLIC_HOST` | no | Advertised host in QR (auto-detected via `api.ipify.org` if unset) |
 | `PUBLIC_PORT` | no | Externally-reachable port (defaults to `NOISE_PORT`) |
 | `NOISE_PORT` | no | Listening port inside the container (default: 9000) |
+| `NOISE_KEY_FILE` | no | Path to the Curve25519 private-key file (default: `/data/noise_key.bin`, generated on first run if absent) |
 | `OCTO_AGENT_IMAGE` | no | Image tag used when lair creates child containers (default: `ghcr.io/georgebradford0/lair:latest`) |
+| `OCTO_DATA_DIR` | no | Lair's data dir (default: `/data` inside the container; resolves to `~/.octo` on bare-host invocations of the CLI) |
 
 ### agent (child container) environment variables
 

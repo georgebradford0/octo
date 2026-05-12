@@ -54,10 +54,6 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     octo_core::write_config(&cfg);
     println!("Wrote operator config to {}.", octo_core::config_path().display());
 
-    // Resolve gh_token: explicit flag wins; otherwise fall back to whatever was
-    // persisted previously so repeat `octo init` doesn't quietly drop it.
-    let gh_token = opts.gh_token.map(str::to_string).or_else(|| cfg.gh_token.clone());
-
     // Seed mcp.json if the operator provided one. Written through verbatim —
     // any secret values must be inlined directly in the file.
     if let Some(path) = opts.mcp_config {
@@ -96,13 +92,7 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     let env_path = dockerd::env_file_path();
     fs::create_dir_all(env_path.parent().unwrap()).ok();
     let env_text = build_env_file(&EnvFileInput {
-        api_key:           opts.api_key,
-        gh_token:          gh_token.as_deref(),
-        model:             opts.model,
-        api_url:           opts.api_url,
-        openai_api_key:    opts.openai_api_key,
-        noise_private_key: &noise_private_key_hex,
-        public_port:       opts.noise_port,
+        public_port: opts.noise_port,
     });
     write_secret_file(&env_path, &env_text)?;
     println!("Wrote env file: {}", env_path.display());
@@ -118,6 +108,7 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
         data_dir:        &lair_dir,
         env_file:        &env_path,
         docker_socket:   resolve_docker_socket(),
+        operator_config: &octo_core::config_path(),
     };
     println!("Starting lair container...");
     dockerd::start_lair(&docker, &launch).await?;
@@ -158,29 +149,22 @@ fn generate_keypair() -> Result<(String, String)> {
     Ok((hex::encode(&combined), BASE32_NOPAD.encode(&kp.public)))
 }
 
-pub struct EnvFileInput<'a> {
-    pub api_key:           &'a str,
-    pub gh_token:          Option<&'a str>,
-    pub model:             Option<&'a str>,
-    pub api_url:           Option<&'a str>,
-    pub openai_api_key:    Option<&'a str>,
-    pub noise_private_key: &'a str,
-    pub public_port:       u16,
+pub struct EnvFileInput {
+    pub public_port: u16,
 }
 
+/// Runtime-only env file for the lair container. Credentials (API keys,
+/// `GH_TOKEN`, `MODEL`, etc.) and the Noise private key are NOT written here
+/// — lair picks those up from the bind-mounted `/data/config.json` and
+/// `/data/noise_key.bin` respectively, so `docker inspect lair` no longer
+/// surfaces them.
 pub fn build_env_file(i: &EnvFileInput) -> String {
     let mut out = String::new();
-    out.push_str(&format!("ANTHROPIC_API_KEY={}\n", i.api_key));
-    out.push_str(&format!("NOISE_PRIVATE_KEY={}\n", i.noise_private_key));
     out.push_str(&format!("PUBLIC_PORT={}\n", i.public_port));
     out.push_str("NOISE_PORT=9000\n");
     out.push_str("OCTO_DATA_DIR=/data\n");
     out.push_str("NOISE_KEY_FILE=/data/noise_key.bin\n");
     out.push_str("OCTO_SKIP_SHELL_ENV=1\n");
-    if let Some(v) = i.gh_token       { out.push_str(&format!("GH_TOKEN={v}\n")); }
-    if let Some(v) = i.model          { out.push_str(&format!("MODEL={v}\n")); }
-    if let Some(v) = i.api_url        { out.push_str(&format!("OPENAI_API_URL={v}\n")); }
-    if let Some(v) = i.openai_api_key { out.push_str(&format!("OPENAI_API_KEY={v}\n")); }
     out
 }
 

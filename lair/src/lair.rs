@@ -1039,14 +1039,16 @@ async fn exec_create_agent(state: Arc<AppState>, input: serde_json::Value) -> St
 
     info!("[lair/create_agent] creating {child_name} port={noise_port} git={}", git_url.as_deref().unwrap_or("(none)"));
 
-    // Inherit provider credentials from lair's own env so children can run
-    // their loops without a separate secret store. Mirrors what the old
-    // `child-secrets` envFrom did, just sourced from the parent process.
-    let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let gh_token          = std::env::var("GH_TOKEN").ok();
-    let model             = std::env::var("MODEL").ok();
-    let openai_api_url    = std::env::var("OPENAI_API_URL").ok();
-    let openai_api_key    = std::env::var("OPENAI_API_KEY").ok();
+    // Forward provider credentials to the child from lair's own config file
+    // (/data/config.json — bind-mounted from the host's ~/.octo/config.json
+    // for local lairs, SSH-dropped for remote agents). Env vars are no longer
+    // consulted so `docker inspect lair` doesn't leak secrets.
+    let cfg = octo_core::read_config();
+    let anthropic_api_key = cfg.anthropic_api_key.clone();
+    let gh_token          = cfg.gh_token.clone();
+    let model             = cfg.model.clone();
+    let openai_api_url    = cfg.api_url.clone();
+    let openai_api_key    = cfg.openai_api_key.clone();
 
     let image = std::env::var("OCTO_AGENT_IMAGE")
         .unwrap_or_else(|_| docker_ops::DEFAULT_AGENT_IMAGE.to_string());
@@ -1336,13 +1338,15 @@ async fn exec_register_remote_agent(state: Arc<AppState>, input: serde_json::Val
     // Phase 2: drop /data/config.json with the operator's API keys. The
     // agent re-reads this on every model call (`resolve_api_key` /
     // `resolve_model`) so we don't have to restart yet for credentials —
-    // but we will restart for the workspace clone below.
+    // but we will restart for the workspace clone below. Values come from
+    // lair's own /data/config.json, not its process env.
+    let lair_cfg = octo_core::read_config();
     let cfg = serde_json::json!({
         "name":              null,
-        "anthropic_api_key": std::env::var("ANTHROPIC_API_KEY").ok(),
-        "openai_api_key":    std::env::var("OPENAI_API_KEY").ok(),
-        "model":             std::env::var("MODEL").ok(),
-        "api_url":           std::env::var("OPENAI_API_URL").ok(),
+        "anthropic_api_key": lair_cfg.anthropic_api_key,
+        "openai_api_key":    lair_cfg.openai_api_key,
+        "model":             lair_cfg.model,
+        "api_url":           lair_cfg.api_url,
     });
     let cfg_str = match serde_json::to_string_pretty(&cfg) {
         Ok(s) => s,
@@ -1368,7 +1372,7 @@ async fn exec_register_remote_agent(state: Arc<AppState>, input: serde_json::Val
     // script installs DOES persist the token in the VM's workspace .git/config;
     // that's load-bearing for `git push` and can't be avoided.)
     if let Some(url) = git_url.clone() {
-        let token = std::env::var("GH_TOKEN").unwrap_or_default();
+        let token = octo_core::read_config().gh_token.unwrap_or_default();
         let user_name  = std::env::var("GIT_USER_NAME") .unwrap_or_else(|_| "octo".to_string());
         let user_email = std::env::var("GIT_USER_EMAIL").unwrap_or_else(|_| "octo@localhost".to_string());
         let script = build_remote_clone_script(&url, &token, &user_name, &user_email);

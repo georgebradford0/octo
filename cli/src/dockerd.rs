@@ -86,6 +86,11 @@ pub struct LairLaunch<'a> {
     pub data_dir:        &'a Path,
     pub env_file:        &'a Path,
     pub docker_socket:   &'a str,
+    /// Host path to the operator's `config.json` (API keys, model, gh_token,
+    /// …). Bind-mounted read-only into the lair container at
+    /// `/data/config.json` so lair reads secrets from the file rather than
+    /// `--env`/`--env-file` — keeps them out of `docker inspect lair`.
+    pub operator_config: &'a Path,
 }
 
 /// Create + start the lair container. Removes any pre-existing container with
@@ -149,6 +154,17 @@ pub async fn start_lair(d: &Docker, launch: &LairLaunch<'_>) -> Result<String> {
                 target:   Some("/data".to_string()),
                 source:   Some(launch.data_dir.to_string_lossy().to_string()),
                 typ:      Some(MountTypeEnum::BIND),
+                ..Default::default()
+            },
+            // Overlay the operator's config.json into /data/config.json. Bind
+            // mounts of single files preserve the host inode, so `octo config
+            // set ...` (which truncates-in-place) is picked up live without a
+            // lair restart.
+            Mount {
+                target:   Some("/data/config.json".to_string()),
+                source:   Some(launch.operator_config.to_string_lossy().to_string()),
+                typ:      Some(MountTypeEnum::BIND),
+                read_only: Some(true),
                 ..Default::default()
             },
         ]),

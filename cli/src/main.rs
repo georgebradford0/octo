@@ -580,40 +580,10 @@ async fn main() -> Result<()> {
                     if gh_token.is_some()          { cfg.gh_token          = gh_token; }
                     octo_core::write_config(&cfg);
 
-                    // Rewrite the env file with the merged values so the next
-                    // `octo reload` (or `docker restart lair`) picks them up.
-                    if let Some(api_key) = cfg.anthropic_api_key.as_deref() {
-                        // Reuse the existing NOISE_PRIVATE_KEY/PUBLIC_PORT from
-                        // the current env file so we don't clobber lair's keypair.
-                        let existing = std::fs::read_to_string(dockerd::env_file_path()).unwrap_or_default();
-                        let noise_private_key = extract_env_value(&existing, "NOISE_PRIVATE_KEY")
-                            .unwrap_or_default();
-                        let public_port = extract_env_value(&existing, "PUBLIC_PORT")
-                            .and_then(|v| v.parse::<u16>().ok())
-                            .unwrap_or(8443);
-
-                        let env_text = init::build_env_file(&init::EnvFileInput {
-                            api_key,
-                            gh_token:          cfg.gh_token.as_deref(),
-                            model:             cfg.model.as_deref(),
-                            api_url:           cfg.api_url.as_deref(),
-                            openai_api_key:    cfg.openai_api_key.as_deref(),
-                            noise_private_key: &noise_private_key,
-                            public_port,
-                        });
-                        std::fs::write(dockerd::env_file_path(), &env_text)?;
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let path = dockerd::env_file_path();
-                            if let Ok(mut perms) = std::fs::metadata(&path).map(|m| m.permissions()) {
-                                perms.set_mode(0o600);
-                                let _ = std::fs::set_permissions(&path, perms);
-                            }
-                        }
-                    }
-
-                    println!("Config updated. Run `octo reload` to apply.");
+                    // No env-file rewrite: credentials live in config.json,
+                    // which lair sees live via a bind mount at /data/config.json
+                    // and re-reads on each model call.
+                    println!("Config updated.");
                 }
             }
         }
@@ -621,14 +591,3 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Pull a single `KEY=VALUE` line out of an env-file body.
-fn extract_env_value(body: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
-    for line in body.lines() {
-        let l = line.trim();
-        if let Some(v) = l.strip_prefix(&prefix) {
-            return Some(v.to_string());
-        }
-    }
-    None
-}

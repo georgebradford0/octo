@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-12
+
+### Changed
+
+- **Credentials moved from env → `/data/config.json`.** Lair no longer reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_API_URL`, `MODEL`, or `GH_TOKEN` from process env. They live in the operator's `~/.octo/config.json`, which the CLI now bind-mounts read-only at `/data/config.json` inside the lair container. `exec_create_agent`, `exec_mint_bootstrap_userdata`, and the git-clone code path read from `octo_core::read_config()` instead. Net effect: `docker inspect lair` no longer surfaces API keys, and credential rotation is live (just edit / `octo config set` — no `octo reload` needed since the resolver re-reads on every model call).
+- `NOISE_PRIVATE_KEY` is also no longer injected via env. Lair falls back to the file-based keypair at `/data/noise_key.bin` (already persisted there since 0.5.x).
+
 ## [0.6.1] - 2026-05-11
 
 ### Changed
