@@ -32,11 +32,14 @@ pub const MANAGED_LABEL_KEY:   &str = "octo.managed";
 pub const MANAGED_LABEL_VALUE: &str = "1";
 
 /// Image tag used for the child role. Today the same image as lair — the role
-/// switch is done via the container's `command:`.
+/// switch is done by overriding the container's `entrypoint:`.
 pub const DEFAULT_AGENT_IMAGE: &str = "ghcr.io/georgebradford0/lair:latest";
 
-/// Command override that flips the merged binary into the agent role.
-pub const AGENT_COMMAND: &[&str] = &["/usr/local/bin/octo-lair", "--role", "agent"];
+/// Entrypoint override that flips the merged binary into the agent role. We
+/// set this as `entrypoint:` (not `cmd:`) so it fully replaces the image's
+/// `--role lair` ENTRYPOINT — otherwise Docker appends CMD to ENTRYPOINT and
+/// the child boots with the parent role.
+pub const AGENT_ENTRYPOINT: &[&str] = &["/usr/local/bin/octo-lair", "--role", "agent"];
 
 /// Build a Docker client from local defaults. Works for:
 /// - `/var/run/docker.sock` (Linux host or socket-mounted container)
@@ -171,16 +174,16 @@ pub async fn create_agent_container(docker: &Docker, p: &CreateAgentParams<'_>) 
         ..Default::default()
     };
 
-    let cmd: Vec<String> = AGENT_COMMAND.iter().map(|s| s.to_string()).collect();
+    let entrypoint: Vec<String> = AGENT_ENTRYPOINT.iter().map(|s| s.to_string()).collect();
     let labels = managed_labels(p.name);
 
     let config = ContainerConfig::<String> {
-        image: Some(p.image.to_string()),
-        cmd:   Some(cmd),
-        env:   Some(env),
-        labels: Some(labels),
+        image:         Some(p.image.to_string()),
+        entrypoint:    Some(entrypoint),
+        env:           Some(env),
+        labels:        Some(labels),
         exposed_ports: Some(exposed_ports),
-        host_config: Some(host_config),
+        host_config:   Some(host_config),
         ..Default::default()
     };
 

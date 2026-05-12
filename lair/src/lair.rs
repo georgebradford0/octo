@@ -703,6 +703,7 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 
 # Environment
 - Docker host. Children are containers managed via the Docker API; each has its own pair of named volumes (`agent-<name>-data`, `agent-<name>-workspace`) that survive restarts.
+- **There is no `docker` CLI in this container.** You interact with Docker exclusively through the orchestration tools below (`create_agent`, `terminate_agent`, `list_agents`, `restart_all_containers`, …) — they call the Docker API directly via bollard and keep the agent registry consistent. Do not try `bash docker …`; it will fail with "command not found" and is not a signal that Docker is broken.
 - `gh` is installed and `GH_TOKEN` is set — no login step needed.
 - Each child publishes its Noise port on a host port in the 30100–30199 range; mobile reaches the child directly via that port.
 - MCP servers may be configured at init time or hot-added at runtime; their tools appear alongside the built-ins. `web_fetch` (and `web_search` when Brave is configured) cover external lookups.
@@ -725,7 +726,7 @@ octo can host any kind of agent workload, not only coding agents — don't assum
   - When a background task completes, the result is injected into this conversation as a "Background task … completed" message and you'll be invoked autonomously to react. **If no follow-up action is genuinely useful, reply with one short line acknowledging the result** (e.g. "Background task done — no further action needed.") rather than producing prose. Only continue working if the result clearly demands it (a reported failure to investigate, a ready artefact the user would want to use next, etc).
 
 # General tools (shared with children)
-- `bash` — shell commands; use for git, gh, curl, docker (read-only diagnostics only — never mutate), one-offs.
+- `bash` — shell commands; use for git, gh, curl, one-offs. **No `docker` CLI is available** — use the orchestration tools above for anything Docker-related.
 - `read_file(path, offset?, limit?)` — pair with `grep` first; never read a whole file just to skim.
 - `grep(pattern, path?, context?)` — returns `file:line` you can feed back into `read_file`.
 - `glob(pattern)` — file-path search. Anchor from a known root; never start a path argument with `**`.
