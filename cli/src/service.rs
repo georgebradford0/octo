@@ -88,9 +88,16 @@ pub fn is_running() -> bool {
     }
 }
 
-/// Locate the `octo-lair` binary. Checks $OCTO_LAIR_BINARY, then $PATH, then
-/// the sibling `octo-lair` next to the current CLI binary, then
-/// `~/.octo/bin/octo-lair`.
+const REPO_SLUG:  &str = "georgebradford0/octo";
+
+/// Path the CLI installs `octo-lair` to when it has to download it itself.
+pub fn managed_lair_path() -> PathBuf {
+    home_dir().join(".octo").join("bin").join("octo-lair")
+}
+
+/// Locate the `octo-lair` binary without trying to download. Checks
+/// `$OCTO_LAIR_BINARY`, `$PATH`, the sibling `octo-lair` next to the current
+/// CLI binary, then `~/.octo/bin/octo-lair`.
 pub fn resolve_lair_binary() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("OCTO_LAIR_BINARY") {
         if !p.is_empty() && Path::new(&p).exists() {
@@ -108,14 +115,95 @@ pub fn resolve_lair_binary() -> Result<PathBuf> {
             }
         }
     }
-    let home_candidate = home_dir().join(".octo").join("bin").join("octo-lair");
+    let home_candidate = managed_lair_path();
     if home_candidate.exists() {
         return Ok(home_candidate);
     }
     anyhow::bail!(
-        "could not find 'octo-lair' binary on PATH. Install it (e.g. via the same release \
-         tarball you got `octo` from) or set OCTO_LAIR_BINARY to its absolute path."
+        "could not find 'octo-lair' binary on PATH or at {}. Set $OCTO_LAIR_BINARY to override, \
+         or let `octo init` fetch it from the latest lair-v* release.",
+        managed_lair_path().display(),
     );
+}
+
+/// Find the lair binary if one is already on disk; otherwise download the
+/// latest `lair-v*` release artefact for this host's architecture into
+/// `~/.octo/bin/octo-lair` and return that path.
+pub async fn ensure_lair_binary() -> Result<PathBuf> {
+    if let Ok(p) = resolve_lair_binary() {
+        return Ok(p);
+    }
+    println!("octo-lair not found on this host — downloading latest release...");
+    download_lair_binary().await
+}
+
+/// Always-download path. Pulls the latest `lair-v*` release artefact for
+/// this host's architecture and writes it to `~/.octo/bin/octo-lair`,
+/// overwriting whatever's there. Used by the init flow and could be wired
+/// to a future `octo lair update` subcommand.
+pub async fn download_lair_binary() -> Result<PathBuf> {
+    let artifact = match std::env::consts::ARCH {
+        "x86_64"  => "octo-lair-linux-x86_64",
+        "aarch64" => "octo-lair-linux-aarch64",
+        a => anyhow::bail!("unsupported architecture: {a}"),
+    };
+
+    // Find the most recent `lair-v*` release tag via the GitHub releases API.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("octo/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("build http client")?;
+
+    let releases: serde_json::Value = client
+        .get(format!("https://api.github.com/repos/{REPO_SLUG}/releases?per_page=50"))
+        .send().await
+        .context("GET /releases")?
+        .json().await
+        .context("decode releases JSON")?;
+
+    let tag = releases.as_array()
+        .ok_or_else(|| anyhow::anyhow!("/releases didn't return an array"))?
+        .iter()
+        .filter_map(|r| r.get("tag_name").and_then(|t| t.as_str()))
+        .find(|t| t.starts_with("lair-v"))
+        .ok_or_else(|| anyhow::anyhow!(
+            "no `lair-v*` release found on {REPO_SLUG}. Dispatch the `lair Release` GitHub \
+             Actions workflow once to publish one, or set $OCTO_LAIR_BINARY to point at a \
+             locally-built binary."
+        ))?
+        .to_string();
+
+    let url = format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{artifact}");
+    println!("  fetching {url}");
+    let bytes = client.get(&url).send().await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download {tag}/{artifact}"))?
+        .bytes().await
+        .context("read response body")?;
+
+    let dest = managed_lair_path();
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    // Write atomically (temp file + rename) so a partially-downloaded file
+    // can't masquerade as the real binary on a future `octo init`.
+    let tmp = dest.with_extension("download");
+    fs::write(&tmp, &bytes)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmp, perms).ok();
+    }
+    fs::rename(&tmp, &dest)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
+    println!("  installed octo-lair to {} ({tag})", dest.display());
+    Ok(dest)
 }
 
 fn which(name: &str) -> Result<PathBuf> {

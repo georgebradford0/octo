@@ -7,14 +7,14 @@ INSTALL_DIR="$HOME/.local/bin"
 OS=$(uname -s)
 ARCH=$(uname -m)
 
-# octo is Linux-only — lair runs as a native process on the host you run
-# `octo init` from, and the cloud-init it emits for remote agents is Linux
-# too. Both x86_64 and aarch64 are supported.
+# octo is Linux-only — both x86_64 and aarch64 are supported. Only the CLI
+# binary is installed here; `octo init` downloads the matching octo-lair
+# binary into ~/.octo/bin/ on first run.
 case "$OS" in
   Linux)
     case "$ARCH" in
-      x86_64)  CLI_ARTIFACT="octo-linux-x86_64";  LAIR_ARTIFACT="octo-lair-linux-x86_64"  ;;
-      aarch64) CLI_ARTIFACT="octo-linux-aarch64"; LAIR_ARTIFACT="octo-lair-linux-aarch64" ;;
+      x86_64)  CLI_ARTIFACT="octo-linux-x86_64"  ;;
+      aarch64) CLI_ARTIFACT="octo-linux-aarch64" ;;
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     ;;
@@ -23,15 +23,22 @@ esac
 
 mkdir -p "$INSTALL_DIR"
 
-echo "Downloading $CLI_ARTIFACT..."
-curl -fsSL "https://github.com/${REPO}/releases/latest/download/${CLI_ARTIFACT}" -o "$INSTALL_DIR/octo"
+# Find the most recent `cli-v*` release tag via the GitHub releases API. No
+# jq dependency — grep + sed is enough for the JSON shape we care about.
+CLI_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=50" \
+  | grep -oE '"tag_name": *"[^"]+"' \
+  | sed -E 's/"tag_name": *"([^"]+)"/\1/' \
+  | grep -E '^cli-v' \
+  | head -1)
+if [ -z "$CLI_TAG" ]; then
+  echo "Error: no cli-v* release found in ${REPO}" >&2
+  exit 1
+fi
+
+echo "Downloading $CLI_ARTIFACT (${CLI_TAG})..."
+curl -fsSL "https://github.com/${REPO}/releases/download/${CLI_TAG}/${CLI_ARTIFACT}" -o "$INSTALL_DIR/octo"
 chmod +x "$INSTALL_DIR/octo"
 echo "Installed to $INSTALL_DIR/octo"
-
-echo "Downloading $LAIR_ARTIFACT..."
-curl -fsSL "https://github.com/${REPO}/releases/latest/download/${LAIR_ARTIFACT}" -o "$INSTALL_DIR/octo-lair"
-chmod +x "$INSTALL_DIR/octo-lair"
-echo "Installed to $INSTALL_DIR/octo-lair"
 
 # Warn if ~/.local/bin is not in PATH.
 case ":$PATH:" in
@@ -88,8 +95,8 @@ if [ -n "$COMPLETIONS_INSTALLED" ]; then
   echo ""
 fi
 echo "Next: run 'octo init --anthropic-api-key <key> --model <model>' to bootstrap"
-echo "      lair on this host as a background process. Optional flags:"
-echo "      --openai-api-key, --api-url, --env KEY=VALUE."
+echo "      lair on this host. octo init downloads octo-lair into ~/.octo/bin/"
+echo "      on first run. Optional init flags: --openai-api-key, --api-url, --env KEY=VALUE."
 echo ""
 
 "$INSTALL_DIR/octo" --help

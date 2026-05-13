@@ -93,8 +93,9 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     write_secret_file(&env_path, &env_text)?;
     println!("Wrote env file: {}", env_path.display());
 
-    // Resolve the lair binary.
-    let binary = service::resolve_lair_binary()?;
+    // Locate the lair binary, downloading the latest `lair-v*` release
+    // artefact into ~/.octo/bin/ on first run.
+    let binary = service::ensure_lair_binary().await?;
     println!("Using lair binary: {}", binary.display());
 
     let log_file = lair_dir.join("lair.log");
@@ -245,7 +246,7 @@ pub async fn restart_lair(reason: &str) -> Result<()> {
     let lair_dir = service::lair_data_dir();
     let agents_dir = service::agents_dir();
     let env_path = service::env_file_path();
-    let binary   = service::resolve_lair_binary()?;
+    let binary   = service::ensure_lair_binary().await?;
     let log_file = lair_dir.join("lair.log");
     let launch = service::LairLaunch {
         noise_port: rec.noise_port,
