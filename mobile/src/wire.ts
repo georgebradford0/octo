@@ -1,4 +1,4 @@
-// Wire schema for the /stream WebSocket between mobile and lair/server.
+// Wire schema for the /stream WebSocket between mobile and lair/agent.
 //
 // Mirrors octo_core::ChatEvent in core/src/lib.rs (Rust) plus the small set of
 // client → server frames. Update this file whenever the Rust enum or the
@@ -13,15 +13,13 @@ export type ServerEvent =
   | { type: 'text';          text: string }
   | { type: 'tool_use';      tool: string; input: unknown; display?: string }
   | { type: 'tool_output';   line: string }
-  // NB: wire field is `output` (hand-coded in lair/server), not `content` as
-  // the auto-derived ChatEvent::ToolResult would produce. Keep this aligned.
   | { type: 'tool_result';   tool_use_id: string; output: unknown }
   | { type: 'done';          cost_usd: number }
   | { type: 'error';         message: string }
   | { type: 'interrupted';   cost_usd: number }
   | { type: 'interrupt_ack' }
   | { type: 'system';        text: string }
-  | { type: 'containers';    containers: ContainerInfo[] }
+  | { type: 'agents';        agents: AgentInfo[] }
   | { type: 'tasks';         tasks: TaskRecord[] }
   | { type: 'bg_complete';   task_id: string; text: string }
   | { type: 'ping';          id: number }
@@ -34,30 +32,23 @@ export type ClientFrame =
   | { type: 'interrupt' }
   | { type: 'ping';            id: number }
   | { type: 'pong';            id: number }
-  | { type: 'start_container'; id: string }
+  | { type: 'start_agent';     id: string }
   | { type: 'terminate_agent'; id: string }
   | { type: 'cancel_task';     id: string }
-  // Legacy: child server's "watch" mode and the original first-frame `{text}`
-  // shape are still accepted server-side; remove these when the persistent
-  // /stream rewrite lands.
-  | { type: 'watch' }
-  | { text: string }
 
 // ── Shared payloads ───────────────────────────────────────────────────────────
 
-export interface ContainerInfo {
-  id:      string
+/** A child agent surfaced to mobile by lair's `agents` event. Mobile reaches
+ *  any agent's chat via `ws://<lair-tunnel>/agents/<id>/stream` — there is no
+ *  direct port/pubkey/host for an agent because lair proxies all traffic. */
+export interface AgentInfo {
+  id:      string  // = name; used in the proxy URL
   name:    string
   git_url: string
-  status:  string
-  host:    string
-  port:    number
-  pubkey:  string
+  status:  string  // 'running' | 'stopped' | 'pending'
 }
 
-/** Mirrors octo_core::TaskRecord. The per-chat background-task registry is
- *  pushed as a `tasks` event on /stream open and after every spawn / completion.
- *  `started_at` and `completed_at` are Unix-epoch seconds. */
+/** Mirrors octo_core::TaskRecord. */
 export interface TaskRecord {
   task_id:      string
   command:      string

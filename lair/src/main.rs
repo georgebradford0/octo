@@ -1,16 +1,13 @@
 //! Merged binary that runs either the lair (parent / orchestrator) or agent
-//! (child / per-agent agentic loop) role. The Docker image ships one binary;
-//! the image's ENTRYPOINT runs the lair role, and lair starts child
-//! containers with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]`
-//! to flip the role.
+//! (child) role. The same `octo-lair` binary is invoked by the operator (as
+//! `--role lair`) and re-spawned by lair to start each child (`--role agent`).
 
 use clap::{Parser, ValueEnum};
 
-mod bootstrap;
-mod docker;
-mod lair;
 mod agent;
-mod ssh;
+mod agent_proc;
+mod bootstrap;
+mod lair;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Role {
@@ -25,9 +22,9 @@ struct Args {
     #[arg(long, value_enum)]
     role: Role,
 
-    /// Print the Noise static pubkey (base32) for the picked role and exit.
+    /// Print the Noise static pubkey (base32) for the lair role and exit.
     /// Used internally during boot to embed the pubkey in the QR code before
-    /// the HTTP listener binds.
+    /// the HTTP listener binds. Only meaningful with `--role lair`.
     #[arg(long)]
     print_pubkey: bool,
 }
@@ -37,6 +34,6 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     match args.role {
         Role::Lair  => lair::run(args.print_pubkey).await,
-        Role::Agent => agent::run(args.print_pubkey).await,
+        Role::Agent => agent::run().await,
     }
 }

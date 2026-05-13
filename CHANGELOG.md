@@ -4,7 +4,24 @@
 
 ### Changed
 
-- **BREAKING — Kubernetes removed.** lair now runs as a single Docker container on a host machine and orchestrates children via the local Docker daemon. The `octo-k8s-ops` crate, `k8s/` manifests, and `docs/kubernetes-migration.md` are deleted. `octo init` no longer installs k3s; it `docker run`s lair instead, bind-mounting `~/.octo/lair/` to `/data` and the host Docker socket. Existing k8s installs need a clean `octo init` against a fresh Docker host; the prior PVC contents (`/data/noise_key.bin`, `messages.json`, `mcp.json`, `tasks.json`) can be `kubectl cp`-ed off the old lair pod and dropped into `~/.octo/lair/` on the new host before `octo init`.
+- **BREAKING — Docker removed.** Lair and every child agent now run as plain OS processes on a Linux host. The `bollard` dep is gone from both `lair` and `cli`; `lair/Dockerfile`, `docker-compose*.yml`, and `.dockerignore` are deleted. `octo init` spawns `octo-lair --role lair` directly (pidfile at `~/.octo/lair/lair.pid`); children spawn as `octo-lair --role agent` via `tokio::process::Command` in a new `lair/src/agent_proc.rs` supervisor. Per-agent state lives in `~/.octo/agents/<name>/{data,workspace}/` (replaces named volumes). No migration is provided — this project has no users yet.
+- **BREAKING — Mobile traffic proxied through lair.** Mobile only ever holds one Noise tunnel (to lair). To chat with a child, mobile opens a WebSocket to `ws://lair/agents/<name>/stream`; lair proxies frames to the child's loopback HTTP port via `tokio_tungstenite`. Children no longer have a public network surface, a per-agent Noise keypair, or a QR code. The wire `ContainerInfo` payload's `host`/`port`/`pubkey` fields are gone.
+- **BREAKING — Wire schema renamed.** `containers` event → `agents`; `start_container` frame → `start_agent`. `core::ChatEvent::Containers` → `Agents`, `core::ChatEvent::StartContainer` → `StartAgent`, with a new `TerminateAgent` variant. `mobile/src/wire.ts` mirrors these.
+- **BREAKING — Remote-agent feature removed.** `mint_bootstrap_userdata`, `register_remote_agent`, and `forget_agent` lair tools deleted; SSH-driven cloud-init flow and `lair/src/ssh.rs` removed. Without Docker on remote VMs the cloud-init shape would have changed anyway; defer this until a sandboxing story exists.
+- **BREAKING — Linux only.** macOS and Windows builds dropped from `cli.yml`. The CLI uses `kill(pid, 0)` for lair liveness; `octo destroy` SIGTERMs the pid directly.
+- **`AgentRecord` schema simplified.** Renamed `container_id` → `pid: Option<u32>`, `image_version` → `binary_version`. Dropped `host`, `pubkey`, `instance_id`, `provider`, `metadata`. `status_from_docker` helper becomes `status_from_alive(bool)`. `Registry::update_container_id` → `update_pid`.
+- **`octo-lair` binary distribution.** `scripts/get-cli.sh` now downloads both `octo` and `octo-lair` per-target; the CLI locates the lair binary via `$OCTO_LAIR_BINARY`, `which octo-lair`, sibling `octo-lair`, or `~/.octo/bin/octo-lair`.
+- **`config.json` now lives at `~/.octo/config.json` regardless of `OCTO_DATA_DIR`** (via new `octo_core::config_dir()`). Lets lair, every agent, and the CLI share a single config file without bind-mount gymnastics.
+
+### Removed
+
+- `lair/src/docker.rs`, `cli/src/dockerd.rs` (bollard wrappers).
+- `lair/src/ssh.rs` (remote-agent SSH client).
+- `docker-compose.yml`, `docker-compose.prod.yml`, `lair/Dockerfile`, `.dockerignore`, `down.sh`, `deploy/`.
+
+### Historical (pre-Docker-removal) notes preserved below
+
+- **Kubernetes removed.** lair ran as a single Docker container on a host machine and orchestrated children via the local Docker daemon. The `octo-k8s-ops` crate, `k8s/` manifests, and `docs/kubernetes-migration.md` were deleted. `octo init` no longer installs k3s; it `docker run`s lair instead, bind-mounting `~/.octo/lair/` to `/data` and the host Docker socket.
 - **New `~/.octo/lair/agents.json` registry** owned by lair, replacing the prior Deployment-label model. CLI reads it for `octo agents list`; mutations (`start` / `stop` / `delete`) go through Docker and are reconciled by lair's 10 s poller.
 - **Removed `message_lair` / `message_child` tools** and the `LAIR_URL` plumbing that supported them. Lair is now a pure orchestrator: it creates / inspects / terminates children; user-to-child conversations happen on the child's own mobile chat. Drops a chunk of dead code (lair's HTTP client, agent's reqwest pipeline) and one env var from the agent contract.
 

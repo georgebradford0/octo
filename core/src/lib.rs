@@ -39,7 +39,7 @@ pub mod ssh;
 pub use ssh::{ensure_ssh_keypair, SSH_PRIVATE_KEY_FILE, SSH_PUBLIC_KEY_FILE};
 
 pub mod registry;
-pub use registry::{AgentRecord, AgentStatus, Registry, status_from_docker};
+pub use registry::{AgentRecord, AgentStatus, Registry, status_from_alive};
 
 // ── Shared HTTP client ────────────────────────────────────────────────────────
 
@@ -64,8 +64,11 @@ use tokio::sync::mpsc;
 
 // ── Data directory ────────────────────────────────────────────────────────────
 
-/// Root data directory: $OCTO_DATA_DIR if set, otherwise $HOME/.octo.
-/// In Docker this is set to /data so sessions survive image updates via a named volume.
+/// Per-role data directory: $OCTO_DATA_DIR if set, otherwise $HOME/.octo.
+///
+/// Lair runs with `OCTO_DATA_DIR=$HOME/.octo/lair`; each child agent runs with
+/// `OCTO_DATA_DIR=$HOME/.octo/agents/<name>/data`. The CLI (running on the
+/// operator's host) leaves it unset and gets `$HOME/.octo`.
 pub fn data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("OCTO_DATA_DIR") {
         PathBuf::from(d)
@@ -76,8 +79,19 @@ pub fn data_dir() -> PathBuf {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+/// Operator-shared config dir. Always `$HOME/.octo` (or `$OCTO_HOME` if set —
+/// only honoured for tests). Independent of `data_dir()` so lair, every child
+/// agent, and the CLI all read/write the same `config.json` without bind-mount
+/// shenanigans.
+pub fn config_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("OCTO_HOME") {
+        return PathBuf::from(d);
+    }
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".octo")
+}
+
 pub fn config_path() -> PathBuf {
-    data_dir().join("config.json")
+    config_dir().join("config.json")
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -315,9 +329,9 @@ pub enum ChatEvent {
     Interrupted        { cost_usd: f64 },
     InterruptAck,
     System             { text: String },
-    /// Server → client push of the current child-container list. Lair sends this
-    /// on every poller state change. Replaces the deprecated GET /containers.
-    Containers         { containers: serde_json::Value },
+    /// Server → client push of the current child-agent list. Lair sends this
+    /// on every poller state change.
+    Agents             { agents: serde_json::Value },
     /// Server → client push of the per-chat background-task registry. Both lair
     /// and agent send this on /stream open and after every spawn / completion.
     /// Payload is a JSON array of `TaskRecord`-shaped objects.
@@ -337,8 +351,11 @@ pub enum ChatEvent {
     UserMessage        { text: String },
     /// Client → server interrupt of the current turn.
     Interrupt,
-    /// Client → server request to start a stopped child agent container by name.
-    StartContainer     { id: String },
+    /// Client → server request to start a stopped child agent by name.
+    /// `id` is the agent's `name` from the registry.
+    StartAgent         { id: String },
+    /// Client → server request to terminate (stop + remove) a child agent.
+    TerminateAgent     { id: String },
     /// Client → server request to cancel a running background task by id.
     /// Both lair and agent honour this against their per-chat task registry.
     CancelTask         { id: String },

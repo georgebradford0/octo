@@ -1,4 +1,0 @@
-services:
-  lair:
-    build: !reset null
-    image: ghcr.io/georgebradford0/lair:${LAIR_VERSION:-latest}

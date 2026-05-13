@@ -29,7 +29,7 @@ import NoiseConnection from './src/NativeNoiseConnection'
 import { registerWithRelay } from './src/registerWithRelay'
 import {
   type ClientFrame,
-  type ContainerInfo as WireContainerInfo,
+  type AgentInfo as WireAgentInfo,
   type ServerEvent,
   type TaskRecord,
   encodeClientFrame,
@@ -53,9 +53,6 @@ interface ContainerInfo {
   name:    string
   git_url: string
   status:  string
-  host:    string
-  port:    number
-  pubkey:  string
 }
 
 interface Message {
@@ -770,9 +767,9 @@ const ChatPane = memo(function ChatPane({
   /// /stream WS. Returns false if the WS isn't currently open. Master ChatPane
   /// receives this so AppInner can issue start_container frames.
   sendFrameRef?:       React.MutableRefObject<(frame: ClientFrame) => boolean>
-  /// Push hook for `containers` events. Lair sends one immediately after Ready
-  /// and again on every poller state-change. Children never send containers.
-  onContainersUpdate?: (containers: WireContainerInfo[]) => void
+  /// Push hook for `agents` events. Lair sends one immediately after Ready
+  /// and again on every poller state-change. Children never send agents.
+  onContainersUpdate?: (agents: WireAgentInfo[]) => void
   /// Push hook for `tasks` events. Both lair and agent send one on /stream
   /// open and after every spawn / completion / cancellation. The list is the
   /// per-chat background-task registry — see core::TaskRecord.
@@ -987,8 +984,8 @@ const ChatPane = memo(function ChatPane({
       case 'system':
         log(`[chat] system: ${event.text}`)
         break
-      case 'containers':
-        if (onContainersUpdate) onContainersUpdate(event.containers)
+      case 'agents':
+        if (onContainersUpdate) onContainersUpdate(event.agents)
         break
       case 'tasks':
         if (onTasksUpdate) onTasksUpdate(event.tasks)
@@ -1514,7 +1511,7 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
 
         {tunnelPort ? (
           <ChatPane
-            baseUrl={`http://127.0.0.1:${tunnelPort}`}
+            baseUrl={`http://127.0.0.1:${tunnelPort}/agents/${child.name}`}
             onStatusChange={setChatStatus}
             clearRef={clearRef}
             initialDraft={initialDraft}
@@ -1610,8 +1607,9 @@ function AppInner() {
   useEffect(() => { connRef.current = conn },         [conn])
   useEffect(() => { activeChildRef.current = activeChild }, [activeChild])
 
-  // masterBaseUrl is only valid when not viewing a child — fetching containers
-  // and sending master messages must always go through the master tunnel.
+  // The single Noise tunnel always points at lair. Mobile reaches a child
+  // agent's chat by opening WS to `/agents/<name>/stream` over the same
+  // tunnel — lair proxies the traffic.
   const masterBaseUrl = !activeChild && tunnelPort ? `http://127.0.0.1:${tunnelPort}` : null
 
   // Load saved master connection on mount and auto-connect.
@@ -1629,17 +1627,14 @@ function AppInner() {
     return () => { cancelled = true }
   }, [])
 
-  // Connection effect — owns the Noise tunnel lifecycle for target changes
-  // (initial connect, switching between master and child servers).
-  // Foreground-return reconnects are handled imperatively by reconnect() below.
+  // Connection effect — owns the single Noise tunnel to lair. The tunnel is
+  // *not* re-established when switching between the master chat and a child
+  // chat: lair proxies child traffic over the same tunnel via per-agent
+  // URLs. Foreground-return reconnects are handled imperatively by reconnect().
   useEffect(() => {
     setTunnelError(null)
 
-    const target = activeChild
-      ? { host: activeChild.host, port: activeChild.port, pk: activeChild.pubkey }
-      : conn
-      ? { host: conn.host,        port: conn.port,        pk: conn.pk }
-      : null
+    const target = conn ? { host: conn.host, port: conn.port, pk: conn.pk } : null
 
     if (!target) {
       log('[noise] no target, skipping connect')
@@ -1653,7 +1648,6 @@ function AppInner() {
       return
     }
 
-    // Show connecting screen when switching to a different server.
     setTunnelPort(null)
     log(`[noise] connect host=${target.host} port=${target.port} pk=${target.pk.slice(0, 8)}…`)
 
@@ -1669,11 +1663,7 @@ function AppInner() {
       .catch(e => {
         logE(`[noise] connect() rejected in ${Date.now() - connectStart}ms: ${e?.message ?? String(e)}`)
         if (!live) return
-        if (activeChild) {
-          setActiveChild(null)
-        } else {
-          setTunnelError(e?.message ?? String(e))
-        }
+        setTunnelError(e?.message ?? String(e))
       })
 
     return () => {
@@ -1681,17 +1671,15 @@ function AppInner() {
       log('[noise] effect cleanup: calling disconnect()')
       NoiseConnection?.disconnect()
     }
-  }, [conn, activeChild])
+  }, [conn])
 
-  // Imperative reconnect — called on foreground return. Runs the full sequence
-  // in one async function so there are no races between effect re-runs and WS
-  // error callbacks. reconnectingRef suppresses spurious error UI throughout.
+  // Imperative reconnect — called on foreground return. Reconnects the single
+  // Noise tunnel to lair; whichever chat is open (master or child) just
+  // re-attaches its WS to the new tunnel port.
   const reconnectRef = useRef<() => Promise<void>>(async () => {})
   reconnectRef.current = async () => {
-    const target = activeChildRef.current
-      ? { host: activeChildRef.current.host, port: activeChildRef.current.port, pk: activeChildRef.current.pubkey }
-      : connRef.current
-      ? { host: connRef.current.host,        port: connRef.current.port,        pk: connRef.current.pk }
+    const target = connRef.current
+      ? { host: connRef.current.host, port: connRef.current.port, pk: connRef.current.pk }
       : null
 
     if (!target || !NoiseConnection) return
@@ -1700,8 +1688,6 @@ function AppInner() {
     reconnectingRef.current = true
     setReconnecting(true)
 
-    // Close the existing WebSocket cleanly — onerror/onclose will be suppressed
-    // for the duration because reconnectingRef is true.
     closeWsRef.current()
 
     try {
@@ -1710,17 +1696,11 @@ function AppInner() {
       const port = await NoiseConnection.connect(target.host, target.port, target.pk)
       log(`[noise] foreground reconnect resolved in ${Date.now() - connectStart}ms → local port ${port}`)
       setTunnelPort(port)
-      // Tunnel is up — now reload history. reloadRef points to ChatPane's
-      // loadHistory which will set status 'ready' or 'streaming' on success.
       reloadRef.current()
     } catch (e: unknown) {
       logE(`[noise] foreground reconnect failed: ${(e as Error)?.message ?? String(e)}`)
-      if (activeChildRef.current) {
-        setActiveChild(null)
-      } else {
-        setTunnelPort(null)
-        setTunnelError((e as Error)?.message ?? String(e))
-      }
+      setTunnelPort(null)
+      setTunnelError((e as Error)?.message ?? String(e))
     } finally {
       reconnectingRef.current = false
       setReconnecting(false)
@@ -1738,20 +1718,19 @@ function AppInner() {
   // Container list is now pushed by lair on its persistent /stream — no HTTP poll.
   // The master ChatPane forwards `containers` events here via onContainersUpdate.
   const handleContainersUpdate = useCallback((list: ContainerInfo[]) => {
-    log(`[app] containers push: ${list.length} container(s)`)
+    log(`[app] agents push: ${list.length} agent(s)`)
     list.forEach(c => {
-      log(`[app]   container id=${c.id} name=${c.name} status=${c.status} host=${c.host} port=${c.port} pubkey=${c.pubkey ? c.pubkey.slice(0, 8) + '…' : '(none)'}`)
+      log(`[app]   agent id=${c.id} name=${c.name} status=${c.status}`)
     })
     setContainers(list)
     const waitingId = startingContainerIdRef.current
     if (waitingId) {
-      const started = list.find(c => c.id === waitingId && c.status === 'running' && c.pubkey)
+      const started = list.find(c => c.id === waitingId && c.status === 'running')
       if (started) {
-        log(`[app] container ${started.name} is now running, connecting`)
+        log(`[app] agent ${started.name} is now running, switching chat to it`)
         startingContainerIdRef.current = null
         setStartingContainerId(null)
         setStartingError(null)
-        setTunnelPort(null)
         setActiveChild(started)
       }
     }
@@ -1792,7 +1771,7 @@ function AppInner() {
     startingContainerIdRef.current = id
     setStartingContainerId(id)
     setStartingError(null)
-    if (!masterSendFrameRef.current({ type: 'start_container', id })) {
+    if (!masterSendFrameRef.current({ type: 'start_agent', id })) {
       const msg = 'master /stream not connected'
       logE(`[app] startContainer failed: ${msg}`)
       startingContainerIdRef.current = null
@@ -1886,12 +1865,7 @@ function AppInner() {
         tunnelPort={tunnelPort}
         tunnelError={tunnelError}
         onClose={() => {
-          // Clear tunnelPort synchronously so masterBaseUrl is null until the
-          // connection effect re-resolves it for lair. Without this, master
-          // ChatPane briefly mounts with the now-defunct child tunnel port and
-          // its WS attempt errors out before the new tunnel is up. Mirrors the
-          // setTunnelPort(null) on the symmetric "tap a child in sidebar" path.
-          setTunnelPort(null)
+          // The Noise tunnel stays — only the in-app chat target changes.
           setActiveChild(null)
           setShowSidebar(false)
           sidebarAnim.setValue(0)
@@ -2042,7 +2016,6 @@ function AppInner() {
                       setShowSidebar(false)
                       sidebarAnim.setValue(0)
                       if (c.status === 'running') {
-                        setTunnelPort(null)
                         setActiveChild(c)
                       } else {
                         startContainer(c.id)

@@ -1,4 +1,4 @@
-name: CLI Release
+name: CLI + lair Release
 
 on:
   workflow_dispatch:
@@ -15,16 +15,12 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: octo-linux-x86_64
+            cli_artifact:  octo-linux-x86_64
+            lair_artifact: octo-lair-linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: octo-linux-aarch64
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact: octo-macos-x86_64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: octo-macos-aarch64
+            cli_artifact:  octo-linux-aarch64
+            lair_artifact: octo-lair-linux-aarch64
 
     steps:
       - name: Checkout
@@ -46,17 +42,28 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Build octo
         run: cargo build --release -p octo --target ${{ matrix.target }}
 
-      - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/octo ${{ matrix.artifact }}
+      - name: Build octo-lair
+        run: cargo build --release -p octo-lair --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      - name: Rename binaries
+        run: |
+          cp target/${{ matrix.target }}/release/octo      ${{ matrix.cli_artifact }}
+          cp target/${{ matrix.target }}/release/octo-lair ${{ matrix.lair_artifact }}
+
+      - name: Upload CLI artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.cli_artifact }}
+          path: ${{ matrix.cli_artifact }}
+
+      - name: Upload lair artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.lair_artifact }}
+          path: ${{ matrix.lair_artifact }}
 
   release:
     name: Create release
@@ -83,33 +90,17 @@ jobs:
       - name: Create GitHub release
         run: |
           gh release create "cli-v${{ steps.version.outputs.value }}" \
-            --title "octo CLI v${{ steps.version.outputs.value }}" \
-            --notes "octo cluster management CLI
+            --title "octo v${{ steps.version.outputs.value }}" \
+            --notes "octo CLI + lair binary (Linux only).
 
           ## Installation
 
-          Download the binary for your platform, make it executable, and move it to your PATH:
-
           \`\`\`sh
-          # macOS (Apple Silicon)
-          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-macos-aarch64 -o octo
-          chmod +x octo && sudo mv octo /usr/local/bin/
-
-          # macOS (Intel)
-          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-macos-x86_64 -o octo
-          chmod +x octo && sudo mv octo /usr/local/bin/
-
-          # Linux (x86_64)
-          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-linux-x86_64 -o octo
-          chmod +x octo && sudo mv octo /usr/local/bin/
-
-          # Linux (aarch64)
-          curl -fsSL https://github.com/georgebradford0/octo/releases/latest/download/octo-linux-aarch64 -o octo
-          chmod +x octo && sudo mv octo /usr/local/bin/
+          curl -fsSL https://raw.githubusercontent.com/georgebradford0/octo/main/scripts/get-cli.sh | sh
           \`\`\`" \
             artifacts/octo-linux-x86_64/octo-linux-x86_64 \
             artifacts/octo-linux-aarch64/octo-linux-aarch64 \
-            artifacts/octo-macos-x86_64/octo-macos-x86_64 \
-            artifacts/octo-macos-aarch64/octo-macos-aarch64
+            artifacts/octo-lair-linux-x86_64/octo-lair-linux-x86_64 \
+            artifacts/octo-lair-linux-aarch64/octo-lair-linux-aarch64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

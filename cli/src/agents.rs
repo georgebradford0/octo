@@ -1,19 +1,18 @@
-//! `octo agents …` subcommands. The registry lives at
-//! `<lair_data_dir>/agents.json` — lair owns it, the CLI reads it. Mutations
-//! (start / stop / delete) go through Docker directly; lair's poller picks up
-//! the result on its next 10s tick (or sooner when the action also leaves a
-//! marker in Docker that the poller will reconcile against).
+//! `octo agents …` subcommands.
+//!
+//! The CLI talks to lair's loopback management API (`http://127.0.0.1:8000`)
+//! for start/stop/delete. List reads the registry file directly so the CLI
+//! still works when lair isn't running.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use octo_core::Registry;
 
-use crate::dockerd;
+use crate::service;
 
 fn registry_path() -> PathBuf {
-    dockerd::lair_data_dir().join("agents.json")
+    service::lair_data_dir().join("agents.json")
 }
 
 pub async fn list() -> Result<()> {
@@ -28,36 +27,58 @@ pub async fn list() -> Result<()> {
         println!("No agents.");
         return Ok(());
     }
-    println!("{:<28} {:<8} {:<6} {}", "NAME", "STATUS", "PORT", "GIT URL");
+    println!("{:<28} {:<8} {:<6} {:<8} {}", "NAME", "STATUS", "PORT", "PID", "GIT URL");
     println!("{}", "-".repeat(80));
     for a in agents {
         println!(
-            "{:<28} {:<8} {:<6} {}",
+            "{:<28} {:<8} {:<6} {:<8} {}",
             a.name,
             a.status.as_wire_str(),
             a.port,
+            a.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
             a.git_url.as_deref().unwrap_or(""),
         );
     }
     Ok(())
 }
 
-pub async fn start(d: &Docker, name: &str) -> Result<()> {
-    dockerd::start_named(d, name).await?;
-    println!("Started '{name}'. lair will pick up the new status within ~10s.");
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap()
+}
+
+pub async fn start(name: &str) -> Result<()> {
+    let url = format!("{}/agents/{}/start", service::lair_http_url(), name);
+    let resp = http_client().post(&url).send().await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body   = resp.text().await.unwrap_or_default();
+        anyhow::bail!("lair returned {status}: {body}");
+    }
+    println!("Started '{name}'.");
     Ok(())
 }
 
-pub async fn stop(d: &Docker, name: &str) -> Result<()> {
-    dockerd::stop_named(d, name).await?;
-    println!("Stopped '{name}'. lair will pick up the new status within ~10s.");
+pub async fn stop(name: &str) -> Result<()> {
+    let url = format!("{}/agents/{}/stop", service::lair_http_url(), name);
+    let resp = http_client().post(&url).send().await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body   = resp.text().await.unwrap_or_default();
+        anyhow::bail!("lair returned {status}: {body}");
+    }
+    println!("Stopped '{name}'.");
     Ok(())
 }
 
-pub async fn delete(d: &Docker, name: &str, yes: bool) -> Result<()> {
+pub async fn delete(name: &str, yes: bool) -> Result<()> {
     if !yes {
         use std::io::Write;
-        print!("Delete '{name}' and both volumes? This is irreversible. [y/N] ");
+        print!("Delete '{name}' and its data + workspace dirs? This is irreversible. [y/N] ");
         std::io::stdout().flush()?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -67,7 +88,14 @@ pub async fn delete(d: &Docker, name: &str, yes: bool) -> Result<()> {
             return Ok(());
         }
     }
-    dockerd::delete_agent_full(d, name).await?;
-    println!("Deleted container '{name}' and its named volumes. lair will drop the registry row on its next poll.");
+    let url = format!("{}/agents/{}", service::lair_http_url(), name);
+    let resp = http_client().delete(&url).send().await
+        .with_context(|| format!("DELETE {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body   = resp.text().await.unwrap_or_default();
+        anyhow::bail!("lair returned {status}: {body}");
+    }
+    println!("Deleted '{name}'.");
     Ok(())
 }

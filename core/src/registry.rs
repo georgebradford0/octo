@@ -1,16 +1,14 @@
-//! Persisted registry of agent (child) containers managed by lair.
+//! Persisted registry of agent (child) processes managed by lair.
 //!
-//! Replaces the old Kubernetes-backed list-of-Deployments view. The registry
-//! is the source of truth for which agents exist, what port each owns, and
-//! how to reach them. The Docker daemon is the source of truth for *runtime*
-//! state (running/stopped); the poller reconciles the two.
+//! Lair spawns each child as an `octo-lair --role agent` OS process; this
+//! registry records what was spawned and how to reach it. It is the source
+//! of truth for which agents exist and what port each owns. Process liveness
+//! (via pid) is checked by lair's poller and reconciled into `status`.
 //!
 //! The file lives at `<data_dir>/agents.json`. Single-process writer (the
-//! lair binary), so no fs locking is needed — an `RwLock<Registry>` in
+//! lair binary), so no fs locking is needed — a `Mutex<Registry>` in
 //! `AppState` serialises in-process access, and every mutation goes through
 //! `save()` which atomically renames a temp file onto the target.
-
-#![allow(dead_code)] // wired up in Phase 1
 
 use std::{
     fs,
@@ -20,16 +18,16 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle state of an agent container. Mirrors the strings emitted to the
-/// mobile wire protocol so the existing `containers` event schema is preserved.
+/// Lifecycle state of an agent process. Mirrors the strings emitted to the
+/// mobile wire protocol.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
-    /// Docker container is running.
+    /// Process is alive.
     Running,
-    /// Container exists in Docker but isn't running (`docker stop`).
+    /// Process exited (clean or crashed).
     Stopped,
-    /// Briefly between `docker create` and `docker start`.
+    /// Spawned but not yet observed alive by the poller.
     Pending,
 }
 
@@ -43,65 +41,32 @@ impl AgentStatus {
     }
 }
 
-/// One agent the lair owns. The fields are a superset of what the mobile
-/// `containers` event needs — extras support reconciliation and remote-VM
-/// agents provisioned via a cloud-provisioning MCP.
+/// One agent the lair owns.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentRecord {
-    /// Stable, human-readable identifier (also the Docker container name for
-    /// local agents). Used as `id` in the wire schema so mobile-side frames
-    /// stay valid.
-    pub name:          String,
-    /// Docker container id (12+ char hex) for local agents. None for
-    /// remote-VM agents.
-    pub container_id:  Option<String>,
-    /// External host advertised in the QR / `containers` event. None for
-    /// local agents (lair fills in `state.public_host` at fan-out time);
-    /// `Some(<public_ip>)` for remote agents.
-    pub host:          Option<String>,
-    /// Externally-reachable Noise port (30100–30199 for local; whatever the
-    /// remote VM publishes for remote — typically 9000).
-    pub port:          u16,
-    /// Base32-encoded Noise static pubkey. Local agents share lair's keypair
-    /// today; remote agents generate their own at boot and lair learns it via
-    /// SSH-pull.
-    pub pubkey:        String,
+    /// Stable, human-readable identifier. Doubles as the `id` mobile sees.
+    pub name:           String,
+    /// OS pid of the last `octo-lair --role agent` process spawned for this
+    /// agent. `None` if the process has exited / was never spawned. Lair's
+    /// poller flips status based on `kill(pid, 0)` liveness.
+    pub pid:            Option<u32>,
+    /// Local TCP port on which the child's HTTP server binds (loopback only).
+    /// Lair proxies mobile traffic to this port. Allocated from 30100–30199.
+    pub port:           u16,
     /// Git URL the agent was launched against, if any.
-    pub git_url:       Option<String>,
-    /// Last observed status. Local agents reconcile against Docker; remote
-    /// agents stay at whatever the registration set them to.
-    pub status:        AgentStatus,
-    /// Image tag the container was created from; recorded at create time so
-    /// `octo reload` can report transitions without a child round-trip.
-    pub image_version: String,
+    pub git_url:        Option<String>,
+    /// Last observed status. Reconciled against pid liveness on every poll.
+    pub status:         AgentStatus,
+    /// Lair version (`CARGO_PKG_VERSION`) at the time the row was created.
+    /// Surfaced in `octo agents list` so the operator can see staleness.
+    pub binary_version: String,
     /// Unix seconds when the record was created.
-    pub created_at:    u64,
-    /// Unix seconds the registry last observed this agent live.
-    pub last_seen:     u64,
-    /// Cloud instance id for remote-provisioned agents (e.g. `i-0abc...`).
-    pub instance_id:   Option<String>,
-    /// Provider name for remote agents (free-form: `"aws"`, `"hetzner"`, …).
-    /// Lair doesn't interpret it; it's surfaced to the LLM so subsequent
-    /// tool calls (terminate, etc.) know which MCP to invoke.
-    #[serde(default)]
-    pub provider:      Option<String>,
-    /// Provider-specific metadata (region, instance_type, image_id, …). Opaque
-    /// to lair; passed straight through from the LLM at registration time.
-    #[serde(default)]
-    pub metadata:      serde_json::Value,
+    pub created_at:     u64,
+    /// Unix seconds the registry last observed the process alive.
+    pub last_seen:      u64,
 }
 
-impl AgentRecord {
-    /// True when this agent lives on a remote VM (registered via
-    /// `register_remote_agent`), false when it's a local Docker container.
-    /// Lair gates Docker reconciliation on this so remote rows aren't
-    /// dropped every poll cycle.
-    pub fn is_remote(&self) -> bool {
-        self.instance_id.is_some() || self.container_id.is_none()
-    }
-}
-
-/// On-disk registry. Hold under an `RwLock` in `AppState`.
+/// On-disk registry. Held under a `Mutex` in `AppState`.
 #[derive(Default)]
 pub struct Registry {
     agents: Vec<AgentRecord>,
@@ -148,10 +113,7 @@ impl Registry {
         self.agents.iter_mut().find(|a| a.name == name)
     }
 
-    /// Insert or replace a row by name, preserving insertion order on
-    /// updates. Used by retryable / resumable flows (remote-agent
-    /// registration) where the same name needs to transition Pending →
-    /// Running across multiple tool calls.
+    /// Insert or replace a row by name, preserving insertion order on updates.
     pub fn set(&mut self, record: AgentRecord) -> Result<()> {
         if let Some(slot) = self.agents.iter_mut().find(|a| a.name == record.name) {
             *slot = record;
@@ -190,23 +152,14 @@ impl Registry {
         r.last_seen = ts;
         // last_seen changes constantly; don't fsync the file every poll —
         // the in-memory copy is the live one and the persisted copy will
-        // catch up on the next structural change. Callers that care about
-        // durability can call `save()` directly.
+        // catch up on the next structural change.
         Ok(true)
     }
 
-    pub fn update_image_version(&mut self, name: &str, version: &str) -> Result<bool> {
+    pub fn update_pid(&mut self, name: &str, pid: Option<u32>) -> Result<bool> {
         let Some(r) = self.get_mut(name) else { return Ok(false); };
-        if r.image_version == version { return Ok(false); }
-        r.image_version = version.to_string();
-        self.save()?;
-        Ok(true)
-    }
-
-    pub fn update_container_id(&mut self, name: &str, container_id: Option<String>) -> Result<bool> {
-        let Some(r) = self.get_mut(name) else { return Ok(false); };
-        if r.container_id == container_id { return Ok(false); }
-        r.container_id = container_id;
+        if r.pid == pid { return Ok(false); }
+        r.pid = pid;
         self.save()?;
         Ok(true)
     }
@@ -233,12 +186,8 @@ impl Registry {
     }
 }
 
-/// Helper to format the wire-protocol status string from the typed enum.
-/// Kept here so the lair poller stays a thin mapper.
-pub fn status_from_docker(state: &str) -> AgentStatus {
-    match state {
-        "running" => AgentStatus::Running,
-        "created" | "restarting" => AgentStatus::Pending,
-        _ => AgentStatus::Stopped,
-    }
+/// Map a Unix `kill(pid, 0)` liveness result to a status. Used by lair's
+/// poller — keeps `lair.rs` a thin mapper.
+pub fn status_from_alive(alive: bool) -> AgentStatus {
+    if alive { AgentStatus::Running } else { AgentStatus::Stopped }
 }

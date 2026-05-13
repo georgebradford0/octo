@@ -8,165 +8,133 @@ Do **not** create git worktrees unless explicitly asked to. Commit and push dire
 
 Do **not** commit debug/diagnostic logging (`println!`, `console.log`, etc. added purely for investigation). Suggest the user add logs locally instead.
 
-## Docker images
+## Platform
 
-One image, one binary, two roles. Both the parent (lair) and child (agent) containers run the same `octo-lair` binary. The image's ENTRYPOINT runs the lair role; lair creates child containers with `command: ["/usr/local/bin/octo-lair", "--role", "agent"]` to flip the role.
+Linux only. macOS and Windows are out of scope — the `octo` CLI's `init` flow assumes Linux process semantics (`/proc`, `kill(pid, 0)`, etc.), and the binaries are only built for Linux targets.
 
-| Image | Used by |
-|-------|---------|
-| `ghcr.io/georgebradford0/lair` | lair (parent) and every child container |
+## Binaries
 
-There are no shell entrypoint scripts — `lair/src/bootstrap.rs` does the public-IP detection, optional git clone, STARTUP_SCRIPT execution, and post-listen QR rendering directly in Rust.
+One Rust binary, `octo-lair`, two roles via `--role lair|agent`. There is no Docker image and no shell entrypoint script.
 
-Each child gets two Docker named volumes (`agent-<name>-data`, `agent-<name>-workspace`) and its Noise port (9000 inside the container) published on a host port from the 30100–30199 range. A child container is **not** required to clone a git repo: if `GIT_URL` is set the workspace is populated from that repo (with `GH_TOKEN` for HTTPS); if unset, the workspace is just `mkdir -p /workspace` and the agent runs there as a general-purpose agent. Set `AGENT_PURPOSE` (env var) to give a no-repo agent a specific mission in its system prompt.
+- Operator runs `octo init`; the CLI spawns `octo-lair --role lair` as a detached background process. The pid is recorded at `~/.octo/lair/lair.pid`.
+- When lair creates a child agent, it spawns `octo-lair --role agent` itself (via `tokio::process::Command`), recording the child's pid in `~/.octo/lair/agents.json`.
+- `lair/src/bootstrap.rs` does the public-IP detection, optional git clone, and `STARTUP_SCRIPT` execution in Rust.
 
-Build and push from the **repo root** (replace `X.Y.Z` with the new version). Always use `buildx` with `--platform` so both `linux/amd64` and `linux/arm64` are included in the manifest:
+Build for release:
 
 ```sh
-docker buildx build \
-  --builder multiplatform \
-  --platform linux/amd64,linux/arm64 \
-  --push \
-  -f lair/Dockerfile \
-  -t ghcr.io/georgebradford0/lair:X.Y.Z \
-  -t ghcr.io/georgebradford0/lair:latest \
-  .
+cargo build --release -p octo-lair
+cargo build --release -p octo
 ```
+
+Both binaries end up at `target/release/{octo-lair,octo}`. CI publishes them per-target as GitHub Release artefacts.
 
 ---
 
 ## Architecture overview
 
-Octo is an agentic coding assistant: a single `lair` Docker container runs on a host machine, manages child agent containers via the local Docker daemon, and exposes itself to a mobile client over an encrypted tunnel.
+octo is an agentic coding assistant. A single `lair` process runs on a host machine, supervises child agent processes via a small `AgentSupervisor`, and exposes itself to a mobile client over an encrypted Noise tunnel. Mobile traffic to child agents is proxied through lair — children never get a public network surface.
 
 ### Components
 
 | Directory | Language | Role |
 |-----------|----------|------|
-| `core/` | Rust | Shared library: agentic loop, Claude API streaming, git/worktree ops, config, HTTP/WS plumbing (`core::app`), agent **registry** types (`AgentRecord`, `Registry`), SSH keygen, MCP plumbing |
-| `lair/` | Rust + Axum | Merged binary `octo-lair` with `--role lair\|agent`. `lair/src/lair.rs` is the parent (orchestrates child containers via `lair/src/docker.rs`); `lair/src/agent.rs` is the child (general-purpose agent, optionally repo-scoped). Both are reachable from `lair/src/main.rs`'s argparse dispatch. |
-| `cli/` | Rust | `octo` CLI for managing the local Docker host (init, reload, agents, logs, mcp, config). |
-| `mobile/` | React Native (TS) | iOS/Android client: QR scan → native Noise tunnel → WebSocket UI |
+| `core/` | Rust | Shared library: agentic loop, Claude API streaming, git ops, config, HTTP/WS plumbing, agent registry, SSH keygen, MCP plumbing, Noise proxy. |
+| `lair/` | Rust + Axum | Merged binary `octo-lair` with `--role lair|agent`. `lair/src/lair.rs` is the parent (orchestrates child processes via `lair/src/agent_proc.rs`); `lair/src/agent.rs` is the child. |
+| `cli/` | Rust | `octo` CLI for managing lair on the local host (init, reload, agents, logs, mcp, config, env). |
+| `mobile/` | React Native (TS) | iOS/Android client: QR scan → native Noise tunnel → single WebSocket to lair → optional proxy URL for chatting with children. |
+
+### Filesystem layout
+
+Everything lives under `~/.octo/`:
+
+- `~/.octo/config.json` — operator credentials (API keys, model). Read by every role via `octo_core::config_path()`.
+- `~/.octo/lair-env` — extra env vars passed to lair (operator-managed via `octo env`).
+- `~/.octo/lair-launch.json` — port bookkeeping for `octo reload`.
+- `~/.octo/lair/` — lair's per-process data dir (`OCTO_DATA_DIR`). Holds `lair.pid`, `lair.log`, `noise_key.bin`, `agents.json`, `mcp.json`, `messages.json`, `tasks.json`, `relay_signing_key.bin`, `ssh_id_ed25519{,.pub}`, `known_hosts`.
+- `~/.octo/agents/<name>/` — per-agent dirs. Each has `data/` (the agent's `OCTO_DATA_DIR`) and `workspace/` (its `WORKSPACE_DIR`), plus an `agent.log` capture.
 
 ### Agent registry
 
-The list of agents lair owns lives in `<lair_data_dir>/agents.json` (`/data/agents.json` inside the container, bind-mounted to `~/.octo/lair/agents.json` on the host by default). Lair is the sole writer; the CLI reads it for `octo agents list`. Schema is `octo_core::AgentRecord`: `name`, `container_id`, `host`, `port`, `pubkey`, `git_url`, `status`, `image_version`, `created_at`, `last_seen`, `instance_id`, `provider`, `metadata`. `AgentRecord::is_remote()` returns true when the record represents a VM-backed agent (no `container_id`).
+`~/.octo/lair/agents.json` is lair's single source of truth for which agents exist. Schema is `octo_core::AgentRecord`:
 
-Lair's poller runs every 10 s, calls `docker list_containers` for things labelled `octo.managed=1`, and reconciles each *local* row's status. Containers that have disappeared from Docker are dropped from the registry on the next poll (so `octo agents delete <name>` from the CLI cleans up cleanly). Remote rows are skipped — they're surfaced to mobile as-is and stay in the registry until `forget_agent` removes them.
+```
+{ name, pid, port, git_url, status, binary_version, created_at, last_seen }
+```
 
-### Remote agents
-
-Lair can also register agents that live on a VM provisioned via a third-party cloud-provisioning MCP (AWS, Hetzner, GCP, etc.). It's a three-step LLM-driven flow, with the operator's API keys *never* flowing through the cloud provider or the provisioning MCP — lair owns the SSH connection and finishes the bootstrap directly:
-
-1. `mint_bootstrap_userdata(name, agent_purpose?, startup_script?, public_port?)` returns a cloud-init bash script. The userdata is **credentials-free** — it only trusts lair's SSH public key, installs Docker + git, prepares bind-mount dirs (`/var/lib/octo/agent-data` ↔ `/data`, `/var/lib/octo/agent-workspace` ↔ `/workspace`), and starts the agent container with non-secret env (PUBLIC_PORT, NOISE_PORT, OCTO_DATA_DIR, …). The agent boots without API keys, writes its `agent-info.json`, and waits.
-2. The LLM hands the userdata to whichever provisioning MCP is configured. The MCP returns a public IP and instance id.
-3. `register_remote_agent(name, host, git_url?, provider?, instance_id?, metadata?)` runs everything secret-bearing over SSH using lair's private key (`/data/ssh_id_ed25519`):
-   a. polls `/var/lib/octo/agent-data/agent-info.json` until the agent publishes its identity (cloud-init delays absorbed),
-   b. writes `/var/lib/octo/agent-data/config.json` with API keys harvested from lair's own env (Anthropic / OpenAI keys + model),
-   c. if `git_url` is given, clones it into the workspace using lair's `GH_TOKEN` (URL-spliced, plus a `credential.helper` for `git push`),
-   d. `docker restart`s the agent so it re-runs `ensure_workspace` (detects the freshly-cloned repo → repo-bound system prompt) and picks up `config.json`,
-   e. inserts an `AgentRecord` with `host=Some(<public_ip>)`, `instance_id=Some(...)`, and any provider `metadata`.
-
-Mobile reads the new row from its usual `containers` event and opens a Noise tunnel directly to `<public_ip>:<port>` — no `octo init`-style QR scan needed.
-
-Termination is the reverse: lair has no embedded cloud SDK, so the LLM calls the provisioning MCP's terminate-instance method with `instance_id` from `list_agents`, then `forget_agent(name)` clears the registry row.
+`pid` is the recorded OS pid of the last spawned `octo-lair --role agent` process. The poller checks `kill(pid, 0)` every 10s and flips `status` accordingly. On lair startup, the supervisor adopts any rows whose pid is still alive.
 
 ### Transport
 
-All client↔server communication is encrypted with **Noise_XX_25519_ChaChaPoly_SHA256**:
+Mobile ↔ lair is encrypted with **Noise_XX_25519_ChaChaPoly_SHA256**:
 
-1. Client scans QR code → `2:<host>:<port>:<base32-pubkey>`
-2. TCP connection → 3-message Noise XX handshake. The QR-pinned server static key is verified during the handshake; the client's static key is captured from snow's `get_remote_static()` and logged at handshake completion (per-client allowlisting is plumbed but not yet enforced).
-3. Frame format: 2-byte big-endian length prefix + ciphertext. Frames over `MAX_FRAME_SIZE` (16 KiB) are rejected; body reads timeout after 30 s; the whole handshake must complete within 10 s. Per source IP, no more than 32 concurrent Noise sessions are accepted.
-4. Post-handshake: a single, persistent WebSocket runs over the encrypted frames. One WS per server (lair or child) for the entire chat session — opened on chat-screen mount, closed on unmount. `core/src/lib.rs::ChatEvent` is the wire schema; tagged JSON via serde `tag = "type"`.
+1. Client scans QR code → `2:<host>:<port>:<base32-pubkey>`.
+2. TCP connection → 3-message Noise XX handshake.
+3. Frame format: 2-byte big-endian length prefix + ciphertext. Frames over `MAX_FRAME_SIZE` (16 KiB) are rejected.
+4. Post-handshake: WebSockets run over the encrypted frames.
+5. **Children are *never* reached directly.** Mobile opens a WebSocket to `ws://lair/agents/<name>/stream` over the same tunnel; lair proxies frames bidirectionally to the child's loopback HTTP port via `tokio_tungstenite`.
 
-Wire frames (server → client unless noted):
+Wire frames (see `core/src/lib.rs::ChatEvent` and `mobile/src/wire.ts`):
 
-| `type`            | Direction | Payload                                                   |
-|-------------------|-----------|-----------------------------------------------------------|
-| `ready`           | s → c     | `session_id: string`, `resumed: bool`. Sent once on open. |
-| `text`            | s → c     | `text: string`. Streamed live: one delta per Anthropic `content_block_delta` (text_delta) or OpenAI `choices[0].delta.content`. Mobile appends to a single message id. |
-| `tool_use`        | s → c     | `tool: string`, `input: any`. Emitted once per tool call after its input JSON is fully assembled. |
-| `tool_output`     | s → c     | `line: string`. One per stdout/stderr line during tool execution. |
-| `tool_result`     | s → c     | `tool_use_id: string`, `output: any`. Final tool result. |
-| `done`            | s → c     | `cost_usd: number`. Turn finished cleanly. |
-| `interrupted`     | s → c     | `cost_usd: number`. Turn cancelled by client. |
-| `interrupt_ack`   | s → c     | (no fields) Ack of an `interrupt` frame. |
-| `error`           | s → c     | `message: string`. Turn failed; WS stays open. |
-| `system`          | s → c     | `text: string`. Server status string for the UI. |
-| `containers`      | s → c     | `containers: ContainerInfo[]`. **Lair only.** Pushed on poller change. |
-| `ping`            | s → c     | `id: number`. Liveness probe every `KEEPALIVE_INTERVAL` (15 s). |
-| `user_message`    | c → s     | `text: string`. Start a new agentic turn. |
-| `interrupt`       | c → s     | (no fields) Cancel the in-flight turn. |
-| `pong`            | c → s     | `id: number`. Reply to `ping`. After `KEEPALIVE_MAX_MISSED` (2) unacked pings the server evicts the WS. |
-| `start_container` | c → s     | `id: string`. **Lair only.** Start the named (stopped) agent container. |
+| `type`            | Direction | Payload |
+|-------------------|-----------|---------|
+| `ready`           | s → c     | `session_id`, `resumed`. Sent on each WS open. |
+| `text`            | s → c     | Streamed model text deltas. |
+| `tool_use` / `tool_output` / `tool_result` | s → c | Tool invocation lifecycle. |
+| `done` / `interrupted` / `error` | s → c | Turn terminators. |
+| `agents`          | s → c     | **Lair only.** Pushed on poller change. |
+| `tasks` / `bg_complete` | s → c | Per-chat background-task registry. |
+| `ping` / `pong`   | both      | Keepalive (15 s interval, 2 missed = evict). |
+| `user_message`    | c → s     | Start a new agentic turn. |
+| `interrupt`       | c → s     | Cancel the in-flight turn. |
+| `start_agent` / `terminate_agent` | c → s | **Lair only.** Lifecycle ops. |
+| `cancel_task`     | c → s     | Cancel a running background task. |
 
-Mobile auto-reconnects with exponential backoff (1 s → 30 s, capped) on unintentional close; the counter resets on the next `ready`.
+Lair listens on `NOISE_PORT` (default 8443 in prod) and forwards Noise traffic to its own HTTP server on `127.0.0.1:8000`.
 
-Lair listens on port 9000 (`NOISE_PORT`) inside the container; the host publishes it on whatever port `octo init` set (default 8443). Lair's Curve25519 keypair and registry are persisted in `/data` (bind-mounted from `~/.octo/lair/` on the host).
+### Lair management API (CLI ↔ lair on loopback)
 
-### lair (parent container)
+Lair exposes a small management API on `127.0.0.1:8000` for the CLI:
 
-`lair` is the parent orchestration node. The mobile client connects to it first via the QR-scanned Noise tunnel. It:
+- `GET    /agents` — list registry rows.
+- `POST   /agents` — `{name?, git_url?, port?, startup_script?, startup_prompt?}` — spawn a new child.
+- `POST   /agents/:name/start` / `stop` — supervisor control.
+- `DELETE /agents/:name` — terminate + remove data dir.
+- `GET    /agents/:name/logs` — last 1 MB of the child's `agent.log`.
+- `GET    /agents/:name/stream` — WebSocket proxy (mobile end).
+- `GET    /agents/:name/history`, `POST /agents/:name/interrupt`, `POST /agents/:name/clear`, `GET /agents/:name/branches` — HTTP proxies of the child's same-name endpoints.
 
-- Polls Docker (every 10 s) for containers labelled `octo.managed=1` and reconciles them against `/data/agents.json`
-- Pushes the current container list as a `containers` event over `/stream` on every state-change (mobile subscribes; no HTTP polling)
-- Accepts `start_container` frames from the client over `/stream`, which `docker start` the named agent and trigger an immediate re-poll
-- Runs its own agentic loop (via `core`) so the user can ask it to create / inspect / terminate child containers from chat
+### lair credentials (`~/.octo/config.json`)
 
-Image: `ghcr.io/georgebradford0/lair`
+Lair reads its API keys and provider settings from `~/.octo/config.json`. Lair re-reads it on every model call, so rotation is live. Children inherit credentials via env at spawn time.
 
-#### lair credentials (read from `/data/config.json`)
+`GH_TOKEN` lives in `~/.octo/lair-env` (operator-managed via `octo env set GH_TOKEN=…`).
 
-Lair reads its API keys and provider settings from `/data/config.json` —
-the operator's `~/.octo/config.json` bind-mounted read-only into the
-container. `docker inspect lair` therefore does NOT expose them. The CLI
-writes this file (`octo init` / `octo config set`); lair re-reads it on
-every model call, so credential rotation is live, no restart needed.
+### lair runtime env (non-secret, set by the CLI)
 
-| Field in `config.json` | Required | Purpose |
-|----------|----------|---------|
-| `anthropic_api_key` | yes | Claude API access (also forwarded to children) |
-| `model` / `api_url` / `openai_api_key` | no | OpenAI-compatible provider for both lair and children |
+| Variable | Purpose |
+|----------|---------|
+| `OCTO_DATA_DIR` | `~/.octo/lair` |
+| `OCTO_AGENTS_DIR` | `~/.octo/agents` |
+| `OCTO_LAIR_BINARY` | Path to `octo-lair` (used to spawn children) |
+| `NOISE_PORT` / `PUBLIC_PORT` | Noise listen / advertised port |
+| `OCTO_SKIP_SHELL_ENV` | Always set to 1; suppresses the login-shell env sourcing |
 
-`gh_token` used to live here too; it doesn't any more. `GH_TOKEN` is now a
-plain env var on lair (operator-supplied via `octo init --env GH_TOKEN=…`
-or, in dev, forwarded from the host shell by `start_dev.sh`), and lair
-reads it from `std::env::var("GH_TOKEN")` when it forwards to children,
-clones for remote agents, or shells out to `gh`/`git`. The trade-off is
-explicit: `GH_TOKEN` will appear in `docker inspect lair`, unlike the
-config-mounted secrets.
+### agent (child) env (set by lair on spawn)
 
-#### lair runtime environment variables (non-secret)
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `PUBLIC_HOST` | no | Advertised host in QR (auto-detected via `api.ipify.org` if unset) |
-| `PUBLIC_PORT` | no | Externally-reachable port (defaults to `NOISE_PORT`) |
-| `NOISE_PORT` | no | Listening port inside the container (default: 9000) |
-| `NOISE_KEY_FILE` | no | Path to the Curve25519 private-key file (default: `/data/noise_key.bin`, generated on first run if absent) |
-| `OCTO_AGENT_IMAGE` | no | Image tag used when lair creates child containers (default: `ghcr.io/georgebradford0/lair:latest`) |
-| `OCTO_DATA_DIR` | no | Lair's data dir (default: `/data` inside the container; resolves to `~/.octo` on bare-host invocations of the CLI) |
-
-### agent (child container) environment variables
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `ANTHROPIC_API_KEY` | yes | Claude API access |
-| `GIT_URL` | no | Repo to clone into the workspace. Without it the agent runs in `/workspace` as a general-purpose agent (no git involvement). |
-| `GH_TOKEN` | no | GitHub token for HTTPS clones / PR creation. Required when `GIT_URL` is HTTPS. |
-| `AGENT_PURPOSE` | no | One-line mission statement baked into the system prompt when no `GIT_URL` is set |
-| `WORKSPACE_DIR` | no | Workspace path (default: `/workspace`) |
-| `STARTUP_SCRIPT` | no | Bash snippet run at boot after the workspace is populated |
-| `STARTUP_PROMPT` | no | First user message handed to the agentic loop on boot |
-| `PUBLIC_HOST` | no | Advertised host in QR (auto-detected if unset) |
-| `PUBLIC_PORT` | no | Externally-reachable port (defaults to `NOISE_PORT`) |
-| `NOISE_PORT` | no | Listening port (default: 9000) |
-| `GIT_USER_NAME` / `GIT_USER_EMAIL` | no | Commit author identity |
+| Variable | Purpose |
+|----------|---------|
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `MODEL` / `OPENAI_API_URL` | Provider credentials |
+| `AGENT_PORT` | Loopback HTTP port (30100–30199) |
+| `OCTO_DATA_DIR` | `~/.octo/agents/<name>/data` |
+| `WORKSPACE_DIR` | `~/.octo/agents/<name>/workspace` |
+| `GIT_URL` | Optional repo to clone (HTTPS needs `GH_TOKEN`) |
+| `AGENT_PURPOSE` / `STARTUP_SCRIPT` / `STARTUP_PROMPT` | Optional bootstrap knobs |
 
 ### CI/CD workflows (all manual dispatch)
 
 | Workflow | What it does |
-|----------|-------------|
-| `android.yml` | Builds AAB via fastlane, uploads to Google Play (closed/production track) |
-| `ios.yml` | Builds on macOS runner, optionally uploads to TestFlight |
+|----------|--------------|
+| `cli.yml` | Builds `octo` and `octo-lair` per-target and uploads as Release assets. |
+| `android.yml` | Builds AAB via fastlane, uploads to Google Play. |
+| `ios.yml` | Builds on macOS runner, optionally uploads to TestFlight. |

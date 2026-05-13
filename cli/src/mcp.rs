@@ -1,21 +1,21 @@
-//! `octo mcp …` — manage the per-container `mcp.json`.
+//! `octo mcp …` — manage the per-process `mcp.json`.
 //!
-//! For lair: write directly to `<lair_data_dir>/mcp.json` (bind-mounted into
-//! the container, hot-reloaded by lair's MCP poller).
+//! All configs live on the host filesystem now:
+//!   - lair:  `~/.octo/lair/mcp.json`
+//!   - agent: `~/.octo/agents/<name>/data/mcp.json`
 //!
-//! For an agent: child volumes are Docker-named (not bind-mounted), so
-//! manipulate the file via `docker cp` against the running container.
+//! Both lair and child agent processes watch their `mcp.json` and hot-reload
+//! on change. Adding a new entry is a plain file edit followed by tailing the
+//! agent's log for the `[mcp] '<name>' connected` marker.
 
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use serde::{Deserialize, Serialize};
 
-use crate::dockerd;
+use crate::service;
 
-const MCP_PATH_IN_CONTAINER: &str = "/data/mcp.json";
-const LAIR_AGENT_NAME:       &str = "lair";
+const LAIR_AGENT_NAME: &str = "lair";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct McpServerConfig {
@@ -32,95 +32,54 @@ struct McpServerConfig {
     headers: HashMap<String, String>,
 }
 
-fn lair_mcp_path() -> PathBuf {
-    dockerd::lair_data_dir().join("mcp.json")
-}
-
-async fn read_mcp(d: &Docker, agent: &str) -> Result<Vec<McpServerConfig>> {
-    let text = if agent == LAIR_AGENT_NAME {
-        match std::fs::read_to_string(lair_mcp_path()) {
-            Ok(t) if !t.trim().is_empty() => t,
-            _ => return Ok(Vec::new()),
-        }
-    } else {
-        // `docker cp <agent>:/data/mcp.json -` streams the file as a tar.
-        // Simpler: docker exec cat.
-        use bollard::exec::{CreateExecOptions, StartExecResults};
-        use futures_util::StreamExt;
-        let exec = d
-            .create_exec(
-                agent,
-                CreateExecOptions {
-                    cmd: Some(vec!["cat", MCP_PATH_IN_CONTAINER]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .with_context(|| format!("create exec in {agent}"))?;
-        let mut out = String::new();
-        if let StartExecResults::Attached { mut output, .. } =
-            d.start_exec(&exec.id, None).await.with_context(|| format!("start exec in {agent}"))?
-        {
-            while let Some(item) = output.next().await {
-                if let Ok(msg) = item {
-                    out.push_str(&format!("{msg}"));
-                }
-            }
-        }
-        if out.trim().is_empty() { return Ok(Vec::new()); }
-        out
-    };
-    serde_json::from_str(&text).context("parse mcp.json")
-}
-
-async fn write_mcp(d: &Docker, agent: &str, configs: &[McpServerConfig]) -> Result<()> {
-    let json = serde_json::to_string_pretty(configs)?;
+fn mcp_path(agent: &str) -> PathBuf {
     if agent == LAIR_AGENT_NAME {
-        let path = lair_mcp_path();
-        std::fs::create_dir_all(path.parent().unwrap()).ok();
-        // mode 0600 — env / header values are resolved literals and contain
-        // secret material (API keys, bearer tokens).
-        crate::init::write_secret_file(&path, &json)?;
+        service::lair_data_dir().join("mcp.json")
     } else {
-        use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
-        use bollard::container::DownloadFromContainerOptions;
-        let _ = d.download_from_container(agent, None::<DownloadFromContainerOptions<String>>);
-
-        // Pipe the JSON in via `sh -c "cat > /data/mcp.json"`.
-        let exec = d
-            .create_exec(
-                agent,
-                CreateExecOptions {
-                    cmd: Some(vec!["sh", "-c", &format!("cat > {MCP_PATH_IN_CONTAINER}")]),
-                    attach_stdin: Some(true),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .with_context(|| format!("create exec in {agent}"))?;
-        let started = d
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions { detach: false, ..Default::default() }),
-            )
-            .await
-            .with_context(|| format!("start exec in {agent}"))?;
-        if let StartExecResults::Attached { mut input, .. } = started {
-            use tokio::io::AsyncWriteExt;
-            input.write_all(json.as_bytes()).await.context("write mcp.json via stdin")?;
-            input.shutdown().await.ok();
-        }
+        service::agents_dir().join(agent).join("data").join("mcp.json")
     }
-    Ok(())
+}
+
+fn agent_log_path(agent: &str) -> PathBuf {
+    if agent == LAIR_AGENT_NAME {
+        service::lair_data_dir().join("lair.log")
+    } else {
+        service::agents_dir().join(agent).join("agent.log")
+    }
+}
+
+fn read_mcp(agent: &str) -> Result<Vec<McpServerConfig>> {
+    let path = mcp_path(agent);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) if !t.trim().is_empty() => t,
+        _ => return Ok(Vec::new()),
+    };
+    serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+fn write_mcp(agent: &str, configs: &[McpServerConfig]) -> Result<()> {
+    let path = mcp_path(agent);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let json = serde_json::to_string_pretty(configs)?;
+    crate::init::write_secret_file(&path, &json)
+}
+
+fn read_log_tail(agent: &str, bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = agent_log_path(agent);
+    let Ok(meta) = std::fs::metadata(&path) else { return String::new(); };
+    let offset = meta.len().saturating_sub(bytes);
+    let Ok(mut f) = std::fs::File::open(&path) else { return String::new(); };
+    f.seek(SeekFrom::Start(offset)).ok();
+    let mut buf = String::new();
+    f.read_to_string(&mut buf).ok();
+    buf
 }
 
 pub async fn list(agent: &str) -> Result<()> {
-    let docker = dockerd::build_client()?;
-    let configs = read_mcp(&docker, agent).await?;
+    let configs = read_mcp(agent)?;
     if configs.is_empty() {
         println!("No MCP servers configured in '{agent}'.");
         return Ok(());
@@ -142,16 +101,12 @@ pub async fn add(
     args: &[String],
     env_pairs: &[String],
 ) -> Result<()> {
-    let docker = dockerd::build_client()?;
-    let mut configs = read_mcp(&docker, agent).await?;
+    let mut configs = read_mcp(agent)?;
 
     if configs.iter().any(|c| c.name == name) {
         anyhow::bail!("MCP server '{name}' already exists in '{agent}'");
     }
 
-    // Expand `${VAR}` against the operator's shell env at write time and
-    // bake the value in. Lair can't see the host env, so deferring
-    // resolution would mean the MCP server gets a literal "${VAR}".
     let mut env = HashMap::new();
     let mut missing: Vec<String> = Vec::new();
     for pair in env_pairs {
@@ -181,7 +136,7 @@ pub async fn add(
     });
 
     println!("→ writing config to '{agent}'");
-    write_mcp(&docker, agent, &configs).await?;
+    write_mcp(agent, &configs)?;
 
     let connected_marker  = format!("[mcp] '{name}' connected");
     let spawn_fail_marker = format!("[mcp] failed to spawn '{name}'");
@@ -192,7 +147,7 @@ pub async fn add(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     let logs = loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let logs = dockerd::logs_since(&docker, agent, 75).await.unwrap_or_default();
+        let logs = read_log_tail(agent, 64 * 1024);
         let done = logs.contains(&connected_marker)
             || logs.contains(&no_tools_marker)
             || logs.contains(&spawn_fail_marker)
@@ -212,7 +167,7 @@ pub async fn add(
 
     if !success {
         configs.retain(|c| c.name != name);
-        write_mcp(&docker, agent, &configs).await?;
+        write_mcp(agent, &configs)?;
     }
 
     if logs.contains(&connected_marker) {
@@ -240,10 +195,6 @@ pub async fn import_from_file(agent: &str, path: &std::path::Path) -> Result<()>
         return Ok(());
     }
 
-    let docker = dockerd::build_client()?;
-    // Expand `${VAR}` against the operator's shell env at write time. Any
-    // ref that doesn't resolve aborts the import with all missing vars
-    // listed at once.
     let mut missing: Vec<String> = Vec::new();
     let resolved: Vec<McpServerConfig> = entries.into_iter().map(|mut e| {
         let expand_map = |m: HashMap<String, String>, missing: &mut Vec<String>| -> HashMap<String, String> {
@@ -270,20 +221,19 @@ pub async fn import_from_file(agent: &str, path: &std::path::Path) -> Result<()>
     }
 
     println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", resolved.len());
-    write_mcp(&docker, agent, &resolved).await?;
+    write_mcp(agent, &resolved)?;
     println!("Imported successfully.");
     Ok(())
 }
 
 pub async fn remove(agent: &str, name: &str) -> Result<()> {
-    let docker = dockerd::build_client()?;
-    let mut configs = read_mcp(&docker, agent).await?;
+    let mut configs = read_mcp(agent)?;
     let before = configs.len();
     configs.retain(|c| c.name != name);
     if configs.len() == before {
         anyhow::bail!("MCP server '{name}' not found in '{agent}'");
     }
-    write_mcp(&docker, agent, &configs).await?;
+    write_mcp(agent, &configs)?;
     println!("Removed MCP server '{name}' from '{agent}'.");
     Ok(())
 }

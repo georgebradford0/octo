@@ -1,3 +1,7 @@
+//! Child agent role. Runs an HTTP+WS server bound to `127.0.0.1:<AGENT_PORT>`.
+//! Mobile never connects directly — lair proxies WebSocket traffic from its
+//! own Noise tunnel into this server on demand.
+
 use std::{
     fs,
     path::PathBuf,
@@ -26,39 +30,20 @@ use octo_core::{
     build_tools_with_mcp, cancel_task as core_cancel_task, chain_executor_with_mcp,
     completion_chat_event, data_dir, finalize_task, now_secs, record_task_progress,
     register_task, tasks_wire_json, TaskRecord, TaskStatus,
-    get_branches_for_repo, init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config,
-    resolve_api_key, resolve_model, run_command_in_background_tool, run_noise_proxy, send_message,
-    spawn_background_command, to_base32, write_config, ApiMessage, AnthropicTool,
-    BackgroundCommandParams, ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32,
-    DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC, KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
+    get_branches_for_repo, init_mcp_pool, init_shell_env, read_config,
+    resolve_api_key, resolve_model, run_command_in_background_tool, send_message,
+    spawn_background_command, ApiMessage, AnthropicTool,
+    BackgroundCommandParams, ChatEvent, Config, ContentBlock, McpPool,
+    KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
     StreamState, buffer_and_fanout, chat_event_to_wire_json, messages_to_history,
-    parse_ping_id, parse_pong_id,
+    parse_ping_id, parse_pong_id, write_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
-const NOISE_KEY_FILE: &str = "/data/noise_key.bin";
-
-/// Write `<data_dir>/agent-info.json` with this agent's externally-visible
-/// identity. Idempotent — overwritten on each boot. Read by lair via SSH
-/// during remote-agent registration.
-fn write_agent_info(dir: &std::path::Path, pubkey_b32: &str, public_port: u16) -> std::io::Result<()> {
-    let info = serde_json::json!({
-        "pubkey":   pubkey_b32,
-        "port":     public_port,
-        "ready_at": octo_core::now_secs(),
-    });
-    let path = dir.join("agent-info.json");
-    std::fs::create_dir_all(dir).ok();
-    std::fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default())
-}
-
 // ── Session persistence ───────────────────────────────────────────────────────
-//
-// Thin local wrappers that bind the shared `octo_core::app` helpers to this
-// binary's data dir and log prefix.
 
 fn save_messages(messages: &[ApiMessage]) {
     octo_core::save_messages(&data_dir(), messages, "agent");
@@ -75,11 +60,8 @@ struct AppState {
     last_cost_usd: Mutex<Option<f64>>,
     system:        String,
     cwd:           String,
-    /// Buffered events for the current turn + live subscriber list.
     stream_state:  Mutex<StreamState>,
-    /// True while a /stream loop is running.
     is_streaming:  AtomicBool,
-    /// Cancellation token for the current streaming turn. Replaced at the start of each turn.
     cancel:        Mutex<CancellationToken>,
     mcp_pool:      McpPool,
 }
@@ -96,9 +78,6 @@ async fn interrupt_handler(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn history_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cost = *state.last_cost_usd.lock().unwrap();
     let msgs = messages_to_history(&state.messages.lock().unwrap(), cost);
-    // is_streaming is no longer in the response — the persistent /stream WS
-    // sends `ready { resumed }` on connect, which is what mobile uses to
-    // decide whether to enter the 'streaming' UI state.
     Json(serde_json::json!({ "messages": msgs }))
 }
 
@@ -109,16 +88,6 @@ async fn stream_handler(
     ws.on_upgrade(move |socket| handle_stream(socket, state))
 }
 
-
-/// Spawn an agentic turn. Returns immediately; events are buffered + fanned out
-/// to all current /stream subscribers. The caller must have already verified
-/// `is_streaming` was false and flipped it to true.
-///
-/// `user_text = Some(text)` is a normal user-initiated turn (the text is pushed
-/// as a `user` message before the turn runs). `user_text = None` is an
-/// autonomous follow-up — typically triggered by a `bg_complete` row that
-/// already sits at the tail of `state.messages`, so no fresh user message is
-/// pushed; the model just sees the existing history.
 fn spawn_turn(state: Arc<AppState>, user_text: Option<String>) {
     tokio::spawn(async move {
         let api_key = match resolve_api_key() {
@@ -162,18 +131,14 @@ fn spawn_turn(state: Arc<AppState>, user_text: Option<String>) {
         let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(256);
         let done_tx = event_tx.clone();
 
-        // Fresh cancellation token for this turn; stored on AppState so /interrupt
-        // and incoming "interrupt" frames can reach it.
         let cancel = CancellationToken::new();
         *state.cancel.lock().unwrap() = cancel.clone();
 
-        // Clear the per-turn buffer; subscribers stay so live events still fan out.
         state.stream_state.lock().unwrap().buffer.clear();
 
         let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
         let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor(state.clone()));
 
-        // Agent task: drives the model loop, terminates with Result/Interrupted/Error.
         tokio::spawn(async move {
             match send_message(messages, &system, &model, &api_key, &cwd, Some(event_tx), cancel.clone(), &extra_tools, executor).await {
                 Ok((_, cost_usd, mut updated)) => {
@@ -207,30 +172,19 @@ fn spawn_turn(state: Arc<AppState>, user_text: Option<String>) {
             }
         });
 
-        // Relay task: drains the per-turn mpsc, buffers and fans out to all WS subs.
         while let Some(event) = event_rx.recv().await {
             if let Some(json) = chat_event_to_wire_json(&event) {
                 buffer_and_fanout(&state.stream_state, json.to_string());
             }
         }
         state.is_streaming.store(false, Ordering::Relaxed);
-        // Drop the per-turn buffer so a between-turns reconnect doesn't replay
-        // the just-finished turn on top of /history (would duplicate the last
-        // assistant message client-side).
         state.stream_state.lock().unwrap().buffer.clear();
         info!("[agent/stream] turn complete, is_streaming=false");
 
-        // If a `bg_complete` arrived during this turn (tail of state.messages),
-        // kick off another auto-turn so the model picks it up. No-op when the
-        // tail isn't a bg_complete row.
         try_continue_auto(state.clone());
     });
 }
 
-/// Atomically check whether the persisted history's tail is an unprocessed
-/// `bg_complete` row, and if so, kick off an auto-turn so the model reacts.
-/// Mirrors lair::try_continue_auto. Idempotent — losing the compare_exchange
-/// race means the other caller will run the turn instead.
 fn try_continue_auto(state: Arc<AppState>) {
     let needs_turn = matches!(
         state.messages.lock().unwrap().last().map(|m| m.role.as_str()),
@@ -241,7 +195,7 @@ fn try_continue_auto(state: Arc<AppState>) {
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
-        return; // a turn is already running; it'll re-check on completion
+        return;
     }
     info!("[agent/stream] auto-turn triggered by bg_complete");
     spawn_turn(state, None);
@@ -251,11 +205,6 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
     info!("[agent/stream] WebSocket connection opened");
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // Atomically snapshot the buffer (events from any in-flight turn) and
-    // register as a subscriber so no events are lost in the gap. The buffer
-    // is only forwarded if a turn is genuinely in flight — between turns the
-    // canonical state lives in /history, and replaying the just-finished
-    // turn's events would duplicate the last assistant message client-side.
     let (sub_tx, mut sub_rx) = mpsc::unbounded_channel::<String>();
     let (replay, resumed) = {
         let mut ss = state.stream_state.lock().unwrap();
@@ -265,13 +214,10 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         (replay, resumed)
     };
 
-    // Greet the client. `resumed` indicates whether they're joining an in-flight
-    // turn; if so the buffer replay below catches them up to its current state.
     let ready = serde_json::json!({"type":"ready","session_id":"","resumed":resumed}).to_string();
     if ws_tx.send(WsMessage::Text(ready)).await.is_err() {
         return;
     }
-    // One-shot tasks snapshot so the modal renders without waiting for a change.
     if ws_tx.send(WsMessage::Text(tasks_wire_json(&state.stream_state))).await.is_err() {
         return;
     }
@@ -282,7 +228,6 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    // App-level keepalive (see lair/handle_stream for design).
     let mut ping_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
         KEEPALIVE_INTERVAL,
@@ -292,7 +237,6 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
 
     loop {
         tokio::select! {
-            // Outgoing: agentic-turn events fanned out from spawn_turn / buffer.
             msg = sub_rx.recv() => match msg {
                 Some(json) => {
                     if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
@@ -300,7 +244,6 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 None => break,
             },
 
-            // Outgoing: keepalive ping.
             _ = ping_interval.tick() => {
                 let outstanding = next_ping_id.saturating_sub(last_acked_id);
                 if outstanding >= KEEPALIVE_MAX_MISSED {
@@ -312,13 +255,11 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
                 if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
             },
 
-            // Incoming: client frames.
             msg = ws_rx.next() => match msg {
                 Some(Ok(WsMessage::Text(t))) => {
                     if let Some(id) = parse_pong_id(&t) {
                         if id > last_acked_id { last_acked_id = id; }
                     } else if let Some(id) = parse_ping_id(&t) {
-                        // Mobile-side keepalive — echo a pong on this same WS.
                         let json = serde_json::json!({"type":"pong","id":id}).to_string();
                         if ws_tx.send(WsMessage::Text(json)).await.is_err() { break; }
                     } else {
@@ -333,11 +274,9 @@ async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-
     info!("[agent/stream] connection closed");
 }
 
-/// Dispatch a client → server frame parsed from a /stream WS message.
 async fn handle_client_frame(raw: &str, state: &Arc<AppState>) {
     let v: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v)  => v,
@@ -380,9 +319,7 @@ async fn handle_client_frame(raw: &str, state: &Arc<AppState>) {
             let fired = core_cancel_task(&state.stream_state, &id);
             info!("[agent/stream] cancel_task id={id} fired={fired}");
         }
-        "pong" => {
-            // App-level keepalive ack — handled per-WS in the future ping/pong work.
-        }
+        "pong" => {}
         other => {
             warn!("[agent/stream] unknown client frame type='{other}'");
         }
@@ -424,8 +361,6 @@ async fn get_completions_handler(
 }
 
 async fn get_branches_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // No-repo agents have no branches — return [] rather than 500. The mobile
-    // UI hides the branch picker in that case.
     if !PathBuf::from(&state.cwd).join(".git").is_dir() {
         return Json(Vec::<octo_core::Branch>::new()).into_response();
     }
@@ -478,9 +413,6 @@ async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json:
     let task_id = format!("bg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     info!("[agent/run_command_in_background] spawning {task_id} ({} chars)", command.len());
 
-    // Register the task *before* spawning so the per-chat registry is in place
-    // by the time the deliver closure can possibly run. See lair.rs for the
-    // symmetric parent-side wiring.
     let cancel = CancellationToken::new();
     register_task(&state.stream_state, &data_dir(), TaskRecord {
         task_id:      task_id.clone(),
@@ -511,10 +443,6 @@ async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json:
         finalize_task(&stream_state_arc.stream_state, &data_dir(), &outcome);
         buffer_and_fanout(&stream_state_arc.stream_state, tasks_wire_json(&stream_state_arc.stream_state));
 
-        // Persist a `bg_complete` row so the model sees the result on its next
-        // turn (auto-triggered below if no foreground turn is in flight).
-        // Translated to user-role text at API serialisation time so providers
-        // see it as ordinary input. Mirrors the lair-side wiring.
         let injection = format!(
             "Background command {} completed (status={}). Command: {}\n\nOutput:\n{}",
             outcome.task_id, outcome.status, outcome.command, outcome.summary
@@ -528,9 +456,6 @@ async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json:
             save_messages(&msgs);
         }
 
-        // Live `bg_complete` wire frame so connected clients render the chip
-        // between assistant turns. /history reload would surface the same row;
-        // this makes it visible immediately. Stable task_id keys deduplicate.
         let bg_event = ChatEvent::BgComplete {
             task_id: outcome.task_id.clone(),
             text:    injection,
@@ -539,15 +464,11 @@ async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json:
             buffer_and_fanout(&stream_state_arc.stream_state, json.to_string());
         }
 
-        // Transient system-event fan-out (kept for status banner display).
         let event = completion_chat_event(&outcome);
         if let Some(json) = chat_event_to_wire_json(&event) {
             buffer_and_fanout(&stream_state_arc.stream_state, json.to_string());
         }
 
-        // Kick off an auto-turn so the model can react. If a foreground turn
-        // is in flight this is a no-op; the post-turn `try_continue_auto` in
-        // spawn_turn will pick the row up.
         try_continue_auto(stream_state_arc.clone());
     });
 
@@ -556,7 +477,7 @@ async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json:
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 
-pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
         .with_target(false)
@@ -568,63 +489,14 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
 
     init_shell_env();
 
-    let is_dev   = std::env::var("OCTO_DEV").as_deref() == Ok("1");
-    let key_file = std::env::var("NOISE_KEY_FILE").unwrap_or_else(|_| NOISE_KEY_FILE.to_string());
+    let port: u16 = std::env::var("AGENT_PORT")
+        .ok().and_then(|v| v.parse().ok())
+        .unwrap_or(30100);
 
-    let injected_keypair: Option<(Vec<u8>, Vec<u8>)> = std::env::var("NOISE_PRIVATE_KEY").ok()
-        .and_then(|s| {
-            let bytes = hex::decode(s.trim()).ok()?;
-            if bytes.len() == 64 {
-                Some((bytes[..32].to_vec(), bytes[32..].to_vec()))
-            } else {
-                None
-            }
-        });
+    info!("[agent] starting on 127.0.0.1:{port}");
 
-    if print_pubkey {
-        let pubkey = if is_dev {
-            DEV_PUBKEY_BASE32.to_string()
-        } else if let Some((_, public)) = &injected_keypair {
-            to_base32(public)
-        } else {
-            let (_, public) = load_or_generate_keypair(&key_file);
-            to_base32(&public)
-        };
-        println!("{pubkey}");
-        return Ok(());
-    }
-
-    let (static_private, static_public) = if is_dev {
-        warn!("[agent] DEV MODE: using fixed dev keypair (OCTO_DEV=1)");
-        (DEV_STATIC_PRIVATE.to_vec(), DEV_STATIC_PUBLIC.to_vec())
-    } else if let Some(kp) = injected_keypair {
-        kp
-    } else {
-        load_or_generate_keypair(&key_file)
-    };
-
-    let noise_port:  u16 = std::env::var("NOISE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
-    let public_port: u16 = std::env::var("PUBLIC_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(noise_port);
-    let http_port:   u16 = 8000;
-    let public_host = crate::bootstrap::resolve_public_host("agent").await?;
-    let pubkey_b32  = to_base32(&static_public);
-
-    info!("[agent] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port}");
-
-    // Publish a small JSON file so a parent lair on a different host can
-    // SSH-pull our identity (pubkey + port) post-bootstrap. The remote
-    // registration flow (`mint_bootstrap_userdata` + `register_remote_agent`)
-    // reads this from `/data/agent-info.json` over SSH.
-    if let Err(e) = write_agent_info(&data_dir(), &pubkey_b32, public_port) {
-        warn!("[agent] could not write agent-info.json: {e}");
-    }
-
-    // Workspace + optional git repo. With GIT_URL set, behaviour matches the
-    // old shell entrypoint exactly (clone-or-fetch, set git user, install a
-    // credential helper). Without it, the workspace is just `mkdir -p` and
-    // the agent runs there as a generic agent — see `build_agent_system_prompt`.
     let workspace = std::path::PathBuf::from(
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/workspace".to_string())
+        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "workspace".to_string())
     );
     let git_url  = std::env::var("GIT_URL").ok();
     let gh_token = std::env::var("GH_TOKEN").ok();
@@ -634,11 +506,7 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         gh_token.as_deref(),
     ).await?;
 
-    // STARTUP_SCRIPT runs after the workspace is populated so it can reference
-    // the cloned repo (matches the bash entrypoint's order).
     crate::bootstrap::run_startup_script("agent").await?;
-
-    tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
     let cwd       = workspace.to_string_lossy().to_string();
     let system    = if has_repo {
@@ -687,14 +555,10 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         .with_state(state.clone())
         .layer(cors);
 
-    let addr = format!("0.0.0.0:{http_port}");
+    let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await
-        .map_err(|e| anyhow::anyhow!("failed to bind HTTP port {addr}: {e}"))?;
-    info!("[agent] HTTP listening on {addr} (Noise proxy on 0.0.0.0:{noise_port}, cwd: {})", state.cwd);
-
-    // Listener is bound; the Noise port is reachable. Print the QR now so the
-    // user never scans before the server can accept the connection.
-    crate::bootstrap::print_qr("agent", &public_host, public_port, &pubkey_b32);
+        .map_err(|e| anyhow::anyhow!("failed to bind agent HTTP port {addr}: {e}"))?;
+    info!("[agent] HTTP listening on {addr} (cwd: {})", state.cwd);
 
     if let Ok(prompt) = std::env::var("STARTUP_PROMPT") {
         if !prompt.is_empty() {

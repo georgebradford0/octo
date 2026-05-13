@@ -60,7 +60,7 @@ async fn noise_handshake_completes() {
         .await
         .expect("client handshake failed");
 
-    let mut server_ts = server_task.await.unwrap();
+    let mut server_ts = server_task.await.unwrap().transport;
 
     // Verify the shared session works: client encrypts, server decrypts.
     let plaintext = b"hello lair";

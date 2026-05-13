@@ -1,40 +1,54 @@
 # octo
 
-`octo` is a mobile agent management system that runs a fleet of LLM agents as Docker containers on a host machine. It was originally designed for coding but can be used to deploy any type of agent.
+`octo` is a mobile agent management system that runs a fleet of LLM agents as plain OS processes on a Linux host. It was originally designed for coding but can be used to deploy any type of agent.
 
 ## Architecture
 
-The system runs a single `lair` Docker container on a host with a static IP. The mobile client connects to lair over an encrypted Noise tunnel. From the lair chat the user creates, messages, and tears down "child" agent containers; each child also exposes its own Noise endpoint, so the mobile client can talk to a child directly once it knows about it.
+A single `octo-lair` binary runs on a host with a static IP. The mobile client connects to lair over an encrypted Noise tunnel; from the lair chat the user creates, messages, and tears down "child" agents. Each child is also an `octo-lair` process (spawned by lair with `--role agent`), listening on a loopback HTTP port. Mobile chats with a child by opening a WebSocket to lair's proxy URL (`/agents/<name>/stream`) — there is no separate connection per child.
 
-## Install the CLI
+Linux only. No Docker, no systemd dependency.
 
-The CLI is a Rust binary `octo` that bootstraps lair on the host and manages the per-container MCP config.
+## Install the CLI and lair binary
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/georgebradford0/octo/main/scripts/get-cli.sh | sh
 ```
 
-`octo` requires [Docker](https://docs.docker.com/get-docker/) on the host. Install it before running `octo init`.
+This installs `octo` (CLI) and `octo-lair` (the lair / agent binary) to `~/.local/bin/`. Both must be on PATH; if `~/.local/bin` isn't in your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc.
 
 ## Setup
 
-`octo init` must be run on a host with a static IP. It expects `ANTHROPIC_API_KEY` and (optionally) `GH_TOKEN` in the environment, or via `--anthropic-api-key` / `--gh-token`. The default Noise port is 8443; override with `--noise-port`.
+`octo init` must be run on a Linux host with a static (or at least publicly-reachable) IP. It expects either `--anthropic-api-key` or `--openai-api-key` plus `--model`.
 
 ```sh
-octo init
+octo init --anthropic-api-key sk-ant-... --model claude-sonnet-4-6
 ```
 
 `init` will:
 
-1. Verify Docker is reachable.
-2. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels into remote-provisioned VMs, e.g. tailing logs).
-3. Write an env file (`~/.octo/lair-env`) and persist config to `~/.octo/config.json`.
-4. Pull the lair image and start the lair container, bind-mounting `~/.octo/lair/` → `/data` and the host's Docker socket so lair can manage child containers.
-5. Wait for lair's health check, then print a QR code containing the host, port, and Noise pubkey.
+1. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels — e.g. SSHing into a remote host for tailing logs).
+2. Write an env file (`~/.octo/lair-env`) and persist credentials to `~/.octo/config.json`.
+3. Spawn `octo-lair --role lair` as a detached background process (pid recorded at `~/.octo/lair/lair.pid`).
+4. Wait for lair's health check, then print a QR code containing the host, port, and Noise pubkey.
 
 Anyone with the QR data can connect, so treat it like a credential.
 
-The `mobile/` directory contains a React Native app, available in production for iOS (TODO: publish link). Android users must build it themselves for now. Open the app, tap the pulsing icon, and scan the QR. The connection opens to the lair chat.
+The `mobile/` directory contains a React Native app (TODO: store links). Open the app, tap the pulsing icon, and scan the QR. The connection opens to the lair chat.
+
+## Day-to-day
+
+| Command | What it does |
+|---|---|
+| `octo init` | First-run setup. Spawns lair. |
+| `octo reload` | Restart lair (picks up new env / binary). `--all` also restarts every agent. |
+| `octo destroy` | Kill lair, terminate every agent, wipe `~/.octo/lair` and `~/.octo/agents`. |
+| `octo logs [name]` | Tail `~/.octo/lair/lair.log` (default) or a specific agent's `agent.log`. `-f` to follow. |
+| `octo agents list` | Show every known agent (status, pid, port, git URL). |
+| `octo agents start <name>` | Re-spawn a stopped agent. |
+| `octo agents stop <name>` | SIGTERM an agent. |
+| `octo agents delete <name>` | Stop the agent and remove its `~/.octo/agents/<name>/` dir. |
+| `octo config show` / `set` | View / edit `~/.octo/config.json` (API keys, model). Lair re-reads on every call — no restart needed. |
+| `octo env show` / `set` / `unset` | View / edit `~/.octo/lair-env` (extra env vars passed to lair). Changes auto-restart lair. |
 
 ## MCP Support
 
@@ -44,18 +58,13 @@ MCP servers can be seeded at init time by passing an MCP JSON file:
 octo init --mcp-config <path_to_mcp_json>
 ```
 
-They can also be added at runtime against any container (lair by default) and are hot-reloaded:
+They can also be added at runtime and are hot-reloaded:
 
 ```sh
 # uvx-based server
 octo mcp add --name aws-ec2 --command uvx \
   --env AWS_ACCESS_KEY_ID=... --env AWS_SECRET_ACCESS_KEY=... --env AWS_REGION=us-east-1 \
   -- awslabs.amazon-ec2-mcp-server
-
-# uv run (for packages without a script entry point)
-octo mcp add --name prime-intellect --command uv \
-  --env PRIME_API_KEY=... \
-  -- run --with prime-mcp-server python -m prime_mcp.mcp
 
 # Add to a specific child agent (default is lair)
 octo mcp add --agent lair-myrepo --name linear --command npx \
@@ -66,12 +75,15 @@ octo mcp list
 octo mcp remove --name github
 ```
 
-`mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. The server config is stored at `/data/mcp.json` inside the container (for lair, that's `~/.octo/lair/mcp.json` on the host); lair hot-reloads it within a few seconds. You can also ask lair to add MCP servers directly from chat, though I've found the CLI is usually easier because Claude sometimes hallucinates package names — best practice is to ask for a web search to verify package names before adding.
+`mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. Server configs are stored at:
 
-If `--agent` is omitted the MCP is added to `lair`.
+- `~/.octo/lair/mcp.json` (for lair)
+- `~/.octo/agents/<name>/data/mcp.json` (for child agents)
+
+Both are hot-reloaded within a few seconds.
 
 ## Startup Scripts
 
-New agents are created via the built-in `create_agent` tool in the lair main chat. `create_agent` accepts `startup_script` and `startup_prompt` arguments. The startup script runs before the agent's server starts (good for git config, package installs, etc.). The startup prompt is the first message sent to the agent once the server is ready and triggers an agentic loop to completion (or max turns). These are usually generated by the lair chat when the user asks lair to create a new agent.
+New child agents are created via the built-in `create_agent` tool in the lair chat. It accepts `startup_script` (runs before the agent's HTTP server starts — good for `apt-get`, git config) and `startup_prompt` (the first message the agent receives once ready).
 
-Both fields are stored as plaintext env vars on the container — they should not contain sensitive data. The tool description explains this, but it's good practice never to direct the agent to include secrets; your request may override the tool description.
+Both fields are stored as plaintext env on the agent process — they should not contain sensitive data.

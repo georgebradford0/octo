@@ -1,6 +1,6 @@
 [package]
 name        = "octo"
-version     = "0.1.12"
+version     = "0.2.0"
 edition     = "2021"
 description = "octo lair management CLI"
 
@@ -11,21 +11,15 @@ path = "src/main.rs"
 [dependencies]
 octo-core         = { path = "../core" }
 anyhow            = "1.0"
-bollard           = "0.17"
 clap              = { version = "4", features = ["derive", "env"] }
 clap_complete     = "4"
 serde             = { version = "1.0", features = ["derive"] }
 serde_json        = "1.0"
 tokio             = { version = "1", features = ["full"] }
 snow              = "0.9"
-hex               = "0.4"
 data-encoding     = "2"
 qrcode            = "0.14"
 reqwest           = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util      = "0.3"
 tracing           = "0.1"
-# Vendor openssl-sys so cross-compiling (e.g. aarch64-apple-darwin runner →
-# x86_64-apple-darwin target in cli.yml) doesn't try to pkg-config a host
-# OpenSSL it can't find. bollard pulls openssl-sys transitively; this forces
-# the entire dep tree to use the in-tree source build.
-openssl           = { version = "0.10", features = ["vendored"] }
+libc              = "0.2"

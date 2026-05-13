@@ -2,55 +2,37 @@
 set -e
 
 REPO="georgebradford0/octo"
-BIN="octo"
 INSTALL_DIR="$HOME/.local/bin"
 
 OS=$(uname -s)
 ARCH=$(uname -m)
 
+# octo is Linux-only post-Docker-removal. The CLI and lair binary must run on
+# the same host (lair is spawned by `octo init` as a native process). macOS
+# users can still install the CLI to point at a remote Linux lair if they
+# only need management — but `octo init` will refuse to run there.
 case "$OS" in
   Linux)
     case "$ARCH" in
-      x86_64)  ARTIFACT="octo-linux-x86_64" ;;
-      aarch64) ARTIFACT="octo-linux-aarch64" ;;
+      x86_64)  CLI_ARTIFACT="octo-linux-x86_64";  LAIR_ARTIFACT="octo-lair-linux-x86_64"  ;;
+      aarch64) CLI_ARTIFACT="octo-linux-aarch64"; LAIR_ARTIFACT="octo-lair-linux-aarch64" ;;
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     ;;
-  Darwin)
-    case "$ARCH" in
-      x86_64)  ARTIFACT="octo-macos-x86_64" ;;
-      arm64)   ARTIFACT="octo-macos-aarch64" ;;
-      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-    esac
-    ;;
-  *) echo "Unsupported OS: $OS"; exit 1 ;;
+  *) echo "Unsupported OS: $OS (octo is Linux-only)"; exit 1 ;;
 esac
-
-URL="https://github.com/${REPO}/releases/latest/download/${ARTIFACT}"
 
 mkdir -p "$INSTALL_DIR"
 
-echo "Downloading $ARTIFACT..."
-curl -fsSL "$URL" -o "$INSTALL_DIR/$BIN"
-chmod +x "$INSTALL_DIR/$BIN"
+echo "Downloading $CLI_ARTIFACT..."
+curl -fsSL "https://github.com/${REPO}/releases/latest/download/${CLI_ARTIFACT}" -o "$INSTALL_DIR/octo"
+chmod +x "$INSTALL_DIR/octo"
+echo "Installed to $INSTALL_DIR/octo"
 
-echo "Installed to $INSTALL_DIR/$BIN"
-
-# octo orchestrates lair and child agents as Docker containers on this host.
-# Surface the Docker requirement loudly so the user doesn't run `octo init`
-# blind. Soft-warn — don't exit, since some users install the CLI as part of
-# a wider provisioning script that brings Docker up afterwards.
-if ! command -v docker > /dev/null 2>&1; then
-  echo ""
-  echo "Warning: 'docker' was not found on PATH."
-  echo "  octo runs lair and child agents as Docker containers; you'll need"
-  echo "  Docker installed before 'octo init' will work."
-  echo "  See https://docs.docker.com/get-docker/"
-elif ! docker info > /dev/null 2>&1; then
-  echo ""
-  echo "Note: Docker is installed but its daemon isn't reachable."
-  echo "  Start Docker (or the daemon socket) before running 'octo init'."
-fi
+echo "Downloading $LAIR_ARTIFACT..."
+curl -fsSL "https://github.com/${REPO}/releases/latest/download/${LAIR_ARTIFACT}" -o "$INSTALL_DIR/octo-lair"
+chmod +x "$INSTALL_DIR/octo-lair"
+echo "Installed to $INSTALL_DIR/octo-lair"
 
 # Warn if ~/.local/bin is not in PATH.
 case ":$PATH:" in
@@ -58,7 +40,7 @@ case ":$PATH:" in
   *) echo "Add to your shell: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
 
-# Install shell completions.
+# Install shell completions for octo.
 DETECTED_SHELL=$(basename "${SHELL:-sh}")
 COMPLETIONS_INSTALLED=""
 case "$DETECTED_SHELL" in
@@ -66,7 +48,7 @@ case "$DETECTED_SHELL" in
     COMP_DIR="$HOME/.zfunc"
     COMP_FILE="$COMP_DIR/_octo"
     mkdir -p "$COMP_DIR"
-    "$INSTALL_DIR/$BIN" completions zsh > "$COMP_FILE"
+    "$INSTALL_DIR/octo" completions zsh > "$COMP_FILE"
     echo "Zsh completions installed to $COMP_FILE"
     ZSHRC="$HOME/.zshrc"
     if ! grep -q 'fpath.*\.zfunc' "$ZSHRC" 2>/dev/null; then
@@ -78,12 +60,8 @@ case "$DETECTED_SHELL" in
   bash)
     COMP_FILE="$HOME/.local/share/bash-completion/completions/octo"
     mkdir -p "$(dirname "$COMP_FILE")"
-    "$INSTALL_DIR/$BIN" completions bash > "$COMP_FILE"
+    "$INSTALL_DIR/octo" completions bash > "$COMP_FILE"
     echo "Bash completions installed to $COMP_FILE"
-    # Source the file directly from ~/.bashrc so it works even without the
-    # bash-completion package (which is required for the XDG directory to be
-    # picked up automatically). Match the exact source line so unrelated
-    # mentions of "octo" elsewhere in .bashrc don't suppress the append.
     BASHRC="$HOME/.bashrc"
     SOURCE_LINE=". $COMP_FILE"
     if ! grep -qxF "$SOURCE_LINE" "$BASHRC" 2>/dev/null; then
@@ -95,7 +73,7 @@ case "$DETECTED_SHELL" in
   fish)
     COMP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
     mkdir -p "$COMP_DIR"
-    "$INSTALL_DIR/$BIN" completions fish > "$COMP_DIR/octo.fish"
+    "$INSTALL_DIR/octo" completions fish > "$COMP_DIR/octo.fish"
     echo "Fish completions installed to $COMP_DIR/octo.fish"
     COMPLETIONS_INSTALLED=1
     ;;
@@ -110,9 +88,9 @@ if [ -n "$COMPLETIONS_INSTALLED" ]; then
   echo "Start a new shell (or run 'exec $DETECTED_SHELL') to activate them."
   echo ""
 fi
-echo "Next: run 'octo init --anthropic-api-key <key>' to bootstrap a lair Docker"
-echo "      container on this host. Optional flags: --gh-token, --openai-api-key,"
-echo "      --api-url, --model. All values persist to ~/.octo/config.json."
+echo "Next: run 'octo init --anthropic-api-key <key> --model <model>' to bootstrap"
+echo "      lair on this host as a background process. Optional flags:"
+echo "      --openai-api-key, --api-url, --env KEY=VALUE."
 echo ""
 
-"$INSTALL_DIR/$BIN" --help
+"$INSTALL_DIR/octo" --help
