@@ -26,9 +26,10 @@ pub use app::{
 
 pub mod background;
 pub use background::{
-    BackgroundTaskParams, BackgroundTaskResult, TaskRecord, TaskStatus,
-    cancel_task, completion_chat_event, finalize_task, register_task,
-    run_background_task_tool, spawn_background_task, tasks_wire_json,
+    BackgroundCommandParams, BackgroundCommandResult, TaskRecord, TaskStatus,
+    cancel_task, completion_chat_event, finalize_task, record_task_progress,
+    register_task, run_command_in_background_tool, spawn_background_command,
+    tasks_wire_json,
 };
 
 pub mod relay;
@@ -1720,19 +1721,17 @@ fn shared_tool_guidance() -> &'static str {
      \n- Never pad responses."
 }
 
-/// Background-task tool note shared by every role that exposes
-/// `run_background_task`.
+/// Background-command tool note shared by every role that exposes
+/// `run_command_in_background`.
 fn background_task_note() -> &'static str {
-    "\n\nYou have a run_background_task(task_description) tool. Use it to spawn a long-running \
-     task that should not block the current chat turn — long builds, multi-step research, \
-     repo-wide refactors. The task runs as an isolated agentic loop with the same tools you \
-     have, starting from `task_description` as its first user message; it does not inherit \
-     conversation history, so make the description self-contained. \
-     When it completes, the result is injected into this conversation as a 'Background task … \
-     completed' message and you'll be invoked autonomously to react. If no follow-up action \
-     is genuinely useful, reply with one short acknowledgement line rather than producing \
-     prose; only continue working if the result clearly demands it. Do not use this tool for \
-     trivially short tasks — the user prefers a direct reply."
+    "\n\nYou have a run_command_in_background(command) tool. Use it to run a shell command \
+     that would otherwise block the current chat turn — long builds, big test suites, large \
+     downloads. The command is executed with `bash -c` and its stdout/stderr is captured. \
+     When it completes, the output is injected into this conversation as a 'Background \
+     command … completed' message and you'll be invoked autonomously to react. If no \
+     follow-up action is genuinely useful, reply with one short acknowledgement line rather \
+     than producing prose; only continue working if the result clearly demands it. Do not \
+     use this tool for fast commands — prefer the regular `bash` tool."
 }
 
 pub fn build_system_prompt(repo_path: &str) -> String {

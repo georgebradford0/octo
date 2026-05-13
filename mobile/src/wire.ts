@@ -59,13 +59,13 @@ export interface ContainerInfo {
  *  pushed as a `tasks` event on /stream open and after every spawn / completion.
  *  `started_at` and `completed_at` are Unix-epoch seconds. */
 export interface TaskRecord {
-  task_id:          string
-  task_description: string
-  status:           'running' | 'done' | 'error' | 'cancelled'
-  started_at:       number
-  completed_at:     number | null
-  summary:          string | null
-  cost_usd:         number | null
+  task_id:      string
+  command:      string
+  status:       'running' | 'done' | 'error' | 'cancelled'
+  started_at:   number
+  completed_at: number | null
+  summary:      string | null
+  cost_usd:     number | null
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

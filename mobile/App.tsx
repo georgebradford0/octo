@@ -598,7 +598,7 @@ const TaskRow = memo(function TaskRow({ task, onCancel }: { task: TaskRecord; on
       </View>
       <TouchableOpacity activeOpacity={0.7} onPress={() => setExpanded(v => !v)}>
         <Text style={s.taskDescription} numberOfLines={expanded ? undefined : 2} selectable>
-          {task.task_description}
+          {task.command}
         </Text>
         {task.summary != null && task.summary.length > 0 && (
           <Text style={s.taskSummary} numberOfLines={expanded ? undefined : 2} selectable>

@@ -24,12 +24,12 @@ use octo_core::{
     self,
     build_agent_system_prompt, build_system_prompt,
     build_tools_with_mcp, cancel_task as core_cancel_task, chain_executor_with_mcp,
-    completion_chat_event, data_dir, finalize_task, now_secs, register_task, tasks_wire_json,
-    TaskRecord, TaskStatus,
+    completion_chat_event, data_dir, finalize_task, now_secs, record_task_progress,
+    register_task, tasks_wire_json, TaskRecord, TaskStatus,
     get_branches_for_repo, init_mcp_pool, init_shell_env, load_or_generate_keypair, read_config,
-    resolve_api_key, resolve_model, run_background_task_tool, run_noise_proxy, send_message,
-    spawn_background_task, to_base32, write_config, ApiMessage, AnthropicTool,
-    BackgroundTaskParams, ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32,
+    resolve_api_key, resolve_model, run_command_in_background_tool, run_noise_proxy, send_message,
+    spawn_background_command, to_base32, write_config, ApiMessage, AnthropicTool,
+    BackgroundCommandParams, ChatEvent, Config, ContentBlock, McpPool, DEV_PUBKEY_BASE32,
     DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC, KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
     StreamState, buffer_and_fanout, chat_event_to_wire_json, messages_to_history,
     parse_ping_id, parse_pong_id,
@@ -451,7 +451,7 @@ async fn update_config_handler(Json(patch): Json<Config>) -> StatusCode {
 }
 
 fn make_extra_tools() -> Vec<AnthropicTool> {
-    vec![run_background_task_tool()]
+    vec![run_command_in_background_tool()]
 }
 
 fn make_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_json::Value)
@@ -462,59 +462,52 @@ fn make_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
         let state  = state.clone();
         Box::pin(async move {
             match name.as_str() {
-                "run_background_task" => exec_run_background_task(state, input).await,
+                "run_command_in_background" => exec_run_command_in_background(state, input).await,
                 other => format!("unknown tool: {other}"),
             }
         })
     }))
 }
 
-async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value) -> String {
-    let task_description = match input.get("task_description").and_then(|v| v.as_str()) {
+async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let command = match input.get("command").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return "error: missing or empty 'task_description'".to_string(),
+        _ => return "error: missing or empty 'command'".to_string(),
     };
-
-    let api_key = match resolve_api_key() {
-        Some(k) => k,
-        None    => return "error: no API key configured for background task".to_string(),
-    };
-    let model = resolve_model();
 
     let task_id = format!("bg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    info!("[agent/run_background_task] spawning {task_id} ({} chars)", task_description.len());
-
-    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &make_extra_tools()).await;
-    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), make_extra_executor(state.clone()));
+    info!("[agent/run_command_in_background] spawning {task_id} ({} chars)", command.len());
 
     // Register the task *before* spawning so the per-chat registry is in place
     // by the time the deliver closure can possibly run. See lair.rs for the
     // symmetric parent-side wiring.
     let cancel = CancellationToken::new();
     register_task(&state.stream_state, &data_dir(), TaskRecord {
-        task_id:          task_id.clone(),
-        task_description: task_description.clone(),
-        status:           TaskStatus::Running,
-        started_at:       now_secs(),
-        completed_at:     None,
-        summary:          None,
-        cost_usd:         None,
+        task_id:      task_id.clone(),
+        command:      command.clone(),
+        status:       TaskStatus::Running,
+        started_at:   now_secs(),
+        completed_at: None,
+        summary:      None,
+        cost_usd:     None,
     }, cancel.clone());
     buffer_and_fanout(&state.stream_state, tasks_wire_json(&state.stream_state));
 
-    let params = BackgroundTaskParams {
-        task_id:          task_id.clone(),
-        task_description,
-        system:           state.system.clone(),
-        model,
-        api_key,
-        cwd:              state.cwd.clone(),
-        extra_tools,
-        extra_executor:   executor,
+    let params = BackgroundCommandParams {
+        task_id: task_id.clone(),
+        command,
+        cwd:     state.cwd.clone(),
+    };
+
+    let progress_state   = state.clone();
+    let progress_task_id = task_id.clone();
+    let progress = move |output_tail: &str| {
+        record_task_progress(&progress_state.stream_state, &progress_task_id, output_tail);
+        buffer_and_fanout(&progress_state.stream_state, tasks_wire_json(&progress_state.stream_state));
     };
 
     let stream_state_arc = state.clone();
-    spawn_background_task(params, cancel, move |outcome| {
+    spawn_background_command(params, cancel, progress, move |outcome| {
         finalize_task(&stream_state_arc.stream_state, &data_dir(), &outcome);
         buffer_and_fanout(&stream_state_arc.stream_state, tasks_wire_json(&stream_state_arc.stream_state));
 
@@ -523,8 +516,8 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         // Translated to user-role text at API serialisation time so providers
         // see it as ordinary input. Mirrors the lair-side wiring.
         let injection = format!(
-            "Background task {} completed (status={}). Original task: {}\n\nResult:\n{}",
-            outcome.task_id, outcome.status, outcome.task_description, outcome.summary
+            "Background command {} completed (status={}). Command: {}\n\nOutput:\n{}",
+            outcome.task_id, outcome.status, outcome.command, outcome.summary
         );
         {
             let mut msgs = stream_state_arc.messages.lock().unwrap();
@@ -558,7 +551,7 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         try_continue_auto(stream_state_arc.clone());
     });
 
-    format!("Background task {task_id} started. The user will be notified when it completes.")
+    format!("Background command {task_id} started. The user will be notified when it completes.")
 }
 
 // ── Entry ─────────────────────────────────────────────────────────────────────

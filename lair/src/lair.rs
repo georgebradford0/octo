@@ -26,11 +26,11 @@ use octo_core::{
     self,
     build_tools_with_mcp, chain_executor_with_mcp,
     cancel_task as core_cancel_task, completion_chat_event, ensure_ssh_keypair, finalize_task,
-    init_mcp_pool, init_shell_env, load_or_generate_keypair, now_secs, register_task,
-    tasks_wire_json, TaskRecord, TaskStatus,
+    init_mcp_pool, init_shell_env, load_or_generate_keypair, now_secs, record_task_progress,
+    register_task, tasks_wire_json, TaskRecord, TaskStatus,
     relay as relay_client, RelaySigner,
-    resolve_api_key, resolve_model, run_noise_proxy, run_background_task_tool, send_message,
-    spawn_background_task, to_base32, ApiMessage, AnthropicTool, BackgroundTaskParams, ChatEvent,
+    resolve_api_key, resolve_model, run_noise_proxy, run_command_in_background_tool, send_message,
+    spawn_background_command, to_base32, ApiMessage, AnthropicTool, BackgroundCommandParams, ChatEvent,
     ContentBlock, McpPool, DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
     KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
     StreamState, buffer_and_fanout, chat_event_to_wire_json, messages_to_history,
@@ -722,8 +722,8 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 - **`terminate_agent(name)`** — *destructive, local agents only.* Removes the container and both named volumes (`agent-<name>-data`, `agent-<name>-workspace`). For remote agents, returns instructions to terminate the VM via the provisioning MCP first, then call `forget_agent`. Always run `list_agents` first to confirm the exact name; confirm with the user before calling unless the request was unambiguous.
 - **`forget_agent(name)`** — *registry-only.* Removes the row without touching Docker or the VM. Used after terminating a remote instance via a provisioning MCP. Don't use on a live local agent; use `terminate_agent` instead.
 - **`restart_all_containers`** — restart every local agent container. Use after pulling a new image; not for routine flakes. Has no effect on remote agents.
-- **`run_background_task(task_description)`** — spawn a long-running task in the background and return immediately. The user is notified when it finishes. Use for work that would otherwise block the current turn for minutes (long builds, multi-step research, repo-wide refactors). The task description must be self-contained — the background loop does not inherit conversation history.
-  - When a background task completes, the result is injected into this conversation as a "Background task … completed" message and you'll be invoked autonomously to react. **If no follow-up action is genuinely useful, reply with one short line acknowledging the result** (e.g. "Background task done — no further action needed.") rather than producing prose. Only continue working if the result clearly demands it (a reported failure to investigate, a ready artefact the user would want to use next, etc).
+- **`run_command_in_background(command)`** — run a shell command (`bash -c`) in the background and return immediately. The user is notified when it finishes. Use for commands that would otherwise block the current turn for minutes (long builds, big test suites, large downloads). Prefer the regular `bash` tool for anything fast.
+  - When the command completes, the output is injected into this conversation as a "Background command … completed" message and you'll be invoked autonomously to react. **If no follow-up action is genuinely useful, reply with one short line acknowledging the result** (e.g. "Background command done — no further action needed.") rather than producing prose. Only continue working if the result clearly demands it (a reported failure to investigate, a ready artefact the user would want to use next, etc).
 
 # General tools (shared with children)
 - `bash` — shell commands; use for git, gh, curl, one-offs. **No `docker` CLI is available** — use the orchestration tools above for anything Docker-related.
@@ -970,7 +970,7 @@ fn lair_extra_tools() -> Vec<AnthropicTool> {
         terminate_agent_tool(),
         forget_agent_tool(),
         restart_all_containers_tool(),
-        run_background_task_tool(),
+        run_command_in_background_tool(),
     ]
 }
 
@@ -989,7 +989,7 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
                 "terminate_agent"          => exec_terminate_agent(state, input).await,
                 "forget_agent"             => exec_forget_agent(state, input).await,
                 "restart_all_containers"   => exec_restart_all_containers(state).await,
-                "run_background_task"      => exec_run_background_task(state, input).await,
+                "run_command_in_background" => exec_run_command_in_background(state, input).await,
                 other => format!("unknown tool: {other}"),
             }
         })
@@ -1532,54 +1532,45 @@ async fn exec_forget_agent(state: Arc<AppState>, input: serde_json::Value) -> St
     }
 }
 
-async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value) -> String {
-    let task_description = match input.get("task_description").and_then(|v| v.as_str()) {
+async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let command = match input.get("command").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return "error: missing or empty 'task_description'".to_string(),
+        _ => return "error: missing or empty 'command'".to_string(),
     };
-
-    let api_key = match resolve_api_key() {
-        Some(k) => k,
-        None    => return "error: no API key configured for background task".to_string(),
-    };
-    let model = resolve_model();
 
     let task_id = format!("bg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    info!("[lair/run_background_task] spawning {task_id} ({} chars)", task_description.len());
-
-    // Build a fresh tools+executor pair so the background task gets the same
-    // capabilities the main loop has, including MCP servers.
-    let extra_tools = build_tools_with_mcp(&state.mcp_pool, &lair_extra_tools()).await;
-    let executor    = chain_executor_with_mcp(state.mcp_pool.clone(), lair_extra_executor(state.clone()));
+    info!("[lair/run_command_in_background] spawning {task_id} ({} chars)", command.len());
 
     // Register the task *before* spawning so the per-chat registry is in place
     // by the time the deliver closure can possibly run. The cancel token is
     // shared between the registry (so the user can stop it) and the spawn.
     let cancel = CancellationToken::new();
     register_task(&state.stream_state, &data_dir(), TaskRecord {
-        task_id:          task_id.clone(),
-        task_description: task_description.clone(),
-        status:           TaskStatus::Running,
-        started_at:       now_secs(),
-        completed_at:     None,
-        summary:          None,
-        cost_usd:         None,
+        task_id:      task_id.clone(),
+        command:      command.clone(),
+        status:       TaskStatus::Running,
+        started_at:   now_secs(),
+        completed_at: None,
+        summary:      None,
+        cost_usd:     None,
     }, cancel.clone());
     buffer_and_fanout(&state.stream_state, tasks_wire_json(&state.stream_state));
 
-    let params = BackgroundTaskParams {
-        task_id:          task_id.clone(),
-        task_description,
-        system:           state.system.clone(),
-        model,
-        api_key,
-        cwd:              "/".to_string(),
-        extra_tools,
-        extra_executor:   executor,
+    let params = BackgroundCommandParams {
+        task_id: task_id.clone(),
+        command,
+        cwd:     "/".to_string(),
+    };
+
+    let progress_state   = state.clone();
+    let progress_task_id = task_id.clone();
+    let progress = move |output_tail: &str| {
+        record_task_progress(&progress_state.stream_state, &progress_task_id, output_tail);
+        buffer_and_fanout(&progress_state.stream_state, tasks_wire_json(&progress_state.stream_state));
     };
 
     let stream_state_arc = state.clone();
-    spawn_background_task(params, cancel, move |outcome| {
+    spawn_background_command(params, cancel, progress, move |outcome| {
         finalize_task(&stream_state_arc.stream_state, &data_dir(), &outcome);
         buffer_and_fanout(&stream_state_arc.stream_state, tasks_wire_json(&stream_state_arc.stream_state));
         // Persist a `bg_complete` row so the model sees the result on its next
@@ -1587,8 +1578,8 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         // Translated to user-role text at API serialisation time so providers
         // see it as ordinary input.
         let injection = format!(
-            "Background task {} completed (status={}). Original task: {}\n\nResult:\n{}",
-            outcome.task_id, outcome.status, outcome.task_description, outcome.summary
+            "Background command {} completed (status={}). Command: {}\n\nOutput:\n{}",
+            outcome.task_id, outcome.status, outcome.command, outcome.summary
         );
         {
             let mut msgs = stream_state_arc.messages.lock().unwrap();
@@ -1623,7 +1614,7 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         let signer = stream_state_arc.relay_signer.clone();
         let url    = stream_state_arc.relay_url.clone();
         if !url.is_empty() {
-            let title = format!("Background task {}", outcome.status);
+            let title = format!("Background command {}", outcome.status);
             let body  = outcome.summary.chars().take(120).collect::<String>();
             tokio::spawn(async move {
                 relay_client::notify(&url, &signer, "task_complete", Some(&title), Some(&body)).await;
@@ -1636,7 +1627,7 @@ async fn exec_run_background_task(state: Arc<AppState>, input: serde_json::Value
         try_continue_auto(stream_state_arc.clone());
     });
 
-    format!("Background task {task_id} started. The user will be notified when it completes.")
+    format!("Background command {task_id} started. The user will be notified when it completes.")
 }
 
 async fn exec_restart_all_containers(state: Arc<AppState>) -> String {
