@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-05-12
+
+### Changed
+
+- **BREAKING — `gh_token` removed from `config.json`.** `GH_TOKEN` is now sourced exclusively from lair's process env (operator-supplied via `octo init --env GH_TOKEN=…`, or in dev forwarded from the host shell by `start_dev.sh`). Lair reads it via `std::env::var("GH_TOKEN")` when forwarding to children, cloning for remote agents, or shelling out to `gh` / `git`. The trade-off is explicit: `GH_TOKEN` now appears in `docker inspect lair`, unlike the config-mounted secrets. Existing `config.json` files that still carry a `gh_token` field deserialize fine (the field is silently dropped on the next write) — but it stops being honoured, so set the env var. The `octo` CLI's `--gh-token` flag is removed from `init` and `config set`.
+- `${GH_TOKEN}` references in `mcp.json` now fall through to `std::env::var()` (the well-known-name mapping in `expand_var` was dropped for this one variable since the config field no longer exists).
+
+### Fixed
+
+- **Child agent containers were booting with `--role lair` instead of `--role agent`.** `docker_ops::create_agent_container` set `cmd:` in the bollard `ContainerConfig`, which Docker appends to the image's exec-form `ENTRYPOINT` rather than substituting. The effective child argv ended up as `/usr/local/bin/octo-lair --role lair /usr/local/bin/octo-lair --role agent`, so the parent role won and clap then errored on the trailing positionals. Switched to `entrypoint:` so the image's ENTRYPOINT is fully replaced.
+- System prompt no longer suggests `bash docker …` for read-only diagnostics — the lair image doesn't ship a Docker CLI (orchestration goes through the typed tools), and the prior hint made the LLM mis-report `command not found` as "Docker isn't installed."
+
+### Removed
+
+- `awscli` is no longer installed in the runtime image — cloud provisioning is handled by MCP servers now, so the ~70 MB was dead weight.
+
 ## [0.6.3] - 2026-05-12
 
 ### Changed
