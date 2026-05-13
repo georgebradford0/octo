@@ -10,7 +10,9 @@ Do **not** commit debug/diagnostic logging (`println!`, `console.log`, etc. adde
 
 ## Platform
 
-Linux only. macOS and Windows are out of scope — the `octo` CLI's `init` flow assumes Linux process semantics (`/proc`, `kill(pid, 0)`, etc.), and the binaries are only built for Linux targets.
+Linux and macOS. Both run the CLI and lair natively (POSIX `kill(pid, 0)`, SIGTERM, `process_group(0)`); the cloud-init userdata that `mint_bootstrap_userdata` produces for remote agents is always Linux. Windows is out of scope.
+
+CI publishes per-target binaries for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, and `aarch64-apple-darwin`. `scripts/get-cli.sh` auto-detects and downloads the right pair.
 
 ## Binaries
 
