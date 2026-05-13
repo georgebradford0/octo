@@ -40,12 +40,13 @@ export type ClientFrame =
 
 /** A child agent surfaced to mobile by lair's `agents` event. Mobile reaches
  *  any agent's chat via `ws://<lair-tunnel>/agents/<id>/stream` — there is no
- *  direct port/pubkey/host for an agent because lair proxies all traffic. */
+ *  direct port/pubkey/host for an agent because lair proxies all traffic.
+ *  `kind` is `"local"` or `"remote"`; advisory, the proxy URL is the same. */
 export interface AgentInfo {
   id:      string  // = name; used in the proxy URL
   name:    string
-  git_url: string
   status:  string  // 'running' | 'stopped' | 'pending'
+  kind:    string  // 'local' | 'remote'
 }
 
 /** Mirrors octo_core::TaskRecord. */

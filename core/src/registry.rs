@@ -1,14 +1,11 @@
 //! Persisted registry of agent (child) processes managed by lair.
 //!
-//! Lair spawns each child as an `octo-lair --role agent` OS process; this
-//! registry records what was spawned and how to reach it. It is the source
-//! of truth for which agents exist and what port each owns. Process liveness
-//! (via pid) is checked by lair's poller and reconciled into `status`.
+//! Lair spawns each local child as an `octo-lair --role agent` OS process
+//! and registers it here. Remote agents (provisioned on a separate VM via a
+//! cloud-MCP and bootstrapped over SSH) are also tracked in the same file,
+//! distinguished by `host.is_some()`.
 //!
-//! The file lives at `<data_dir>/agents.json`. Single-process writer (the
-//! lair binary), so no fs locking is needed — a `Mutex<Registry>` in
-//! `AppState` serialises in-process access, and every mutation goes through
-//! `save()` which atomically renames a temp file onto the target.
+//! The file lives at `<data_dir>/agents.json`. Lair is the sole writer.
 
 use std::{
     fs,
@@ -23,11 +20,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
-    /// Process is alive.
+    /// Process is alive (local) or last-known reachable (remote).
     Running,
-    /// Process exited (clean or crashed).
+    /// Process exited (clean or crashed). For remote agents, this is only set
+    /// explicitly — there's no continuous health probe.
     Stopped,
-    /// Spawned but not yet observed alive by the poller.
+    /// Spawned (or being bootstrapped over SSH) but not yet observed live.
     Pending,
 }
 
@@ -42,28 +40,63 @@ impl AgentStatus {
 }
 
 /// One agent the lair owns.
+///
+/// `git_url` deliberately isn't stored — it's a spawn-time arg, not a
+/// permanent property. The cloned repo (if any) lives in the agent's
+/// workspace dir, and `bootstrap::ensure_workspace` detects it on restart
+/// via the `.git` marker.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentRecord {
-    /// Stable, human-readable identifier. Doubles as the `id` mobile sees.
+    /// Stable, human-readable identifier. Doubles as the wire `id`.
     pub name:           String,
-    /// OS pid of the last `octo-lair --role agent` process spawned for this
-    /// agent. `None` if the process has exited / was never spawned. Lair's
-    /// poller flips status based on `kill(pid, 0)` liveness.
+    /// OS pid of the last spawned `octo-lair --role agent` process. Local
+    /// agents only — `None` for remote agents and for local agents whose
+    /// process has exited.
+    #[serde(default)]
     pub pid:            Option<u32>,
-    /// Local TCP port on which the child's HTTP server binds (loopback only).
-    /// Lair proxies mobile traffic to this port. Allocated from 30100–30199.
+    /// Port lair connects to when proxying mobile traffic.
+    ///   - Local agent: the loopback HTTP port the child binds (30100–30199).
+    ///   - Remote agent: the public Noise port the VM publishes.
     pub port:           u16,
-    /// Git URL the agent was launched against, if any.
-    pub git_url:        Option<String>,
-    /// Last observed status. Reconciled against pid liveness on every poll.
+    /// External host for remote agents (`Some(<public_ip>)`). `None` for
+    /// local agents (they're reached on 127.0.0.1).
+    #[serde(default)]
+    pub host:           Option<String>,
+    /// Base32-encoded Noise static pubkey. Only set for remote agents — lair
+    /// uses it to verify the Noise handshake when opening a proxy tunnel.
+    /// Local agents speak plain HTTP on loopback, so this stays `None`.
+    #[serde(default)]
+    pub pubkey:         Option<String>,
+    /// Last observed status. Reconciled against pid liveness for local
+    /// agents; left untouched for remote agents (they age out on explicit
+    /// `forget_agent`).
     pub status:         AgentStatus,
     /// Lair version (`CARGO_PKG_VERSION`) at the time the row was created.
-    /// Surfaced in `octo agents list` so the operator can see staleness.
     pub binary_version: String,
     /// Unix seconds when the record was created.
     pub created_at:     u64,
-    /// Unix seconds the registry last observed the process alive.
+    /// Unix seconds the registry last observed the agent live.
     pub last_seen:      u64,
+    /// Cloud instance id (e.g. `i-0abc…`) for remote agents.
+    #[serde(default)]
+    pub instance_id:    Option<String>,
+    /// Free-form provider tag for remote agents (`aws`, `hetzner`, …). Lair
+    /// doesn't interpret it; it's surfaced to the LLM so subsequent tool
+    /// calls (e.g. terminate) know which MCP to invoke.
+    #[serde(default)]
+    pub provider:       Option<String>,
+    /// Opaque provider-specific blob (region, instance_type, image id, …).
+    #[serde(default)]
+    pub metadata:       serde_json::Value,
+}
+
+impl AgentRecord {
+    /// True when this agent lives on a remote VM (registered via
+    /// `register_remote_agent`), false when it's a local process on the
+    /// lair host.
+    pub fn is_remote(&self) -> bool {
+        self.host.is_some()
+    }
 }
 
 /// On-disk registry. Held under a `Mutex` in `AppState`.
@@ -150,9 +183,6 @@ impl Registry {
     pub fn update_last_seen(&mut self, name: &str, ts: u64) -> Result<bool> {
         let Some(r) = self.get_mut(name) else { return Ok(false); };
         r.last_seen = ts;
-        // last_seen changes constantly; don't fsync the file every poll —
-        // the in-memory copy is the live one and the persisted copy will
-        // catch up on the next structural change.
         Ok(true)
     }
 
@@ -171,8 +201,7 @@ impl Registry {
         range.into_iter().find(|p| !used.contains(p))
     }
 
-    /// Write the registry to disk atomically (temp file + rename on the same
-    /// filesystem). Safe to call from any thread that holds a write lock.
+    /// Write the registry to disk atomically (temp file + rename).
     pub fn save(&self) -> Result<()> {
         let file = RegistryFile { agents: self.agents.clone() };
         let json = serde_json::to_string_pretty(&file)
@@ -186,8 +215,7 @@ impl Registry {
     }
 }
 
-/// Map a Unix `kill(pid, 0)` liveness result to a status. Used by lair's
-/// poller — keeps `lair.rs` a thin mapper.
+/// Map a Unix `kill(pid, 0)` liveness result to a status.
 pub fn status_from_alive(alive: bool) -> AgentStatus {
     if alive { AgentStatus::Running } else { AgentStatus::Stopped }
 }

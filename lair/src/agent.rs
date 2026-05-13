@@ -30,9 +30,11 @@ use octo_core::{
     build_tools_with_mcp, cancel_task as core_cancel_task, chain_executor_with_mcp,
     completion_chat_event, data_dir, finalize_task, now_secs, record_task_progress,
     register_task, tasks_wire_json, TaskRecord, TaskStatus,
-    get_branches_for_repo, init_mcp_pool, init_shell_env, read_config,
-    resolve_api_key, resolve_model, run_command_in_background_tool, send_message,
-    spawn_background_command, ApiMessage, AnthropicTool,
+    get_branches_for_repo, init_mcp_pool, init_shell_env,
+    load_or_generate_keypair, read_config,
+    resolve_api_key, resolve_model, run_command_in_background_tool,
+    run_noise_proxy, send_message,
+    spawn_background_command, to_base32, ApiMessage, AnthropicTool,
     BackgroundCommandParams, ChatEvent, Config, ContentBlock, McpPool,
     KEEPALIVE_INTERVAL, KEEPALIVE_MAX_MISSED,
     StreamState, buffer_and_fanout, chat_event_to_wire_json, messages_to_history,
@@ -475,6 +477,23 @@ async fn exec_run_command_in_background(state: Arc<AppState>, input: serde_json:
     format!("Background command {task_id} started. The user will be notified when it completes.")
 }
 
+// ── Agent identity ────────────────────────────────────────────────────────────
+
+/// Write `<data_dir>/agent-info.json` with this agent's externally-visible
+/// identity. Idempotent — overwritten on each boot. Used by remote-agent
+/// registration: lair SSH-reads this file to learn the agent's Noise pubkey
+/// + public port after cloud-init completes.
+fn write_agent_info(dir: &std::path::Path, pubkey_b32: &str, public_port: u16) -> std::io::Result<()> {
+    let info = serde_json::json!({
+        "pubkey":   pubkey_b32,
+        "port":     public_port,
+        "ready_at": octo_core::now_secs(),
+    });
+    let path = dir.join("agent-info.json");
+    std::fs::create_dir_all(dir).ok();
+    std::fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default())
+}
+
 // ── Entry ─────────────────────────────────────────────────────────────────────
 
 pub async fn run() -> anyhow::Result<()> {
@@ -493,7 +512,27 @@ pub async fn run() -> anyhow::Result<()> {
         .ok().and_then(|v| v.parse().ok())
         .unwrap_or(30100);
 
-    info!("[agent] starting on 127.0.0.1:{port}");
+    // Optional Noise responder for remote agents. The cloud-init userdata
+    // produced by `mint_bootstrap_userdata` sets `AGENT_NOISE_PORT` so the
+    // VM exposes the agent over a Noise-encrypted public port; local agents
+    // leave it unset and bind only on the loopback HTTP port (lair reaches
+    // them on 127.0.0.1).
+    let agent_noise_port: Option<u16> = std::env::var("AGENT_NOISE_PORT")
+        .ok().and_then(|v| v.parse().ok());
+
+    info!("[agent] starting on 127.0.0.1:{port} (noise_port={agent_noise_port:?})");
+
+    if let Some(noise_port) = agent_noise_port {
+        let key_file = std::env::var("NOISE_KEY_FILE")
+            .unwrap_or_else(|_| data_dir().join("noise_key.bin").to_string_lossy().to_string());
+        let (static_private, static_public) = load_or_generate_keypair(&key_file);
+        let pubkey_b32 = to_base32(&static_public);
+        info!("[agent] noise_pubkey={pubkey_b32}");
+        if let Err(e) = write_agent_info(&data_dir(), &pubkey_b32, noise_port) {
+            warn!("[agent] could not write agent-info.json: {e}");
+        }
+        tokio::spawn(run_noise_proxy(static_private, noise_port, port));
+    }
 
     let workspace = std::path::PathBuf::from(
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "workspace".to_string())

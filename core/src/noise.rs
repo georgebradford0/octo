@@ -78,6 +78,25 @@ pub fn to_base32(data: &[u8]) -> String {
     out
 }
 
+/// Inverse of `to_base32`. Returns `None` on invalid characters.
+pub fn from_base32(s: &str) -> Option<Vec<u8>> {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for c in s.chars() {
+        let c = c.to_ascii_uppercase();
+        let v = ALPHA.iter().position(|&x| x as char == c)? as u32;
+        buf = (buf << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
 pub fn load_or_generate_keypair(path: &str) -> (Vec<u8>, Vec<u8>) {
     if let Ok(bytes) = std::fs::read(path) {
         if bytes.len() == 64 {
@@ -255,6 +274,159 @@ pub async fn handle_noise_connection(
     tokio::select! { _ = task_a => { abort_b.abort(); } _ = task_b => { abort_a.abort(); } }
     debug!("[noise] proxy session closed peer={peer:?}");
     Ok(())
+}
+
+// ── Outbound Noise tunnels (lair → remote agent) ─────────────────────────────
+
+/// Run the Noise XX handshake as the **initiator** (client side), verifying
+/// that the responder's static pubkey matches `expected_remote_static`.
+/// Returns the transport state ready for `read_message` / `write_message`.
+pub async fn noise_handshake_initiator(
+    stream: &mut tokio::net::TcpStream,
+    static_private: &[u8],
+    expected_remote_static: &[u8],
+) -> anyhow::Result<snow::TransportState> {
+    let mut hs = snow::Builder::new(NOISE_PATTERN.parse()?)
+        .local_private_key(static_private)
+        .build_initiator()?;
+
+    let mut buf = vec![0u8; MAX_FRAME_SIZE];
+
+    // msg1 → responder
+    let n = hs.write_message(&[], &mut buf)?;
+    write_noise_frame(stream, &buf[..n]).await?;
+
+    // msg2 ← responder (carries server's static public key inside the encrypted payload)
+    let msg2 = read_noise_frame(stream).await?;
+    hs.read_message(&msg2, &mut buf)?;
+
+    // msg3 → responder
+    let n = hs.write_message(&[], &mut buf)?;
+    write_noise_frame(stream, &buf[..n]).await?;
+
+    let server_static = hs.get_remote_static()
+        .ok_or_else(|| anyhow::anyhow!("noise initiator: no remote static after handshake"))?;
+    if server_static != expected_remote_static {
+        anyhow::bail!(
+            "noise initiator: remote pubkey mismatch (got {}, expected {})",
+            to_base32(server_static),
+            to_base32(expected_remote_static),
+        );
+    }
+    Ok(hs.into_transport_mode()?)
+}
+
+/// Open an outbound Noise tunnel: bind an ephemeral local TCP listener that
+/// accepts ONE inbound plaintext connection and forwards it through Noise to
+/// `remote_host:remote_port`. Returns the local port the caller should
+/// connect to (typically with `tokio_tungstenite::connect_async`).
+///
+/// This is the lair-side counterpart of the mobile app's
+/// `NativeNoiseConnection` — encrypted point-to-point transport for traffic
+/// that crosses the public internet.
+pub async fn open_noise_tunnel(
+    remote_host:     String,
+    remote_port:     u16,
+    expected_pubkey: Vec<u8>,
+    static_private:  Vec<u8>,
+) -> anyhow::Result<u16> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await
+        .map_err(|e| anyhow::anyhow!("bind ephemeral local port: {e}"))?;
+    let local_port = listener.local_addr()?.port();
+
+    tokio::spawn(async move {
+        // Single inbound connection on the loopback; once accepted we drop the
+        // listener so the port can be reclaimed cleanly after the session ends.
+        let (local_stream, _) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => { warn!("[noise/initiator] accept failed: {e}"); return; }
+        };
+        drop(listener);
+
+        let mut remote_stream = match tokio::net::TcpStream::connect(
+            format!("{remote_host}:{remote_port}")
+        ).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("[noise/initiator] connect {remote_host}:{remote_port}: {e}");
+                return;
+            }
+        };
+
+        let transport = match timeout(
+            HANDSHAKE_TIMEOUT,
+            noise_handshake_initiator(&mut remote_stream, &static_private, &expected_pubkey),
+        ).await {
+            Ok(Ok(t))  => t,
+            Ok(Err(e)) => { warn!("[noise/initiator] handshake to {remote_host}:{remote_port}: {e}"); return; }
+            Err(_)     => { warn!("[noise/initiator] handshake timeout to {remote_host}:{remote_port}"); return; }
+        };
+
+        pipe_noise_initiator(local_stream, remote_stream, transport).await;
+        debug!("[noise/initiator] tunnel to {remote_host}:{remote_port} closed");
+    });
+
+    Ok(local_port)
+}
+
+/// Bidirectional pipe between a plaintext local TCP stream and a
+/// Noise-encrypted remote TCP stream (initiator side). Symmetric in spirit
+/// to `handle_noise_connection` but with the roles swapped.
+async fn pipe_noise_initiator(
+    local:     tokio::net::TcpStream,
+    remote:    tokio::net::TcpStream,
+    transport: snow::TransportState,
+) {
+    let transport = Arc::new(Mutex::new(transport));
+    let (mut local_r, mut local_w)   = local.into_split();
+    let (mut remote_r, mut remote_w) = remote.into_split();
+
+    const PLAIN_BUF_SIZE: usize = MAX_FRAME_SIZE - 64;
+
+    let t_enc = transport.clone();
+    let task_out = tokio::spawn(async move {
+        let mut plain = vec![0u8; PLAIN_BUF_SIZE];
+        let mut enc   = vec![0u8; MAX_FRAME_SIZE];
+        loop {
+            let n = local_r.read(&mut plain).await.unwrap_or(0);
+            if n == 0 { break; }
+            let enc_n = match t_enc.lock().unwrap().write_message(&plain[..n], &mut enc) {
+                Ok(n)  => n,
+                Err(_) => break,
+            };
+            let len = (enc_n as u16).to_be_bytes();
+            if remote_w.write_all(&len).await.is_err()          { break; }
+            if remote_w.write_all(&enc[..enc_n]).await.is_err() { break; }
+        }
+    });
+
+    let t_dec = transport.clone();
+    let task_in = tokio::spawn(async move {
+        let mut len_buf = [0u8; 2];
+        let mut enc = vec![0u8; MAX_FRAME_SIZE];
+        let mut dec = vec![0u8; MAX_FRAME_SIZE];
+        loop {
+            if remote_r.read_exact(&mut len_buf).await.is_err() { break; }
+            let len = u16::from_be_bytes(len_buf) as usize;
+            if len > MAX_FRAME_SIZE { break; }
+            match timeout(FRAME_READ_TIMEOUT, remote_r.read_exact(&mut enc[..len])).await {
+                Ok(Ok(_))  => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+            let dec_n = match t_dec.lock().unwrap().read_message(&enc[..len], &mut dec) {
+                Ok(n)  => n,
+                Err(_) => break,
+            };
+            if local_w.write_all(&dec[..dec_n]).await.is_err() { break; }
+        }
+    });
+
+    let abort_out = task_out.abort_handle();
+    let abort_in  = task_in.abort_handle();
+    tokio::select! {
+        _ = task_out => { abort_in.abort();  }
+        _ = task_in  => { abort_out.abort(); }
+    }
 }
 
 pub async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port: u16) {

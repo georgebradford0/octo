@@ -13,7 +13,8 @@ pub use mcp::{McpPool, init_mcp_pool, build_tools_with_mcp, chain_executor_with_
 pub mod noise;
 pub use noise::{
     DEV_PUBKEY_BASE32, DEV_STATIC_PRIVATE, DEV_STATIC_PUBLIC,
-    load_or_generate_keypair, run_noise_proxy, to_base32,
+    load_or_generate_keypair, run_noise_proxy, to_base32, from_base32,
+    open_noise_tunnel,
 };
 
 pub mod app;

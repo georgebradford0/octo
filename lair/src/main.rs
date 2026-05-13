@@ -8,6 +8,7 @@ mod agent;
 mod agent_proc;
 mod bootstrap;
 mod lair;
+mod ssh;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Role {

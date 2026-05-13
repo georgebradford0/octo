@@ -27,16 +27,17 @@ pub async fn list() -> Result<()> {
         println!("No agents.");
         return Ok(());
     }
-    println!("{:<28} {:<8} {:<6} {:<8} {}", "NAME", "STATUS", "PORT", "PID", "GIT URL");
+    println!("{:<28} {:<8} {:<8} {:<6} {:<8} {}", "NAME", "KIND", "STATUS", "PORT", "PID", "HOST");
     println!("{}", "-".repeat(80));
     for a in agents {
         println!(
-            "{:<28} {:<8} {:<6} {:<8} {}",
+            "{:<28} {:<8} {:<8} {:<6} {:<8} {}",
             a.name,
+            if a.is_remote() { "remote" } else { "local" },
             a.status.as_wire_str(),
             a.port,
             a.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
-            a.git_url.as_deref().unwrap_or(""),
+            a.host.as_deref().unwrap_or("127.0.0.1"),
         );
     }
     Ok(())

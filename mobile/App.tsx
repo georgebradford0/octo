@@ -51,8 +51,8 @@ type ConnStatus = 'connecting' | 'ready' | 'streaming' | 'error'
 interface ContainerInfo {
   id:      string
   name:    string
-  git_url: string
   status:  string
+  kind:    string // 'local' | 'remote'
 }
 
 interface Message {
@@ -2028,7 +2028,7 @@ function AppInner() {
                     <View style={[s.containerDot, { backgroundColor: c.status === 'running' ? C.green : C.textMuted }]} />
                     <View style={{ flex: 1 }}>
                       <Text style={s.containerMenuItemName}>{containerDisplayName(c.name)}</Text>
-                      {c.git_url ? <Text style={s.containerMenuItemUrl} numberOfLines={1}>{c.git_url}</Text> : null}
+                      {c.kind === 'remote' ? <Text style={s.containerMenuItemUrl} numberOfLines={1}>remote</Text> : null}
                     </View>
                     <Text style={s.containerMenuItemStatus}>{c.status}</Text>
                   </TouchableOpacity>

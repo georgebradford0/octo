@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added (this revision)
+
+- **Remote agents restored** as native processes on a Linux VM. Three lair tools come back: `mint_bootstrap_userdata`, `register_remote_agent`, `forget_agent`. The cloud-init userdata now downloads the matching `octo-lair` release artefact and installs a systemd unit running `--role agent` — no Docker on the remote side. Lair finishes the bootstrap over SSH (config.json drop, optional git clone, `systemctl restart octo-agent`). Per-VM layout: `/var/lib/octo/{data,workspace}/`, env file at `/etc/octo/agent.env`, unit at `/etc/systemd/system/octo-agent.service`.
+- **Encrypted lair → remote-agent transport.** New `octo_core::open_noise_tunnel` opens an outbound Noise tunnel as the **initiator**, verifying the responder's static pubkey against the registry. Lair's WebSocket/HTTP proxy uses this for any agent with `host = Some(_)` — mobile ↔ lair ↔ remote-agent traffic is end-to-end Noise-encrypted. Added `from_base32` + `noise_handshake_initiator` to `core/src/noise.rs`.
+- **Optional Noise responder in agent role.** Setting `AGENT_NOISE_PORT` (only done by the cloud-init userdata) makes the agent run its own `run_noise_proxy` on a public port and publish `<OCTO_DATA_DIR>/agent-info.json` for the SSH-pull. Local agents leave it unset and stay loopback-only.
+
+### Changed (this revision)
+
+- **`AgentRecord` schema** — `git_url` removed (it was never a precondition; the cloned repo lives in the workspace dir and `bootstrap::ensure_workspace` detects it via `.git`). `host`, `pubkey`, `instance_id`, `provider`, `metadata` restored for remote agents. `is_remote()` predicate restored (`host.is_some()`). The poller skips pid liveness for remote rows; `terminate_agent` / `start_agent_by_name` refuse remote rows with helpful guidance.
+- **Wire `agents` event** — drops `git_url`, adds `kind: "local" | "remote"`. Mobile sidebar labels remote agents accordingly.
+- **`octo agents list`** column set is now `NAME / KIND / STATUS / PORT / PID / HOST` (was `NAME / STATUS / PORT / PID / GIT URL`).
+
 ### Changed
 
 - **BREAKING — Docker removed.** Lair and every child agent now run as plain OS processes on a Linux host. The `bollard` dep is gone from both `lair` and `cli`; `lair/Dockerfile`, `docker-compose*.yml`, and `.dockerignore` are deleted. `octo init` spawns `octo-lair --role lair` directly (pidfile at `~/.octo/lair/lair.pid`); children spawn as `octo-lair --role agent` via `tokio::process::Command` in a new `lair/src/agent_proc.rs` supervisor. Per-agent state lives in `~/.octo/agents/<name>/{data,workspace}/` (replaces named volumes). No migration is provided — this project has no users yet.

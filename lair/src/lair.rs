@@ -34,7 +34,8 @@ use octo_core::{
     self,
     build_tools_with_mcp, chain_executor_with_mcp,
     cancel_task as core_cancel_task, completion_chat_event, ensure_ssh_keypair, finalize_task,
-    init_mcp_pool, init_shell_env, load_or_generate_keypair, now_secs, record_task_progress,
+    from_base32, init_mcp_pool, init_shell_env, load_or_generate_keypair, now_secs,
+    open_noise_tunnel, record_task_progress,
     register_task, tasks_wire_json, TaskRecord, TaskStatus,
     relay as relay_client, RelaySigner,
     resolve_api_key, resolve_model, run_noise_proxy, run_command_in_background_tool, send_message,
@@ -50,6 +51,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::agent_proc::{AgentSupervisor, SpawnParams};
+use crate::ssh as ssh_ops;
 use octo_core::{AgentRecord, AgentStatus, Registry, status_from_alive};
 
 const RELAY_SIGNING_KEY_FILE: &str = "relay_signing_key.bin";
@@ -57,15 +59,17 @@ const DEFAULT_RELAY_URL:      &str = "https://octorelay.directto.link";
 
 fn data_dir() -> PathBuf { octo_core::data_dir() }
 
-/// Wire-shape pushed to mobile as part of an `agents` event. Just identity +
-/// status — no host/port/pubkey because mobile only ever talks to lair and
-/// reaches children through `/agents/:name/stream` proxy URLs.
+/// Wire-shape pushed to mobile as part of an `agents` event. Just identity
+/// + status — no host/port/pubkey because mobile only ever talks to lair
+/// and reaches children through `/agents/:name/stream` proxy URLs.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct AgentWire {
-    id:      String,
-    name:    String,
-    git_url: String,
-    status:  String,
+    id:     String,
+    name:   String,
+    status: String,
+    /// `"local"` or `"remote"`. Surfaced so the mobile sidebar can label
+    /// remote agents distinctly if it wants — purely advisory.
+    kind:   &'static str,
 }
 
 // ── Session persistence ───────────────────────────────────────────────────────
@@ -92,6 +96,9 @@ struct AppState {
     pubkey_b32:    String,
     #[allow(dead_code)]
     public_host:   String,
+    /// Lair's Noise static private key. Used as the initiator key when
+    /// opening outbound Noise tunnels to remote agents.
+    lair_priv:     Vec<u8>,
     supervisor:    Arc<AgentSupervisor>,
     registry:      Arc<Mutex<Registry>>,
     mcp_pool:      McpPool,
@@ -427,12 +434,21 @@ async fn clear_handler(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn start_agent_by_name(state: &AppState, name: &str) -> Result<(), String> {
     let record = state.registry.lock().unwrap().get(name).cloned()
         .ok_or_else(|| format!("agent '{name}' not found"))?;
+    if record.is_remote() {
+        return Err(format!(
+            "agent '{name}' is a remote agent — start/stop is managed by the cloud \
+             provider, not lair. Use the provisioning MCP to bring its VM up/down."
+        ));
+    }
     let cfg = octo_core::read_config();
     let gh_token = std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty());
+    // git_url isn't stored in the registry — the workspace dir already holds
+    // the clone (if any), and `bootstrap::ensure_workspace` detects it on
+    // restart via the `.git` marker.
     let params = SpawnParams {
         name:              &record.name,
         port:              record.port,
-        git_url:           record.git_url.as_deref(),
+        git_url:           None,
         startup_script:    None,
         startup_prompt:    None,
         anthropic_api_key: cfg.anthropic_api_key.as_deref(),
@@ -455,11 +471,19 @@ async fn start_agent_by_name(state: &AppState, name: &str) -> Result<(), String>
 /// Stop and remove a child agent: SIGTERM the process, drop the per-agent
 /// data/workspace dirs, and remove the registry row.
 async fn terminate_agent_by_name(state: &AppState, name: &str) -> Result<(), String> {
-    {
+    let is_remote = {
         let reg = state.registry.lock().unwrap();
-        if reg.get(name).is_none() {
-            return Err(format!("agent '{name}' not found"));
+        match reg.get(name) {
+            Some(r) => r.is_remote(),
+            None    => return Err(format!("agent '{name}' not found")),
         }
+    };
+    if is_remote {
+        return Err(format!(
+            "'{name}' is a remote agent — terminate_agent only destroys local processes. \
+             Use the provisioning MCP's terminate-instance method first, then call \
+             forget_agent('{name}') to clean up the registry row."
+        ));
     }
     state.supervisor.terminate(name).await.map_err(|e| e.to_string())?;
     {
@@ -484,17 +508,25 @@ async fn poll_agents(state: Arc<AppState>, ready_tx: watch::Sender<bool>) {
             let snapshot = reg.list().to_vec();
             let mut out = Vec::with_capacity(snapshot.len());
             for record in snapshot {
-                let alive = record.pid
-                    .map(AgentSupervisor::is_alive)
-                    .unwrap_or(false);
-                let status = status_from_alive(alive);
-                let _ = reg.update_status(&record.name, status);
-                if alive { let _ = reg.update_last_seen(&record.name, now); }
+                let kind = if record.is_remote() { "remote" } else { "local" };
+                let status = if record.is_remote() {
+                    // Remote agents aren't continuously probed — surface
+                    // whatever status the registration / terminate flow set.
+                    record.status
+                } else {
+                    let alive = record.pid
+                        .map(AgentSupervisor::is_alive)
+                        .unwrap_or(false);
+                    let s = status_from_alive(alive);
+                    let _ = reg.update_status(&record.name, s);
+                    if alive { let _ = reg.update_last_seen(&record.name, now); }
+                    s
+                };
                 out.push(AgentWire {
-                    id:      record.name.clone(),
-                    name:    record.name.clone(),
-                    git_url: record.git_url.clone().unwrap_or_default(),
-                    status:  status.as_wire_str().to_string(),
+                    id:     record.name.clone(),
+                    name:   record.name.clone(),
+                    status: status.as_wire_str().to_string(),
+                    kind,
                 });
             }
             out
@@ -549,48 +581,81 @@ async fn forward_http(
     }
 }
 
-fn agent_port_for(state: &AppState, name: &str) -> Option<u16> {
-    state.registry.lock().unwrap().get(name).map(|r| r.port)
+/// Build the base URL lair should hit to make an HTTP call against a child
+/// agent. For local agents this is just `http://127.0.0.1:<port>`. For
+/// remote agents we spin up a one-shot outbound Noise tunnel; reqwest will
+/// open one TCP connection to the loopback ephemeral port, the tunnel
+/// pipes it through Noise to the remote VM, and the listener closes after
+/// the single connection.
+async fn child_http_base(record: &AgentRecord, lair_priv: Vec<u8>) -> Result<String, String> {
+    if let Some(host) = &record.host {
+        let pubkey_b32 = record.pubkey.as_deref().unwrap_or_default();
+        if pubkey_b32.is_empty() {
+            return Err(format!("remote agent '{}' has no recorded pubkey", record.name));
+        }
+        let expected_pubkey = from_base32(pubkey_b32).ok_or_else(|| {
+            format!("remote agent '{}' has malformed pubkey", record.name)
+        })?;
+        let local_port = open_noise_tunnel(
+            host.clone(),
+            record.port,
+            expected_pubkey,
+            lair_priv,
+        ).await.map_err(|e| format!("open noise tunnel to {host}:{}: {e}", record.port))?;
+        Ok(format!("http://127.0.0.1:{local_port}"))
+    } else {
+        Ok(format!("http://127.0.0.1:{}", record.port))
+    }
+}
+
+async fn lookup_record(state: &AppState, name: &str) -> Result<AgentRecord, Response> {
+    state.registry.lock().unwrap().get(name).cloned()
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("agent '{name}' not found")).into_response())
+}
+
+async fn proxy_agent_http(
+    state:   &Arc<AppState>,
+    name:    &str,
+    method:  reqwest::Method,
+    sub:     &str,
+) -> Response {
+    let record = match lookup_record(state, name).await {
+        Ok(r)  => r,
+        Err(r) => return r,
+    };
+    let base = match child_http_base(&record, state.lair_priv.clone()).await {
+        Ok(u)  => u,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+    };
+    forward_http(method, &format!("{base}{sub}"), None).await
 }
 
 async fn proxy_agent_history(
     AxumPath(name): AxumPath<String>,
     State(state):   State<Arc<AppState>>,
 ) -> Response {
-    let Some(port) = agent_port_for(&state, &name) else {
-        return (StatusCode::NOT_FOUND, format!("agent '{name}' not found")).into_response();
-    };
-    forward_http(reqwest::Method::GET, &format!("http://127.0.0.1:{port}/history"), None).await
+    proxy_agent_http(&state, &name, reqwest::Method::GET, "/history").await
 }
 
 async fn proxy_agent_interrupt(
     AxumPath(name): AxumPath<String>,
     State(state):   State<Arc<AppState>>,
 ) -> Response {
-    let Some(port) = agent_port_for(&state, &name) else {
-        return (StatusCode::NOT_FOUND, format!("agent '{name}' not found")).into_response();
-    };
-    forward_http(reqwest::Method::POST, &format!("http://127.0.0.1:{port}/interrupt"), None).await
+    proxy_agent_http(&state, &name, reqwest::Method::POST, "/interrupt").await
 }
 
 async fn proxy_agent_clear(
     AxumPath(name): AxumPath<String>,
     State(state):   State<Arc<AppState>>,
 ) -> Response {
-    let Some(port) = agent_port_for(&state, &name) else {
-        return (StatusCode::NOT_FOUND, format!("agent '{name}' not found")).into_response();
-    };
-    forward_http(reqwest::Method::POST, &format!("http://127.0.0.1:{port}/clear"), None).await
+    proxy_agent_http(&state, &name, reqwest::Method::POST, "/clear").await
 }
 
 async fn proxy_agent_branches(
     AxumPath(name): AxumPath<String>,
     State(state):   State<Arc<AppState>>,
 ) -> Response {
-    let Some(port) = agent_port_for(&state, &name) else {
-        return (StatusCode::NOT_FOUND, format!("agent '{name}' not found")).into_response();
-    };
-    forward_http(reqwest::Method::GET, &format!("http://127.0.0.1:{port}/branches"), None).await
+    proxy_agent_http(&state, &name, reqwest::Method::GET, "/branches").await
 }
 
 async fn proxy_agent_stream_handler(
@@ -598,22 +663,58 @@ async fn proxy_agent_stream_handler(
     ws:             WebSocketUpgrade,
     State(state):   State<Arc<AppState>>,
 ) -> Response {
-    let port = {
+    let record = {
         let reg = state.registry.lock().unwrap();
         match reg.get(&name) {
-            Some(r) => r.port,
+            Some(r) => r.clone(),
             None    => return (StatusCode::NOT_FOUND, format!("agent '{name}' not found")).into_response(),
         }
     };
-    ws.on_upgrade(move |client_ws| proxy_to_child(client_ws, name, port))
+    let lair_priv = state.lair_priv.clone();
+    ws.on_upgrade(move |client_ws| proxy_to_child(client_ws, record, lair_priv))
 }
 
-/// Bidirectional WebSocket proxy: lair upgrades its end with the mobile client,
-/// opens a sibling WS to the child agent's HTTP server on `127.0.0.1:<port>`,
-/// and pipes frames in both directions until either side closes.
-async fn proxy_to_child(mobile_ws: WebSocket, name: String, port: u16) {
+/// Open the localhost URL lair should connect to in order to reach a child
+/// agent's `/stream`. For local agents that's just `ws://127.0.0.1:<port>`.
+/// For remote agents we spin up an outbound Noise tunnel first, returning a
+/// loopback URL that tunnels into the remote VM's encrypted Noise port.
+async fn resolve_child_ws_url(record: &AgentRecord, lair_priv: Vec<u8>) -> Result<String, String> {
+    if let Some(host) = &record.host {
+        let pubkey_b32 = record.pubkey.as_deref().unwrap_or_default();
+        if pubkey_b32.is_empty() {
+            return Err(format!(
+                "remote agent '{}' has no recorded pubkey — registration may not have \
+                 completed; re-run register_remote_agent",
+                record.name,
+            ));
+        }
+        let expected_pubkey = from_base32(pubkey_b32).ok_or_else(|| {
+            format!("remote agent '{}' has malformed pubkey", record.name)
+        })?;
+        let local_port = open_noise_tunnel(
+            host.clone(),
+            record.port,
+            expected_pubkey,
+            lair_priv,
+        ).await.map_err(|e| format!("open noise tunnel to {host}:{}: {e}", record.port))?;
+        Ok(format!("ws://127.0.0.1:{local_port}/stream"))
+    } else {
+        Ok(format!("ws://127.0.0.1:{}/stream", record.port))
+    }
+}
+
+async fn proxy_to_child(mobile_ws: WebSocket, record: AgentRecord, lair_priv: Vec<u8>) {
     use tokio_tungstenite::tungstenite::Message as TMessage;
-    let url = format!("ws://127.0.0.1:{port}/stream");
+
+    let name = record.name.clone();
+    let url = match resolve_child_ws_url(&record, lair_priv).await {
+        Ok(u)  => u,
+        Err(e) => {
+            warn!("[proxy] {name}: {e}");
+            let _ = mobile_ws.close().await;
+            return;
+        }
+    };
     info!("[proxy] mobile <-> {name} ({url})");
     let (child_ws, _) = match tokio_tungstenite::connect_async(&url).await {
         Ok(p) => p,
@@ -658,32 +759,35 @@ async fn proxy_to_child(mobile_ws: WebSocket, name: String, port: u16) {
 
 fn build_system_prompt() -> String {
     r#"# Identity & context
-You are "lair" — the control-plane agent of an octo deployment. You run as a native OS process on a Linux host machine; child agents are separate OS processes you spawn and supervise on the same host. The user is talking to you over an encrypted Noise tunnel from a mobile client; from here they can chat with you directly, or open a chat with any child agent (lair proxies that chat through itself — the user never connects to a child directly).
+You are "lair" — the control-plane agent of an octo deployment. You run as a native OS process on a Linux host machine; child agents are separate OS processes you spawn and supervise locally, OR processes running on remote VMs you provisioned via a cloud-MCP. The user is talking to you over an encrypted Noise tunnel from a mobile client; from here they can chat with you directly, or open a chat with any child (you proxy that chat through yourself — the user never connects to a child directly).
 
 octo can host any kind of agent workload, not only coding agents — don't assume the user is doing software work unless they say so.
 
 # What you help with
-1. Orchestration — spin up, tear down, and inspect children.
+1. Orchestration — spin up, tear down, and inspect children, local or remote.
 2. Direct work — answer questions, run shell commands, read external resources, and handle small fixes that don't require a child's repo.
 
 # Environment
-- Linux host. Children are plain OS processes (`octo-lair --role agent`) you spawn via the orchestration tools below; each gets its own per-agent data dir and workspace under `~/.octo/agents/<name>/`. They bind a loopback HTTP port in 30100–30199; mobile reaches them via the proxy route on lair.
-- `gh` and `git` are expected to be installed on the host; `GH_TOKEN` is available in lair's env when the operator set it via `octo env`.
+- Linux host. Local children are plain OS processes (`octo-lair --role agent`); each has a per-agent data dir + workspace under `~/.octo/agents/<name>/` and binds a loopback HTTP port (30100–30199). Mobile reaches a local child via lair's `/agents/<name>/stream` proxy URL.
+- Remote children are the same `octo-lair --role agent` binary running on a separate VM you provisioned via a cloud-MCP. They listen on a public Noise port; lair opens an outbound Noise tunnel for the WS proxy so traffic stays encrypted end-to-end. Lair's SSH key bootstraps the VM (config.json drop, optional repo clone, systemctl restart).
+- `gh` and `git` are expected to be installed on the host; `GH_TOKEN` is in lair's env when the operator set it via `octo env`.
 - MCP servers may be configured at init time or hot-added at runtime; their tools appear alongside the built-ins. `web_fetch` (and `web_search` when Brave is configured) cover external lookups.
 - A path prefixed with `@` (e.g. `@core/src/lib.rs`) is a file reference inside a repo — treat it as a path.
 
 # Orchestration tools (lair-specific)
-- **`list_agents`** — every known child agent with its full registry row (name, status, port, pid, binary_version, git_url, …). Cheap; call before guessing a name.
-- **`create_agent`** — args: `git_url?`, `name?`, `port?`, `startup_script?`, `startup_prompt?`. Spawns a new child agent process on this host.
-  - Omit `git_url` for a repo-less workload (default name `lair-workload`); otherwise default name is `lair-<repo-slug>`.
+- **`list_agents`** — every known agent (local + remote) with full registry row (name, pid, port, host, pubkey, status, binary_version, instance_id, provider, metadata). Cheap; call before guessing a name.
+- **`create_agent`** — args: `git_url?`, `name?`, `port?`, `startup_script?`, `startup_prompt?`. Spawns a new *local* child process.
+  - Omit `git_url` for a repo-less workload (default name `lair-workload`); otherwise default name is `lair-<repo-slug>`. `git_url` is a spawn-time argument only — it isn't persisted in the registry. The cloned repo lives in the agent's workspace dir and survives restarts.
   - `port` auto-assigns from 30100–30199 if omitted.
   - `startup_script` runs before the child's HTTP server boots — good for `apt-get`, package installs, git config.
   - `startup_prompt` is sent as the child's first user message once it's ready and triggers a full agentic loop.
-  - **Both fields are stored as plaintext env vars on the child process.** Never put API keys, tokens, or other secrets in them; the child inherits provider credentials from lair via env automatically.
-- **`terminate_agent(name)`** — *destructive.* Kills the child process and deletes its per-agent data + workspace directories. Irreversible. Always run `list_agents` first to confirm the exact name; confirm with the user before calling unless the request was unambiguous.
-- **`restart_all_agents`** — restart every managed child agent. Use after upgrading the lair binary; not for routine flakes.
-- **`run_command_in_background(command)`** — run a shell command (`bash -c`) in the background and return immediately. The user is notified when it finishes. Use for long builds, big test suites, large downloads. Prefer the regular `bash` tool for anything fast.
-  - When the command completes, the output is injected into this conversation as a "Background command … completed" message and you'll be invoked autonomously to react. **If no follow-up action is genuinely useful, reply with one short line acknowledging the result** rather than producing prose. Only continue working if the result clearly demands it.
+  - **Never put secrets in `startup_script` or `startup_prompt`** — provider credentials are forwarded via env automatically; you don't need to bake them in.
+- **`mint_bootstrap_userdata`** — args: `name`, `agent_purpose?`, `startup_script?`, `public_port?`, `lair_version?`. Returns a cloud-init bash script for a **remote** agent. The userdata is **credentials-free** — it trusts lair's SSH key, downloads `octo-lair` from GitHub Releases, and installs a systemd unit running `--role agent`. Hand the returned `userdata` to whichever provisioning MCP the user has configured (AWS, Hetzner, etc.). The MCP returns the new VM's IP → call `register_remote_agent`.
+- **`register_remote_agent`** — args: `name`, `host`, `provider?`, `instance_id?`, `git_url?`, `metadata?`. After the provisioning MCP returns the VM's IP, lair SSHes in and: (a) waits for the agent to publish `/var/lib/octo/data/agent-info.json`, (b) drops `config.json` with API keys, (c) clones `git_url` into the workspace if given, (d) `systemctl restart`s the agent. Total timeout ~6 minutes. `name` must match what you passed to `mint_bootstrap_userdata`.
+- **`terminate_agent(name)`** — *destructive, local agents only.* Kills the process and deletes the per-agent data + workspace dirs. For remote agents, returns instructions to terminate the VM via the provisioning MCP first, then call `forget_agent`. Always run `list_agents` first to confirm the exact name; confirm with the user before calling unless the request was unambiguous.
+- **`forget_agent(name)`** — *registry-only.* Removes a remote agent's row without touching the VM. Use after the provisioning MCP has terminated the instance. Don't use on a live local agent — use `terminate_agent` instead.
+- **`restart_all_agents`** — restart every managed *local* agent. Use after upgrading the lair binary; no effect on remote agents.
+- **`run_command_in_background(command)`** — run a shell command in the background. The user is notified when it finishes. For long builds, big test suites, large downloads. Prefer the regular `bash` tool for anything fast. When it completes, the output is injected into this conversation autonomously — if no follow-up action is genuinely useful, reply with one short acknowledgement line rather than producing prose.
 
 # General tools (shared with children)
 - `bash` — shell commands; use for git, gh, curl, one-offs.
@@ -694,7 +798,17 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 - `write_file(path, content)` — new files only.
 
 # Working with children
-- You orchestrate children (create / inspect / terminate); you do **not** message them. If the user asks "have child X do Y", tell them to open the child's own chat in the mobile app — that's the direct path (it proxies through you transparently). You can still answer cluster-wide questions about the child (status, port, git_url) from `list_agents`.
+- You orchestrate children; you do **not** message them. If the user asks "have child X do Y", tell them to open the child's own chat in the mobile app — that's the direct path (it proxies through you transparently). You can still answer cluster-wide questions about the child (status, port, host) from `list_agents`.
+
+# Local vs remote agents
+- **Local**: `create_agent` → OS process on this host. Reachable via loopback. Default when the user doesn't mention a cloud / instance type.
+- **Remote**: a 3-step LLM-driven flow that uses the user's configured cloud MCP. Userdata carries no credentials — lair finishes bootstrap over SSH.
+  1. `mint_bootstrap_userdata(name=…, agent_purpose?=…)` — get the credentials-free userdata.
+  2. Call the provisioning MCP with that userdata verbatim, plus user-specified region / instance_type / security group. The MCP returns a public IP + instance id.
+  3. `register_remote_agent(name=…, host=<public_ip>, git_url?=…, provider=…, instance_id=…)` — lair SSHes in, finishes the bootstrap, and registers the row.
+- Lair's SSH keypair is at `<OCTO_DATA_DIR>/ssh_id_ed25519`. `mint_bootstrap_userdata` always embeds the matching pubkey in the userdata it returns.
+- Termination: for remote agents, `terminate_agent` returns instructions — call the provisioning MCP's terminate-instance method (using `instance_id` from `list_agents`), then `forget_agent(name)`.
+- Trigger the remote flow when the user names a cloud / instance type / region, OR when they ask for hardware lair doesn't have locally (GPUs, etc.).
 
 # Response style
 - Concise and direct; the user is often on a phone screen.
@@ -716,15 +830,17 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 fn create_agent_tool() -> AnthropicTool {
     AnthropicTool {
         name: "create_agent".to_string(),
-        description: "Spawn a new octo child agent as an OS process on the lair host. \
-                       Handles per-agent dir layout (~/.octo/agents/<name>/{data,workspace}/) and loopback port assignment (30100–30199)."
+        description: "Spawn a new *local* octo child agent as an OS process on the lair host. \
+                       Handles per-agent dir layout (~/.octo/agents/<name>/{data,workspace}/) \
+                       and loopback port assignment (30100–30199). For remote agents on a \
+                       cloud VM, use mint_bootstrap_userdata + register_remote_agent instead."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "git_url": {
                     "type": "string",
-                    "description": "Git repository URL to clone into the agent's workspace. Omit for a repo-less workload."
+                    "description": "Git repository URL to clone into the agent's workspace at spawn time. Not stored in the registry — the cloned repo lives in the workspace dir and survives restarts."
                 },
                 "name": {
                     "type": "string",
@@ -769,8 +885,9 @@ fn terminate_agent_tool() -> AnthropicTool {
 fn list_agents_tool() -> AnthropicTool {
     AnthropicTool {
         name: "list_agents".to_string(),
-        description: "List every known child agent with the full registry row \
-                       (name, pid, port, git_url, status, binary_version, …). Cheap; call before guessing a name."
+        description: "List every known agent — local + remote — with the full registry row \
+                       (name, pid, port, host, pubkey, status, binary_version, instance_id, \
+                       provider, metadata). Cheap; call before guessing a name."
             .to_string(),
         input_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
         display_label: Some("Listing agents".into()),
@@ -780,9 +897,100 @@ fn list_agents_tool() -> AnthropicTool {
 fn restart_all_agents_tool() -> AnthropicTool {
     AnthropicTool {
         name: "restart_all_agents".to_string(),
-        description: "Stop and respawn every managed child agent. Use after upgrading the lair binary.".to_string(),
+        description: "Stop and respawn every managed local agent. Use after upgrading the lair \
+                       binary. No effect on remote agents.".to_string(),
         input_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
         display_label: Some("Restarting agents".into()),
+    }
+}
+
+fn mint_bootstrap_userdata_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "mint_bootstrap_userdata".to_string(),
+        description: "Mint a cloud-init bash script (\"userdata\") for bootstrapping a remote \
+                       octo agent on a freshly-provisioned Linux VM. The userdata contains **no \
+                       credentials** — only lair's SSH public key, an octo-lair binary download \
+                       from GitHub Releases, and a systemd unit that runs `--role agent`. The \
+                       agent boots without API keys; lair finishes the bootstrap over SSH \
+                       afterwards (drops config.json, optionally clones the git repo, restarts \
+                       the systemd unit). Returns the userdata blob plus the agent name. After \
+                       the provisioning MCP returns the new VM's IP, call \
+                       `register_remote_agent(name=…, host=<public_ip>, ...)`."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Logical name for the new agent; reused in register_remote_agent."
+                },
+                "agent_purpose": {
+                    "type": "string",
+                    "description": "One-line mission baked into the agent's system prompt (used only if no git_url is later supplied to register_remote_agent)."
+                },
+                "startup_script": {
+                    "type": "string",
+                    "description": "Optional bash run inside the agent process at boot, before its HTTP server binds. Will not have access to API keys (they arrive later via SSH); use for package installs."
+                },
+                "public_port": {
+                    "type": "integer",
+                    "description": "Public TCP port the agent's Noise endpoint listens on (default 9000). Security group must allow inbound TCP on this port plus SSH (22) from lair's IP."
+                },
+                "lair_version": {
+                    "type": "string",
+                    "description": "Specific `octo-lair` release tag (without leading v) to install on the VM. Defaults to lair's own running version, which is what you usually want."
+                }
+            },
+            "required": ["name"]
+        }),
+        display_label: Some("Minting userdata".into()),
+    }
+}
+
+fn register_remote_agent_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "register_remote_agent".to_string(),
+        description: "Finish bootstrapping a remote agent and register it with lair. SSHes in \
+                       (using lair's operator key), waits for the agent to publish \
+                       `/var/lib/octo/data/agent-info.json`, drops a `config.json` with the API \
+                       keys, optionally clones `git_url` into the workspace, and \
+                       `systemctl restart`s the agent service. Total timeout ~6 minutes. `name` \
+                       must match what was passed to `mint_bootstrap_userdata`. Each SSH op \
+                       retries internally with exponential backoff. A `Pending` registry row \
+                       is inserted as soon as the agent's identity is known."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Logical agent name — must match mint_bootstrap_userdata." },
+                "host": { "type": "string", "description": "Public IP or DNS name of the VM (from the provisioning MCP's response)." },
+                "provider":    { "type": "string", "description": "Free-form provider tag (e.g. aws, gcp, hetzner)." },
+                "instance_id": { "type": "string", "description": "Cloud instance id (e.g. i-0abc...)." },
+                "git_url":     { "type": "string", "description": "Optional Git URL to clone into the agent's workspace after the process is up. Lair uses its own GH_TOKEN for HTTPS clones." },
+                "metadata":    { "type": "object", "description": "Opaque provider-specific blob (region, instance_type, image id, ...). Stored alongside the row." }
+            },
+            "required": ["name", "host"]
+        }),
+        display_label: Some("Registering remote agent".into()),
+    }
+}
+
+fn forget_agent_tool() -> AnthropicTool {
+    AnthropicTool {
+        name: "forget_agent".to_string(),
+        description: "Remove an agent's registry row without touching processes or any VM. Use \
+                       after the provisioning MCP has terminated a remote instance, to clean up \
+                       the dangling row. Don't use on a live local agent — use `terminate_agent` \
+                       instead."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Agent name to forget." }
+            },
+            "required": ["name"]
+        }),
+        display_label: Some("Forgetting agent".into()),
     }
 }
 
@@ -790,7 +998,10 @@ fn lair_extra_tools() -> Vec<AnthropicTool> {
     vec![
         list_agents_tool(),
         create_agent_tool(),
+        mint_bootstrap_userdata_tool(),
+        register_remote_agent_tool(),
         terminate_agent_tool(),
+        forget_agent_tool(),
         restart_all_agents_tool(),
         run_command_in_background_tool(),
     ]
@@ -806,7 +1017,10 @@ fn lair_extra_executor(state: Arc<AppState>) -> Option<Arc<dyn Fn(String, serde_
             match name.as_str() {
                 "list_agents"               => exec_list_agents(state.clone()).await,
                 "create_agent"              => exec_create_agent(state, input).await,
+                "mint_bootstrap_userdata"   => exec_mint_bootstrap_userdata(state, input).await,
+                "register_remote_agent"     => exec_register_remote_agent(state, input).await,
                 "terminate_agent"           => exec_terminate_agent(state, input).await,
+                "forget_agent"              => exec_forget_agent(state, input).await,
                 "restart_all_agents"        => exec_restart_all_agents(state).await,
                 "run_command_in_background" => exec_run_command_in_background(state, input).await,
                 other => format!("unknown tool: {other}"),
@@ -879,11 +1093,15 @@ async fn exec_create_agent(state: Arc<AppState>, input: serde_json::Value) -> St
                 name:           child_name.clone(),
                 pid:            Some(pid),
                 port,
-                git_url:        git_url.clone(),
+                host:           None,
+                pubkey:         None,
                 status:         AgentStatus::Pending,
                 binary_version: env!("CARGO_PKG_VERSION").to_string(),
                 created_at:     now,
                 last_seen:      now,
+                instance_id:    None,
+                provider:       None,
+                metadata:       serde_json::Value::Null,
             };
             let add_result = state.registry.lock().unwrap().add(record);
             if let Err(e) = add_result {
@@ -902,6 +1120,354 @@ async fn exec_create_agent(state: Arc<AppState>, input: serde_json::Value) -> St
     }
 }
 
+async fn exec_mint_bootstrap_userdata(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let name = match input.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "error: missing 'name' field".to_string(),
+    };
+    if state.registry.lock().unwrap().get(&name).is_some() {
+        return format!("error: agent '{name}' already exists in the registry");
+    }
+
+    let agent_purpose  = input.get("agent_purpose") .and_then(|v| v.as_str()).map(str::to_string);
+    let startup_script = input.get("startup_script").and_then(|v| v.as_str()).map(str::to_string);
+    let public_port    = input.get("public_port")   .and_then(|v| v.as_u64()).unwrap_or(9000) as u16;
+    let lair_version   = input.get("lair_version")  .and_then(|v| v.as_str()).map(str::to_string)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+
+    let lair_pubkey = match ssh_ops::read_lair_public_key() {
+        Ok(k) => k,
+        Err(e) => return format!("error reading lair SSH public key: {e:#}"),
+    };
+
+    let mut env_lines: Vec<String> = vec![
+        "AGENT_PORT=8000".to_string(),
+        format!("AGENT_NOISE_PORT={public_port}"),
+        "OCTO_DATA_DIR=/var/lib/octo/data".to_string(),
+        "WORKSPACE_DIR=/var/lib/octo/workspace".to_string(),
+        "NOISE_KEY_FILE=/var/lib/octo/data/noise_key.bin".to_string(),
+        "OCTO_SKIP_SHELL_ENV=1".to_string(),
+    ];
+    if let Some(v) = &agent_purpose  { env_lines.push(format!("AGENT_PURPOSE={v}")); }
+    if let Some(v) = &startup_script { env_lines.push(format!("STARTUP_SCRIPT={v}")); }
+    let env_content = env_lines.join("\n");
+
+    let userdata = format!(r#"#!/bin/bash
+set -eux
+
+# 1. Trust lair's operator SSH key.
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+cat >> /root/.ssh/authorized_keys <<'OCTO_SSH_EOF'
+{lair_pubkey}
+OCTO_SSH_EOF
+chmod 600 /root/.ssh/authorized_keys
+
+# 2. Install git (curl is usually preinstalled on cloud images).
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y
+    apt-get install -y --no-install-recommends git ca-certificates curl
+elif command -v yum >/dev/null 2>&1; then
+    yum install -y git ca-certificates curl
+elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache git ca-certificates curl
+fi
+
+# 3. Download octo-lair binary for this VM's architecture.
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)  ARTIFACT="octo-lair-linux-x86_64"  ;;
+    aarch64) ARTIFACT="octo-lair-linux-aarch64" ;;
+    *) echo "unsupported arch: $ARCH"; exit 1 ;;
+esac
+curl -fsSL "https://github.com/georgebradford0/octo/releases/download/cli-v{lair_version}/$ARTIFACT" \
+    -o /usr/local/bin/octo-lair
+chmod +x /usr/local/bin/octo-lair
+
+# 4. Prepare dirs that the agent's OCTO_DATA_DIR and WORKSPACE_DIR will point at.
+install -d -m 700 /var/lib/octo/data /var/lib/octo/workspace /etc/octo
+
+# 5. Env file with the agent's non-secret bootstrap config.
+umask 077
+cat > /etc/octo/agent.env <<'OCTO_ENV_EOF'
+{env_content}
+OCTO_ENV_EOF
+umask 022
+
+# 6. systemd unit. The agent boots without API keys — lair drops config.json
+#    over SSH afterwards and triggers a restart.
+cat > /etc/systemd/system/octo-agent.service <<'OCTO_UNIT_EOF'
+[Unit]
+Description=octo agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/octo/agent.env
+ExecStart=/usr/local/bin/octo-lair --role agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+OCTO_UNIT_EOF
+
+systemctl daemon-reload
+systemctl enable --now octo-agent
+"#);
+
+    let result = serde_json::json!({
+        "name":     name,
+        "userdata": userdata,
+        "lair_version": lair_version,
+        "instructions": format!(
+            "Hand `userdata` to the provisioning MCP as the new instance's user-data. \
+             Make sure the security group / firewall allows inbound TCP {public_port} (for lair's \
+             Noise tunnel) and 22 (for lair's SSH-driven bootstrap). The userdata contains no \
+             credentials. After the MCP returns the public IP, call \
+             register_remote_agent(name='{name}', host=<public_ip>, ...).",
+        ),
+    });
+    serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("error: {e}"))
+}
+
+async fn exec_register_remote_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let name = match input.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "error: missing 'name' field".to_string(),
+    };
+    let host = match input.get("host").and_then(|v| v.as_str()) {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => return "error: missing 'host' field".to_string(),
+    };
+    let provider    = input.get("provider")   .and_then(|v| v.as_str()).map(str::to_string);
+    let instance_id = input.get("instance_id").and_then(|v| v.as_str()).map(str::to_string);
+    let git_url     = input.get("git_url")    .and_then(|v| v.as_str()).map(str::to_string);
+    let metadata    = input.get("metadata")   .cloned().unwrap_or(serde_json::Value::Null);
+
+    let key_path = octo_core::data_dir().join(octo_core::SSH_PRIVATE_KEY_FILE);
+    if !key_path.exists() {
+        return format!(
+            "error: lair has no SSH private key at {}. Restart lair to generate one.",
+            key_path.display(),
+        );
+    }
+
+    // Resumption: if a prior `Pending` row for this name + host already
+    // exists, treat as a retry; otherwise this must be a fresh row.
+    let prior = state.registry.lock().unwrap().get(&name).cloned();
+    let (created_at, resuming) = match prior {
+        Some(r) if matches!(r.status, AgentStatus::Pending)
+                && r.host.as_deref() == Some(host.as_str()) => {
+            info!("[lair/register_remote_agent] resuming pending registration of '{name}' at {host}");
+            (r.created_at, true)
+        }
+        Some(r) => {
+            return format!(
+                "error: agent '{name}' is already in the registry (status={}, host={:?}). \
+                 If you need to re-register, call `forget_agent` first.",
+                r.status.as_wire_str(),
+                r.host,
+            );
+        }
+        None => (octo_core::now_secs(), false),
+    };
+
+    // Phase 1: wait for the agent to publish agent-info.json.
+    info!("[lair/register_remote_agent] {host}: waiting for agent-info.json");
+    let info = match ssh_ops::await_agent_info(
+        &host, "root", &key_path,
+        Duration::from_secs(300),
+        Duration::from_secs(8),
+    ).await {
+        Ok(i) => i,
+        Err(e) => return format!("error: could not pull agent info from {host}: {e:#}"),
+    };
+
+    // Insert / refresh Pending row.
+    {
+        let pending = AgentRecord {
+            name:           name.clone(),
+            pid:            None,
+            port:           info.port,
+            host:           Some(host.clone()),
+            pubkey:         Some(info.pubkey.clone()),
+            status:         AgentStatus::Pending,
+            binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at,
+            last_seen:      octo_core::now_secs(),
+            instance_id:    instance_id.clone(),
+            provider:       provider.clone(),
+            metadata:       metadata.clone(),
+        };
+        if let Err(e) = state.registry.lock().unwrap().set(pending) {
+            return format!("error inserting pending registry row: {e:#}");
+        }
+        state.poll_trigger.notify_one();
+    }
+
+    // Phase 2: drop config.json over SSH.
+    let lair_cfg = octo_core::read_config();
+    let cfg = serde_json::json!({
+        "name":              null,
+        "anthropic_api_key": lair_cfg.anthropic_api_key,
+        "openai_api_key":    lair_cfg.openai_api_key,
+        "model":             lair_cfg.model,
+        "api_url":           lair_cfg.api_url,
+    });
+    let cfg_str = match serde_json::to_string_pretty(&cfg) {
+        Ok(s) => s,
+        Err(e) => return format!("error encoding config.json: {e:#}"),
+    };
+    info!("[lair/register_remote_agent] {host}: dropping {}", ssh_ops::REMOTE_CONFIG_PATH);
+    if let Err(e) = ssh_ops::write_file(
+        &host, "root", &key_path,
+        ssh_ops::REMOTE_CONFIG_PATH,
+        &cfg_str,
+        0o600,
+    ).await {
+        return format!(
+            "error writing config.json to {host}: {e:#}. Re-run register_remote_agent to retry.",
+        );
+    }
+
+    // Phase 3: optional git clone.
+    if let Some(url) = git_url.clone() {
+        let token = std::env::var("GH_TOKEN").unwrap_or_default();
+        let user_name  = std::env::var("GIT_USER_NAME") .unwrap_or_else(|_| "octo".to_string());
+        let user_email = std::env::var("GIT_USER_EMAIL").unwrap_or_else(|_| "octo@localhost".to_string());
+        let script = build_remote_clone_script(&url, &token, &user_name, &user_email);
+        info!("[lair/register_remote_agent] {host}: cloning {url}");
+        if let Err(e) = ssh_ops::run_script(&host, "root", &key_path, &script).await {
+            return format!(
+                "error cloning git repo on {host}: {e:#}. Re-run register_remote_agent to retry.",
+            );
+        }
+    }
+
+    // Phase 4: systemctl restart to pick up config + cloned workspace.
+    info!("[lair/register_remote_agent] {host}: restarting octo-agent");
+    if let Err(e) = ssh_ops::run_script(
+        &host, "root", &key_path,
+        "set -e; systemctl restart octo-agent",
+    ).await {
+        return format!(
+            "error restarting octo-agent on {host}: {e:#}. Re-run register_remote_agent to retry.",
+        );
+    }
+
+    // Phase 5: confirm the restart by re-reading agent-info.json (soft fail).
+    info!("[lair/register_remote_agent] {host}: confirming restart");
+    let info = match ssh_ops::await_agent_info(
+        &host, "root", &key_path,
+        Duration::from_secs(60),
+        Duration::from_secs(4),
+    ).await {
+        Ok(i) => i,
+        Err(_) => {
+            warn!("[lair/register_remote_agent] {host}: restart confirmation timed out; using pre-restart info");
+            info
+        }
+    };
+
+    let record = AgentRecord {
+        name:           name.clone(),
+        pid:            None,
+        port:           info.port,
+        host:           Some(host.clone()),
+        pubkey:         Some(info.pubkey.clone()),
+        status:         AgentStatus::Running,
+        binary_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at,
+        last_seen:      octo_core::now_secs(),
+        instance_id,
+        provider,
+        metadata,
+    };
+    if let Err(e) = state.registry.lock().unwrap().set(record) {
+        return format!("error finalising registry row for '{name}': {e:#}");
+    }
+    state.poll_trigger.notify_one();
+    let verb = if resuming { "Resumed and registered" } else { "Registered" };
+    format!(
+        "{verb} remote agent '{name}' at {host}:{} (pubkey={}). \
+         Mobile will pick it up via the next agents event.",
+        info.port, info.pubkey,
+    )
+}
+
+fn build_remote_clone_script(
+    url:        &str,
+    gh_token:   &str,
+    user_name:  &str,
+    user_email: &str,
+) -> String {
+    let clone_url = if url.starts_with("https://") && !gh_token.is_empty() {
+        let rest = url.trim_start_matches("https://");
+        let rest = match rest.find('@') { Some(i) => &rest[i + 1..], None => rest };
+        format!("https://x-token:{gh_token}@{rest}")
+    } else {
+        url.to_string()
+    };
+    let credential_helper = if !gh_token.is_empty() && url.starts_with("https://") {
+        Some(format!("!f() {{ echo username=x-token; echo password={gh_token}; }}; f"))
+    } else {
+        None
+    };
+
+    let mut script = String::new();
+    script.push_str("set -e\n");
+    script.push_str(&format!("WORKSPACE={}\n", ssh_ops::REMOTE_WORKSPACE_PATH));
+    script.push_str(&format!("CLONE_URL='{}'\n", clone_url.replace('\'', "'\\''")));
+    script.push_str(&format!("USER_NAME='{}'\n",  user_name.replace('\'', "'\\''")));
+    script.push_str(&format!("USER_EMAIL='{}'\n", user_email.replace('\'', "'\\''")));
+    script.push_str(r#"if [ -d "$WORKSPACE/.git" ]; then
+    git -C "$WORKSPACE" remote set-url origin "$CLONE_URL"
+    git -C "$WORKSPACE" fetch --all
+else
+    find "$WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    git clone "$CLONE_URL" "$WORKSPACE"
+fi
+git -C "$WORKSPACE" config user.name  "$USER_NAME"
+git -C "$WORKSPACE" config user.email "$USER_EMAIL"
+"#);
+    if let Some(helper) = credential_helper {
+        script.push_str(&format!("HELPER='{}'\n", helper.replace('\'', "'\\''")));
+        script.push_str(r#"git -C "$WORKSPACE" config credential.helper "$HELPER"
+"#);
+    }
+    script
+}
+
+async fn exec_forget_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
+    let name = match input.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "error: missing 'name' field".to_string(),
+    };
+
+    let record = state.registry.lock().unwrap().get(&name).cloned();
+    let record = match record {
+        Some(r) => r,
+        None    => return format!("'{name}' was not in the registry"),
+    };
+    if !record.is_remote() {
+        return format!(
+            "error: '{name}' is a local agent. Use `terminate_agent` instead so its process \
+             and per-agent data dir are cleaned up."
+        );
+    }
+
+    let removed = state.registry.lock().unwrap().remove(&name);
+    match removed {
+        Ok(true) => {
+            state.poll_trigger.notify_one();
+            format!("Forgot '{name}' — registry row removed; no VM action taken.")
+        }
+        Ok(false) => format!("'{name}' was not in the registry"),
+        Err(e)    => format!("error: {e:#}"),
+    }
+}
+
 async fn exec_terminate_agent(state: Arc<AppState>, input: serde_json::Value) -> String {
     let name = match input.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
@@ -914,11 +1480,12 @@ async fn exec_terminate_agent(state: Arc<AppState>, input: serde_json::Value) ->
 }
 
 async fn exec_restart_all_agents(state: Arc<AppState>) -> String {
+    // Skip remote agents — they run on VMs lair doesn't supervise directly.
     let names: Vec<String> = state.registry.lock().unwrap()
-        .list().iter().map(|r| r.name.clone()).collect();
+        .list().iter().filter(|r| !r.is_remote()).map(|r| r.name.clone()).collect();
     if names.is_empty() {
-        info!("[lair/restart_all] no agents found");
-        return "No agents found to restart.".to_string();
+        info!("[lair/restart_all] no local agents found");
+        return "No local agents to restart.".to_string();
     }
     let mut restarted = Vec::new();
     for name in &names {
@@ -1150,6 +1717,9 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
 
     info!("[lair] noise_pubkey={pubkey_b32} noise_port={noise_port} http_port={http_port} public_host={public_host}");
 
+    // Keep a clone of the private key around so AppState can use it as the
+    // Noise *initiator* key when proxying mobile traffic to remote agents.
+    let lair_priv = static_private.clone();
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
 
     // Operator SSH key — generated once for ops use (e.g. SSHing into hosts);
@@ -1236,6 +1806,7 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
             poll_trigger:  poll_trigger.clone(),
             pubkey_b32:    pubkey_b32.clone(),
             public_host:   public_host.clone(),
+            lair_priv,
             supervisor,
             registry,
             mcp_pool,
