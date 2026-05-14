@@ -38,17 +38,53 @@ pub struct McpSeed {
     pub json:   String,
 }
 
-/// Parse a user-supplied mcp.json file and return its raw text ready to be
-/// written to `~/.octo/lair/mcp.json`. `${VAR}` placeholders are left intact
-/// — lair expands them at MCP spawn time against `config.json` plus its own
-/// env (which contains `~/.octo/lair-env`). Validation only checks that the
-/// file is a JSON array, since a bad file used to leave init half-finished.
+/// Expand `"${VAR}"` against the operator's process env.
+pub fn expand_host_env(v: &str) -> std::result::Result<String, String> {
+    if !(v.starts_with("${") && v.ends_with('}')) {
+        return Ok(v.to_string());
+    }
+    let var = &v[2..v.len() - 1];
+    std::env::var(var).map_err(|_| var.to_string())
+}
+
+/// Parse a user-supplied mcp.json file, expand `"${VAR}"` against the
+/// operator's process env, and return pretty-printed JSON ready to be
+/// written to `~/.octo/lair/mcp.json`. Validation only — does not write
+/// anything. Called before `octo init` writes `config.json` so a broken
+/// mcp file can't leave the user in a half-init'd state.
 pub fn load_seed_mcp_config(path: &Path) -> Result<String> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("read mcp config {}", path.display()))?;
-    let _servers: Vec<serde_json::Value> = serde_json::from_str(&text)
+    let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
         .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
-    Ok(text)
+
+    let mut missing: Vec<String> = Vec::new();
+    for server in &mut servers {
+        for key in ["env", "headers"] {
+            let Some(obj) = server.get_mut(key).and_then(|e| e.as_object_mut()) else { continue };
+            for (_, val) in obj.iter_mut() {
+                let Some(s) = val.as_str() else { continue };
+                match expand_host_env(s) {
+                    Ok(resolved) => *val = serde_json::Value::String(resolved),
+                    Err(var)     => missing.push(var),
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
+        anyhow::bail!(
+            "mcp config {} references env var(s) not visible to this process: {}. \
+             Verify with `env | grep <NAME>` — variables defined in ~/.bashrc must \
+             be `export`ed (not just assigned) to reach child processes. Otherwise \
+             inline the values in the file.",
+            path.display(),
+            missing.join(", "),
+        );
+    }
+
+    serde_json::to_string_pretty(&servers).context("re-serialize mcp config")
 }
 
 pub async fn run(opts: InitOptions<'_>) -> Result<()> {
