@@ -107,23 +107,16 @@ pub async fn add(
         anyhow::bail!("MCP server '{name}' already exists in '{agent}'");
     }
 
+    // Values are stored verbatim — `${VAR}` is resolved at MCP spawn time
+    // by lair (against config.json + lair's own env, which contains
+    // `~/.octo/lair-env`). Pre-expanding here against the operator's shell
+    // env would fail for vars set via `octo env set` and wouldn't see
+    // anything lair sees at runtime.
     let mut env = HashMap::new();
-    let mut missing: Vec<String> = Vec::new();
     for pair in env_pairs {
         let (k, v) = pair.split_once('=')
             .with_context(|| format!("invalid env pair '{pair}': expected KEY=VALUE"))?;
-        match crate::init::expand_host_env(v) {
-            Ok(resolved) => { env.insert(k.to_string(), resolved); }
-            Err(var)     => missing.push(var),
-        }
-    }
-    if !missing.is_empty() {
-        missing.sort();
-        missing.dedup();
-        anyhow::bail!(
-            "env var(s) not set in this shell: {}. Export them and re-run, or pass literal values.",
-            missing.join(", "),
-        );
+        env.insert(k.to_string(), v.to_string());
     }
 
     configs.push(McpServerConfig {
@@ -195,30 +188,12 @@ pub async fn import_from_file(agent: &str, path: &std::path::Path) -> Result<()>
         return Ok(());
     }
 
-    let mut missing: Vec<String> = Vec::new();
-    let resolved: Vec<McpServerConfig> = entries.into_iter().map(|mut e| {
-        let expand_map = |m: HashMap<String, String>, missing: &mut Vec<String>| -> HashMap<String, String> {
-            m.into_iter().filter_map(|(k, v)| {
-                match crate::init::expand_host_env(&v) {
-                    Ok(resolved) => Some((k, resolved)),
-                    Err(var)     => { missing.push(var); None }
-                }
-            }).collect()
-        };
-        e.env     = expand_map(e.env,     &mut missing);
-        e.headers = expand_map(e.headers, &mut missing);
-        e
-    }).collect();
-
-    if !missing.is_empty() {
-        missing.sort();
-        missing.dedup();
-        anyhow::bail!(
-            "env var(s) not set in this shell: {}. Export them and re-run, or inline the values in '{}'.",
-            missing.join(", "),
-            path.display(),
-        );
-    }
+    // env/headers values are stored verbatim — `${VAR}` is resolved at MCP
+    // spawn time by lair (against config.json + lair's own env, which
+    // contains `~/.octo/lair-env`). Pre-expanding here against the operator's
+    // shell env would fail for vars set via `octo env set` and wouldn't see
+    // anything lair sees at runtime.
+    let resolved = entries;
 
     // Preflight: verify every stdio entry's command exists on this shell's
     // PATH. Unlike `octo mcp add` (which waits for the connect marker and
