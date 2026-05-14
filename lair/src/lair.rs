@@ -556,6 +556,34 @@ async fn poll_agents(state: Arc<AppState>, ready_tx: watch::Sender<bool>) {
     }
 }
 
+// ── Network probes ────────────────────────────────────────────────────────────
+
+/// Probe `host:port` with a short per-attempt TCP `connect` and retry up to
+/// `total_timeout`. Returns `Ok(())` on the first successful connect or
+/// `Err(_)` with the last connect error after exhausting the deadline.
+///
+/// Used by `exec_register_remote_agent` to fail fast on unreachable hosts
+/// (wrong IP, bad security group, subnet without IGW route, terminated
+/// instance) before falling through to the multi-minute SSH wait loop.
+async fn probe_tcp_reachable(host: &str, port: u16, total_timeout: Duration) -> Result<(), String> {
+    let addr = format!("{host}:{port}");
+    let deadline  = tokio::time::Instant::now() + total_timeout;
+    let attempt_t = Duration::from_secs(5);
+    let mut last_err = String::from("no attempts made");
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(
+            attempt_t,
+            tokio::net::TcpStream::connect(&addr),
+        ).await {
+            Ok(Ok(_))  => return Ok(()),
+            Ok(Err(e)) => last_err = e.to_string(),
+            Err(_)     => last_err = format!("TCP connect timed out after {attempt_t:?}"),
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    Err(last_err)
+}
+
 // ── Agent proxy (mobile <-> lair <-> agent) ───────────────────────────────────
 
 /// HTTP forward helper: take the request method + body, send it to
@@ -806,6 +834,22 @@ octo can host any kind of agent workload, not only coding agents — don't assum
   1. `mint_bootstrap_userdata(name=…, agent_purpose?=…)` — get the credentials-free userdata.
   2. Call the provisioning MCP with that userdata verbatim, plus user-specified region / instance_type / security group. The MCP returns a public IP + instance id.
   3. `register_remote_agent(name=…, host=<public_ip>, git_url?=…, provider=…, instance_id=…)` — lair SSHes in, finishes the bootstrap, and registers the row.
+
+## CRITICAL: where `host` and `instance_id` come from
+- Take **both** `host` (the public IP) and `instance_id` **only from the provisioning MCP's `run-instances` (or equivalent) tool result** — the one whose payload includes a clear `Instances[*].InstanceId` and `PublicIpAddress`. That tool returns them as structured JSON; copy them verbatim.
+- **Do not** derive `host` or `instance_id` from:
+  - a `bash` call to `aws ec2 describe-instances` or similar (it can surface stale instances from earlier failed attempts);
+  - your own memory of an earlier turn;
+  - the *first* `run-instances` attempt if you had to retry the call with corrected args (use the IP from the **successful** call, not the failed ones);
+  - any non-MCP source.
+- If the provisioning MCP returned more than one instance or its response is ambiguous, re-call the MCP with `--query` / equivalent to disambiguate. Do **not** guess.
+- Before calling `register_remote_agent`, you may sanity-check the IP with the AWS MCP (e.g. `describe-instances --instance-ids <id> --query 'Reservations[].Instances[].PublicIpAddress'`). Do not use `bash` for this — the MCP's structured response is the source of truth.
+
+## SG / firewall requirements before `register_remote_agent`
+- The instance's **security group must allow inbound TCP 22 from lair's host** (lair drives the SSH bootstrap), plus the agent's Noise port (default 9000) from the same source. If the user didn't pre-create an SG with these rules, do so before launching, or ask the MCP to attach one that does.
+- The instance must be in a **public subnet** — i.e. one whose route table has `0.0.0.0/0` pointing at an Internet Gateway. A "public IP" assigned in a non-public subnet is non-functional.
+
+## Other remote-agent notes
 - Lair's SSH keypair is at `<OCTO_DATA_DIR>/ssh_id_ed25519`. `mint_bootstrap_userdata` always embeds the matching pubkey in the userdata it returns.
 - Termination: for remote agents, `terminate_agent` returns instructions — call the provisioning MCP's terminate-instance method (using `instance_id` from `list_agents`), then `forget_agent(name)`.
 - Trigger the remote flow when the user names a cloud / instance type / region, OR when they ask for hardware lair doesn't have locally (GPUs, etc.).
@@ -1253,25 +1297,67 @@ async fn exec_register_remote_agent(state: Arc<AppState>, input: serde_json::Val
         );
     }
 
-    // Resumption: if a prior `Pending` row for this name + host already
-    // exists, treat as a retry; otherwise this must be a fresh row.
+    // Resumption logic. Any `Pending` row for this name is treated as
+    // retry-able — including ones that recorded a different `host` from a
+    // bad earlier attempt (e.g. the LLM passing the wrong IP). We overwrite
+    // the prior host with the new one in the Pending row we drop below.
+    // `Running` rows error out — the caller has to `forget_agent` (and
+    // terminate the cloud instance) first to avoid clobbering a working
+    // remote agent.
     let prior = state.registry.lock().unwrap().get(&name).cloned();
     let (created_at, resuming) = match prior {
-        Some(r) if matches!(r.status, AgentStatus::Pending)
-                && r.host.as_deref() == Some(host.as_str()) => {
-            info!("[lair/register_remote_agent] resuming pending registration of '{name}' at {host}");
-            (r.created_at, true)
+        Some(r) if matches!(r.status, AgentStatus::Pending) => {
+            if r.host.as_deref() == Some(host.as_str()) {
+                info!("[lair/register_remote_agent] resuming pending registration of '{name}' at {host}");
+                (r.created_at, true)
+            } else {
+                warn!(
+                    "[lair/register_remote_agent] overwriting pending registration of '{name}' \
+                     (was at host={:?}, now {host}) — prior attempt likely used a wrong IP",
+                    r.host,
+                );
+                (r.created_at, false)
+            }
         }
         Some(r) => {
             return format!(
                 "error: agent '{name}' is already in the registry (status={}, host={:?}). \
-                 If you need to re-register, call `forget_agent` first.",
+                 To re-register against a different host, run `forget_agent('{name}')` first \
+                 (and terminate the prior cloud instance via the provisioning MCP if it's still up).",
                 r.status.as_wire_str(),
                 r.host,
             );
         }
         None => (octo_core::now_secs(), false),
     };
+
+    // Pre-flight: TCP probe `host:22` before kicking off the multi-minute
+    // SSH wait loop. Catches the common "wrong IP" / "bad SG" / "subnet has
+    // no IGW route" cases in ~30 s with a useful error, instead of 5 min of
+    // opaque "Connection timed out" log spam. We retry for 30 s so a VM
+    // that's still in the very early stages of cloud-init (sshd not bound
+    // yet) doesn't get false-positived as unreachable.
+    info!("[lair/register_remote_agent] {host}: pre-flight TCP probe on port 22");
+    if let Err(e) = probe_tcp_reachable(&host, 22, Duration::from_secs(30)).await {
+        return format!(
+            "error: {host}:22 is not reachable from lair after 30s ({e}).\n\
+             \n\
+             Common causes — verify each:\n\
+             1. **Wrong IP.** Take `host` only from the provisioning MCP's \
+                run-instances (or equivalent) response. Don't derive it from a \
+                `bash` `describe-instances` call, your memory, or an earlier \
+                failed attempt — those can yield a stale or hallucinated id. \
+                If unsure, re-call the MCP and confirm the IP against the \
+                actual `i-…` instance id you intend to use.\n\
+             2. **Security group.** The instance's SG must allow inbound TCP \
+                22 (and your `public_port`, default 9000) from lair's IP.\n\
+             3. **Subnet routing.** The subnet's route table must route \
+                0.0.0.0/0 to an Internet Gateway. A 'public IP' assigned in \
+                a subnet without IGW routing is non-functional.\n\
+             4. **Instance state.** Verify the instance is `running` (not \
+                `pending`, `shutting-down`, or terminated)."
+        );
+    }
 
     // Phase 1: wait for the agent to publish agent-info.json.
     info!("[lair/register_remote_agent] {host}: waiting for agent-info.json");
