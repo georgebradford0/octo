@@ -18,18 +18,26 @@ This installs `octo` (CLI) and `octo-lair` (the lair / agent binary) to `~/.loca
 
 ## Setup
 
-`octo init` must be run on a Linux host with a static — or at least publicly-reachable — IP. It expects either `--anthropic-api-key` or `--openai-api-key` plus `--model`.
+`octo init` must be run on a Linux host with a static — or at least publicly-reachable — IP. On first run it prompts interactively for credentials; on subsequent runs (when `~/.octo/config.json` already exists) it refuses to overwrite the existing config.
 
 ```sh
-octo init --anthropic-api-key sk-ant-... --model claude-sonnet-4-6
+octo init
 ```
 
-`init` will:
+It prompts for:
 
-1. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels — e.g. SSHing into a remote host for tailing logs).
-2. Write an env file (`~/.octo/lair-env`) and persist credentials to `~/.octo/config.json`.
-3. Spawn `octo-lair --role lair` as a detached background process (pid recorded at `~/.octo/lair/lair.pid`).
-4. Wait for lair's health check, then print a QR code containing the host, port, and Noise pubkey.
+- **Anthropic API key** — press Enter to skip.
+- **OpenAI API key** — press Enter to skip. At least one of the two keys is required.
+- **API URL** — Enter for the Anthropic default; otherwise the full chat-completions URL (e.g. `https://api.deepinfra.com/v1/openai/chat/completions`).
+- **Model** — e.g. `claude-sonnet-4-6`.
+
+`init` will then:
+
+1. Persist credentials to `~/.octo/config.json`.
+2. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels — e.g. SSHing into a remote host for tailing logs).
+3. Write an env file (`~/.octo/lair-env`).
+4. Spawn `octo-lair --role lair` as a detached background process (pid recorded at `~/.octo/lair/lair.pid`).
+5. Wait for lair's health check, then print a QR code containing the host, port, and Noise pubkey.
 
 Anyone with the QR data can connect, so treat it like a credential.
 

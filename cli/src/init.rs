@@ -7,9 +7,20 @@ use std::{
 
 use anyhow::{Context, Result};
 use data_encoding::BASE32_NOPAD;
-use octo_core::{ensure_ssh_keypair, Config};
+use octo_core::ensure_ssh_keypair;
 
 use crate::service;
+
+/// Read a single line from stdin, displaying `label` as the prompt. Trims
+/// trailing newline + surrounding whitespace.
+pub fn prompt(label: &str) -> Result<String> {
+    use std::io::Write;
+    print!("{label}");
+    std::io::stdout().flush().ok();
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s).context("read from stdin")?;
+    Ok(s.trim().to_string())
+}
 
 pub struct InitOptions<'a> {
     pub noise_port: u16,
@@ -278,18 +289,3 @@ pub fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Hydrate `Config` from `~/.octo/config.json` or a `--config` override path.
-pub fn load_config(explicit: Option<&Path>) -> Result<Config> {
-    match explicit {
-        Some(p) => {
-            if !p.exists() {
-                anyhow::bail!("config file not found: {}", p.display());
-            }
-            let text = fs::read_to_string(p)
-                .with_context(|| format!("read {}", p.display()))?;
-            serde_json::from_str::<Config>(&text)
-                .with_context(|| format!("invalid JSON in {}", p.display()))
-        }
-        None => Ok(octo_core::read_config()),
-    }
-}

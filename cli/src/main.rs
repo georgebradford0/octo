@@ -45,17 +45,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Bootstrap lair as a native process on this host
+    /// Bootstrap lair as a native process on this host.
+    ///
+    /// Refuses to run if `~/.octo/config.json` already exists. On first run,
+    /// prompts for the API keys / model interactively, writes config.json,
+    /// then starts lair.
     Init {
-        #[arg(long)]
-        anthropic_api_key: Option<String>,
-        #[arg(long)]
-        openai_api_key: Option<String>,
-        #[arg(long)]
-        api_url: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
-
         /// Extra env var passed to the lair process (KEY=VALUE). Repeatable.
         #[arg(long = "env", short = 'e', value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
         env: Vec<String>,
@@ -71,10 +66,6 @@ enum Command {
         /// Path to an mcp.json file to seed lair's MCP tool list
         #[arg(long)]
         mcp_config: Option<std::path::PathBuf>,
-
-        /// Path to a config.json file (overrides anything in ~/.octo/config.json)
-        #[arg(long)]
-        config: Option<std::path::PathBuf>,
     },
 
     /// Manage child agents
@@ -468,23 +459,43 @@ async fn stream_logs(name: &str, follow: bool) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init {
-            anthropic_api_key, openai_api_key, api_url, model,
-            env, noise_port, http_port, mcp_config, config,
-        } => {
+        Command::Init { env, noise_port, http_port, mcp_config } => {
             let extra_env = init::parse_extra_env(&env)?;
-            let mut cfg: Config = init::load_config(config.as_deref())?;
-            if anthropic_api_key.is_some() { cfg.anthropic_api_key = anthropic_api_key; }
-            if openai_api_key.is_some()    { cfg.openai_api_key    = openai_api_key; }
-            if api_url.is_some()           { cfg.api_url           = api_url; }
-            if model.is_some()             { cfg.model             = model; }
+
+            let config_path = octo_core::config_path();
+            if config_path.exists() {
+                eprintln!("{} already exists — octo is already configured.", config_path.display());
+                eprintln!("To change values, edit it directly or use `octo config set`.");
+                eprintln!("To start over, `octo destroy` first (which removes ~/.octo state).");
+                std::process::exit(1);
+            }
+
+            println!("{} not found — let's configure octo.\n", config_path.display());
+
+            let anthropic = init::prompt("Anthropic API key (Enter to skip):       ")?;
+            let openai    = init::prompt("OpenAI API key (Enter to skip):          ")?;
+            let api_url   = init::prompt("API URL (Enter for Anthropic default):   ")?;
+            let model     = init::prompt("Model (e.g. claude-sonnet-4-6):          ")?;
+
+            let to_opt = |s: String| {
+                let s = s.trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            };
+            let cfg = Config {
+                anthropic_api_key: to_opt(anthropic),
+                openai_api_key:    to_opt(openai),
+                api_url:           to_opt(api_url),
+                model:             to_opt(model),
+                ..Default::default()
+            };
 
             if let Err(e) = validate_resolved_config(&cfg) {
-                eprintln!("error: invalid config: {e}");
+                eprintln!("\nerror: invalid config: {e}");
                 std::process::exit(1);
             }
 
             octo_core::write_config(&cfg);
+            println!("\nWrote {}.", config_path.display());
 
             init::run(init::InitOptions {
                 noise_port,
