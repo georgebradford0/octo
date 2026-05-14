@@ -10,7 +10,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DEV_ROOT="${REPO_ROOT}/dev-data"
-DEV_CONFIG_SRC="${REPO_ROOT}/config.json"
+DEV_CONFIG_SRC="${HOME}/.octo/config.json"
 DEV_NOISE_PORT="${DEV_NOISE_PORT:-9000}"
 DEV_HTTP_PORT="${DEV_HTTP_PORT:-9001}"
 DEV_CONTAINER="${DEV_CONTAINER:-octo-lair-dev}"
@@ -18,7 +18,7 @@ DEV_IMAGE="${DEV_IMAGE:-octo-lair:dev}"
 
 if [ ! -f "${DEV_CONFIG_SRC}" ]; then
     echo "ERROR: ${DEV_CONFIG_SRC} is missing." >&2
-    echo "       Create it (gitignored) with the same schema as ~/.octo/config.json:" >&2
+    echo "       Create it with this schema:" >&2
     echo "       { \"anthropic_api_key\": \"sk-ant-…\", \"model\": \"claude-sonnet-4-6\" }" >&2
     exit 1
 fi
