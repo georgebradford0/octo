@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
@@ -25,8 +25,17 @@ pub fn prompt(label: &str) -> Result<String> {
 pub struct InitOptions<'a> {
     pub noise_port: u16,
     pub http_port:  u16,
-    pub mcp_config: Option<&'a Path>,
+    /// Pre-parsed + env-expanded contents to seed into `~/.octo/lair/mcp.json`,
+    /// paired with the source path for log messages. `None` means no seeding.
+    /// Validated up-front by `load_seed_mcp_config` so failures can't leave
+    /// init in a half-finished state.
+    pub mcp_seed:   Option<McpSeed>,
     pub extra_env:  &'a [(String, String)],
+}
+
+pub struct McpSeed {
+    pub source: PathBuf,
+    pub json:   String,
 }
 
 /// Expand `"${VAR}"` against the operator's process env.
@@ -36,6 +45,44 @@ pub fn expand_host_env(v: &str) -> std::result::Result<String, String> {
     }
     let var = &v[2..v.len() - 1];
     std::env::var(var).map_err(|_| var.to_string())
+}
+
+/// Parse a user-supplied mcp.json file, expand `"${VAR}"` against the
+/// operator's process env, and return the pretty-printed JSON ready to be
+/// written to `~/.octo/lair/mcp.json`. Validation only — does not write
+/// anything to disk. Called before `octo init` writes `config.json` so a
+/// broken mcp file can't leave the user in a half-init'd state.
+pub fn load_seed_mcp_config(path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read mcp config {}", path.display()))?;
+    let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
+
+    let mut missing: Vec<String> = Vec::new();
+    for server in &mut servers {
+        for key in ["env", "headers"] {
+            let Some(obj) = server.get_mut(key).and_then(|e| e.as_object_mut()) else { continue };
+            for (_, val) in obj.iter_mut() {
+                let Some(s) = val.as_str() else { continue };
+                match expand_host_env(s) {
+                    Ok(resolved) => *val = serde_json::Value::String(resolved),
+                    Err(var)     => missing.push(var),
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
+        anyhow::bail!(
+            "mcp config {} references env var(s) not set in this shell: {}. \
+             Export them and re-run, or inline the values in the file.",
+            path.display(),
+            missing.join(", "),
+        );
+    }
+
+    serde_json::to_string_pretty(&servers).context("re-serialize mcp config")
 }
 
 pub async fn run(opts: InitOptions<'_>) -> Result<()> {
@@ -58,39 +105,10 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
 
     println!("Operator config: {}.", octo_core::config_path().display());
 
-    if let Some(path) = opts.mcp_config {
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("read mcp config {}", path.display()))?;
-        let mut servers: Vec<serde_json::Value> = serde_json::from_str(&text)
-            .with_context(|| format!("parse mcp config {}: must be a JSON array", path.display()))?;
-
-        let mut missing: Vec<String> = Vec::new();
-        for server in &mut servers {
-            for key in ["env", "headers"] {
-                let Some(obj) = server.get_mut(key).and_then(|e| e.as_object_mut()) else { continue };
-                for (_, val) in obj.iter_mut() {
-                    let Some(s) = val.as_str() else { continue };
-                    match expand_host_env(s) {
-                        Ok(resolved) => *val = serde_json::Value::String(resolved),
-                        Err(var)     => missing.push(var),
-                    }
-                }
-            }
-        }
-        if !missing.is_empty() {
-            missing.sort();
-            missing.dedup();
-            anyhow::bail!(
-                "mcp config {} references env var(s) not set in this shell: {}. \
-                 Export them and re-run, or inline the values in the file.",
-                path.display(),
-                missing.join(", "),
-            );
-        }
-
+    if let Some(seed) = opts.mcp_seed {
         let dest = lair_dir.join("mcp.json");
-        write_secret_file(&dest, &serde_json::to_string_pretty(&servers)?)?;
-        println!("Seeded MCP config: {}", dest.display());
+        write_secret_file(&dest, &seed.json)?;
+        println!("Seeded MCP config from {} -> {}", seed.source.display(), dest.display());
     }
 
     // Ensure `<lair_dir>/noise_key.bin` (priv || pub, 64 bytes) exists.

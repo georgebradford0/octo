@@ -463,44 +463,77 @@ async fn main() -> Result<()> {
             let extra_env = init::parse_extra_env(&env)?;
 
             let config_path = octo_core::config_path();
-            if config_path.exists() {
+            let launch_path = service::launch_config_path();
+            let config_exists = config_path.exists();
+            let launch_exists = launch_path.exists();
+
+            // Refuse only when init clearly succeeded last time (both config
+            // and launch record present). If config.json was written but lair
+            // never started (e.g. a previous init bailed on a bad mcp config),
+            // treat this as a resumable retry.
+            if config_exists && launch_exists {
                 eprintln!("{} already exists — octo is already configured.", config_path.display());
                 eprintln!("To change values, edit it directly or use `octo config set`.");
                 eprintln!("To start over, `octo destroy` first (which removes ~/.octo state).");
                 std::process::exit(1);
             }
 
-            println!("{} not found — let's configure octo.\n", config_path.display());
-
-            let anthropic = init::prompt("Anthropic API key (Enter to skip):       ")?;
-            let openai    = init::prompt("OpenAI API key (Enter to skip):          ")?;
-            let api_url   = init::prompt("API URL (Enter for Anthropic default):   ")?;
-            let model     = init::prompt("Model (e.g. claude-sonnet-4-6):          ")?;
-
-            let to_opt = |s: String| {
-                let s = s.trim().to_string();
-                if s.is_empty() { None } else { Some(s) }
-            };
-            let cfg = Config {
-                anthropic_api_key: to_opt(anthropic),
-                openai_api_key:    to_opt(openai),
-                api_url:           to_opt(api_url),
-                model:             to_opt(model),
-                ..Default::default()
+            // Pre-flight: validate any --mcp-config file BEFORE we prompt or
+            // write anything. A broken mcp file used to fail after config.json
+            // was written, leaving `octo init` refusing to re-run and lair
+            // never started.
+            let mcp_seed = match mcp_config.as_deref() {
+                Some(p) => Some(init::McpSeed {
+                    source: p.to_path_buf(),
+                    json:   init::load_seed_mcp_config(p)?,
+                }),
+                None => None,
             };
 
-            if let Err(e) = validate_resolved_config(&cfg) {
-                eprintln!("\nerror: invalid config: {e}");
-                std::process::exit(1);
+            if config_exists {
+                println!(
+                    "{} exists but lair was never started — resuming init with the existing config.",
+                    config_path.display(),
+                );
+                let cfg = octo_core::read_config();
+                if let Err(e) = validate_resolved_config(&cfg) {
+                    eprintln!("error: existing {} is invalid: {e}", config_path.display());
+                    eprintln!("Edit it directly or run `octo config set ...` and re-run `octo init`.");
+                    std::process::exit(1);
+                }
+            } else {
+                println!("{} not found — let's configure octo.\n", config_path.display());
+
+                let anthropic = init::prompt("Anthropic API key (Enter to skip):       ")?;
+                let openai    = init::prompt("OpenAI API key (Enter to skip):          ")?;
+                let api_url   = init::prompt("API URL (Enter for Anthropic default):   ")?;
+                let model     = init::prompt("Model (e.g. claude-sonnet-4-6):          ")?;
+
+                let to_opt = |s: String| {
+                    let s = s.trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                };
+                let cfg = Config {
+                    anthropic_api_key: to_opt(anthropic),
+                    openai_api_key:    to_opt(openai),
+                    api_url:           to_opt(api_url),
+                    model:             to_opt(model),
+                    ..Default::default()
+                };
+
+                if let Err(e) = validate_resolved_config(&cfg) {
+                    eprintln!("\nerror: invalid config: {e}");
+                    std::process::exit(1);
+                }
+
+                octo_core::write_config(&cfg);
+                println!("\nWrote {}.", config_path.display());
             }
-
-            octo_core::write_config(&cfg);
-            println!("\nWrote {}.", config_path.display());
 
             init::run(init::InitOptions {
                 noise_port,
                 http_port,
-                mcp_config: mcp_config.as_deref(),
+                mcp_seed,
                 extra_env:  &extra_env,
             }).await?;
         }
