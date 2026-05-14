@@ -134,21 +134,13 @@ pub async fn ensure_lair_binary() -> Result<PathBuf> {
         return Ok(p);
     }
     println!("octo-lair not found on this host — downloading latest release...");
-    download_lair_binary().await
+    let dest = managed_lair_path();
+    download_lair_binary(&dest).await?;
+    Ok(dest)
 }
 
-/// Always-download path. Pulls the latest `lair-v*` release artefact for
-/// this host's architecture and writes it to `~/.octo/bin/octo-lair`,
-/// overwriting whatever's there. Used by the init flow and could be wired
-/// to a future `octo lair update` subcommand.
-pub async fn download_lair_binary() -> Result<PathBuf> {
-    let artifact = match std::env::consts::ARCH {
-        "x86_64"  => "octo-lair-linux-x86_64",
-        "aarch64" => "octo-lair-linux-aarch64",
-        a => anyhow::bail!("unsupported architecture: {a}"),
-    };
-
-    // Find the most recent `lair-v*` release tag via the GitHub releases API.
+/// Resolve the most recent `lair-v*` release tag on the configured repo.
+pub async fn latest_lair_tag() -> Result<String> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("octo/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
@@ -162,17 +154,52 @@ pub async fn download_lair_binary() -> Result<PathBuf> {
         .json().await
         .context("decode releases JSON")?;
 
-    let tag = releases.as_array()
+    releases.as_array()
         .ok_or_else(|| anyhow::anyhow!("/releases didn't return an array"))?
         .iter()
         .filter_map(|r| r.get("tag_name").and_then(|t| t.as_str()))
         .find(|t| t.starts_with("lair-v"))
+        .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!(
             "no `lair-v*` release found on {REPO_SLUG}. Dispatch the `lair Release` GitHub \
              Actions workflow once to publish one, or set $OCTO_LAIR_BINARY to point at a \
              locally-built binary."
-        ))?
-        .to_string();
+        ))
+}
+
+/// Run `<path> --version` and return the parsed version string (e.g. `0.8.2`).
+pub async fn lair_binary_version(path: &Path) -> Result<String> {
+    let out = tokio::process::Command::new(path)
+        .arg("--version")
+        .output().await
+        .with_context(|| format!("spawn {} --version", path.display()))?;
+    if !out.status.success() {
+        anyhow::bail!("{} --version exited with status {}", path.display(), out.status);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let token = stdout.split_whitespace().last()
+        .ok_or_else(|| anyhow::anyhow!("empty --version output from {}", path.display()))?;
+    Ok(token.to_string())
+}
+
+/// Always-download path. Pulls the latest `lair-v*` release artefact for
+/// this host's architecture and writes it to `dest`, overwriting whatever's
+/// there. Returns the release tag (e.g. `lair-v0.8.2`). Falls back to `sudo mv`
+/// if `dest`'s directory is not writable by the current user.
+pub async fn download_lair_binary(dest: &Path) -> Result<String> {
+    let artifact = match std::env::consts::ARCH {
+        "x86_64"  => "octo-lair-linux-x86_64",
+        "aarch64" => "octo-lair-linux-aarch64",
+        a => anyhow::bail!("unsupported architecture: {a}"),
+    };
+
+    let tag = latest_lair_tag().await?;
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("octo/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("build http client")?;
 
     let url = format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{artifact}");
     println!("  fetching {url}");
@@ -183,14 +210,20 @@ pub async fn download_lair_binary() -> Result<PathBuf> {
         .bytes().await
         .context("read response body")?;
 
-    let dest = managed_lair_path();
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        // Best-effort: if we can't create the parent (e.g. /usr/local/bin
+        // already exists but isn't writable by us), the sudo fallback below
+        // still works.
+        fs::create_dir_all(parent).ok();
     }
-    // Write atomically (temp file + rename) so a partially-downloaded file
-    // can't masquerade as the real binary on a future `octo init`.
-    let tmp = dest.with_extension("download");
+
+    // Stage the download in /tmp so we don't need write access to dest's dir
+    // for the initial write, then move into place (with sudo fallback).
+    let tmp = std::env::temp_dir().join(format!(
+        "octo-lair.{}.{}.download",
+        std::process::id(),
+        tag.trim_start_matches("lair-v"),
+    ));
     fs::write(&tmp, &bytes)
         .with_context(|| format!("write {}", tmp.display()))?;
     #[cfg(unix)]
@@ -200,10 +233,31 @@ pub async fn download_lair_binary() -> Result<PathBuf> {
         perms.set_mode(0o755);
         fs::set_permissions(&tmp, perms).ok();
     }
-    fs::rename(&tmp, &dest)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
+
+    // Try rename first (fast path on same filesystem). If that fails, try
+    // `mv` (handles cross-device moves). If that fails, fall back to `sudo mv`.
+    if fs::rename(&tmp, dest).is_err() {
+        let mv_ok = std::process::Command::new("mv")
+            .arg(&tmp).arg(dest)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !mv_ok {
+            let st = std::process::Command::new("sudo")
+                .args(["mv", "--"])
+                .arg(&tmp).arg(dest)
+                .status()
+                .with_context(|| format!("sudo mv {} {}", tmp.display(), dest.display()))?;
+            anyhow::ensure!(
+                st.success(),
+                "failed to install lair binary to {} (sudo mv exited with {})",
+                dest.display(), st,
+            );
+        }
+    }
+
     println!("  installed octo-lair to {} ({tag})", dest.display());
-    Ok(dest)
+    Ok(tag)
 }
 
 fn which(name: &str) -> Result<PathBuf> {

@@ -115,6 +115,12 @@ enum Command {
     /// Update the octo CLI to the latest release
     Update,
 
+    /// Manage the octo-lair binary on this host
+    Lair {
+        #[command(subcommand)]
+        action: LairAction,
+    },
+
     /// Remove the octo binary and shell completions from this machine
     Uninstall {
         #[arg(short, long)]
@@ -163,6 +169,12 @@ enum EnvAction {
     Show,
     Set { vars: Vec<String> },
     Unset { keys: Vec<String> },
+}
+
+#[derive(Subcommand)]
+enum LairAction {
+    /// Download the latest octo-lair release and restart lair
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -288,6 +300,43 @@ async fn update() -> Result<()> {
     }
 
     println!("Updated: v{current_version} → v{latest_version}");
+    Ok(())
+}
+
+async fn update_lair() -> Result<()> {
+    // Install over whatever location is already in use, so the new binary is
+    // what `resolve_lair_binary` picks on the next start. If nothing is
+    // installed yet, drop it into the managed path.
+    let dest = service::resolve_lair_binary().unwrap_or_else(|_| service::managed_lair_path());
+
+    let current_version = if dest.exists() {
+        service::lair_binary_version(&dest).await.ok()
+    } else {
+        None
+    };
+
+    let latest_tag = service::latest_lair_tag().await?;
+    let latest_version = latest_tag.trim_start_matches("lair-v");
+
+    if let Some(cur) = current_version.as_deref() {
+        if cur == latest_version {
+            println!("octo-lair already at v{cur} ({}).", dest.display());
+            return Ok(());
+        }
+        println!("Updating octo-lair: v{cur} -> v{latest_version} ({})", dest.display());
+    } else {
+        println!("Installing octo-lair v{latest_version} to {}", dest.display());
+    }
+
+    service::download_lair_binary(&dest).await?;
+
+    if service::is_running() {
+        init::restart_lair("lair update").await?;
+    } else if service::read_launch().is_some() {
+        println!("lair is not running; new binary will be used on next `octo reload`.");
+    } else {
+        println!("lair has not been initialized; run `octo init` to start it.");
+    }
     Ok(())
 }
 
@@ -474,6 +523,9 @@ async fn main() -> Result<()> {
 
         Command::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         Command::Update => update().await?,
+        Command::Lair { action } => match action {
+            LairAction::Update => update_lair().await?,
+        },
         Command::Uninstall { yes } => uninstall(yes).await?,
         Command::Completions { shell } => {
             generate(shell, &mut Cli::command(), "octo", &mut std::io::stdout());
