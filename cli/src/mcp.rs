@@ -220,10 +220,51 @@ pub async fn import_from_file(agent: &str, path: &std::path::Path) -> Result<()>
         );
     }
 
+    // Preflight: verify every stdio entry's command exists on this shell's
+    // PATH. Unlike `octo mcp add` (which waits for the connect marker and
+    // rolls back on spawn failure), `import` writes the whole file in one
+    // shot — without this check, missing tools land in `mcp.json` and lair
+    // fails the spawn on every subsequent hot-reload. URL-based entries
+    // (`url: "..."`) are HTTP, no process spawn, so they're skipped.
+    let mut missing_commands: Vec<(String, String)> = Vec::new();
+    for entry in &resolved {
+        if entry.url.is_some() { continue; }
+        let cmd = entry.command.trim();
+        if cmd.is_empty() {
+            anyhow::bail!("MCP server '{}' has neither `command` nor `url`", entry.name);
+        }
+        if !command_on_path(cmd) {
+            missing_commands.push((entry.name.clone(), cmd.to_string()));
+        }
+    }
+    if !missing_commands.is_empty() {
+        let mut msg = String::from("the following MCP server commands are not on this shell's PATH:\n");
+        for (name, cmd) in &missing_commands {
+            msg.push_str(&format!("  '{name}' → '{cmd}'\n"));
+        }
+        msg.push_str(
+            "\nInstall the missing tool(s) (e.g. `curl -LsSf https://astral.sh/uv/install.sh | sh` \
+             for uv/uvx) and re-run. If the tool is installed but lair's PATH differs from yours, \
+             run `octo reload` to re-spawn lair from your current shell."
+        );
+        anyhow::bail!(msg);
+    }
+
     println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", resolved.len());
     write_mcp(agent, &resolved)?;
     println!("Imported successfully.");
     Ok(())
+}
+
+/// True if `name` resolves to an executable lookup on this process's `PATH`.
+/// Absolute / relative paths are checked for plain existence; bare names are
+/// walked across `PATH` entries.
+fn command_on_path(name: &str) -> bool {
+    if name.contains('/') {
+        return std::path::Path::new(name).exists();
+    }
+    let Some(path) = std::env::var_os("PATH") else { return false; };
+    std::env::split_paths(&path).any(|dir| dir.join(name).exists())
 }
 
 pub async fn remove(agent: &str, name: &str) -> Result<()> {
