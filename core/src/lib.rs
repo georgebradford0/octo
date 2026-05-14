@@ -534,7 +534,15 @@ pub async fn execute_tool(
 ) -> String {
     let tool_start = std::time::Instant::now();
     debug!("[core/tool] execute '{name}' cwd={cwd}");
-    let result = execute_tool_inner(name, input, cwd, tx, cancel, extra_executor).await;
+    // Race the tool future against the cancel token. On cancel, the in-flight
+    // future is dropped — cancel-by-drop gives us a universal interrupt that
+    // works for every tool including MCP, at the cost of possibly leaving
+    // partial state (e.g. a half-written file). The model will see the
+    // synthetic "error: interrupted" result and can clean up on the next turn.
+    let result = tokio::select! {
+        r = execute_tool_inner(name, input, cwd, tx, cancel.clone(), extra_executor) => r,
+        _ = cancel.cancelled() => "error: interrupted".to_string(),
+    };
     let elapsed = tool_start.elapsed().as_millis();
     let preview: String = result.chars().take(200).collect();
     info!("[core/tool] '{name}' done in {elapsed}ms ({} chars): {preview}", result.len());
