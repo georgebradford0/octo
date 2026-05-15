@@ -103,7 +103,7 @@ Lair listens on `NOISE_PORT` (default 8443 in prod) and forwards Noise traffic t
 Lair exposes a small management API on `127.0.0.1:8000` for the CLI:
 
 - `GET    /agents` — list registry rows.
-- `POST   /agents` — `{name?, git_url?, port?, startup_script?, startup_prompt?}` — spawn a new child.
+- `POST   /agents` — `{name?, git_url?, port?, startup_script?, startup_prompt?, mcp?}` — spawn a new child. Omit `mcp` to inherit lair's current `mcp.json` verbatim (the default); pass `[]` for no MCP servers, or a non-empty array (same schema as `mcp.json`) to override.
 - `POST   /agents/:name/start` / `stop` — supervisor control.
 - `DELETE /agents/:name` — terminate + remove data dir.
 - `GET    /agents/:name/logs` — last 1 MB of the child's `agent.log`.
@@ -146,6 +146,12 @@ Set at `docker run` time by `cli/src/service.rs`:
 | `WORKSPACE_DIR` | `~/.octo/agents/<name>/workspace` |
 | `GIT_URL` | Optional repo to clone (HTTPS needs `GH_TOKEN`) |
 | `AGENT_PURPOSE` / `STARTUP_SCRIPT` / `STARTUP_PROMPT` | Optional bootstrap knobs |
+
+### MCP inheritance (lair → child)
+
+When a child is created (`create_agent` tool / `POST /agents`), lair writes its current `mcp.json` into `~/.octo/agents/<name>/data/mcp.json` so the child boots with the same MCP servers lair has. Callers can override by passing an explicit `mcp` array in the create request: `[]` for no servers, or a non-empty list matching the `mcp.json` schema for an exact replacement.
+
+Inheritance is a snapshot at create time — subsequent edits to lair's `mcp.json` do not propagate. Per-agent edits via `octo mcp add --agent <name>` survive restarts because `start_agent_by_name` passes `mcp: None` to the supervisor, which leaves the child's existing `mcp.json` untouched.
 
 ### CI/CD workflows (all manual dispatch)
 

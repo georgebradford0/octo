@@ -13,6 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use octo_core::mcp::McpServerConfig;
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
@@ -82,6 +83,13 @@ pub struct SpawnParams<'a> {
     /// URL the child should hit to reach lair's loopback management API
     /// (e.g. `http://127.0.0.1:8000`). Passed via `LAIR_INTERNAL_URL`.
     pub lair_internal_url: Option<&'a str>,
+    /// MCP servers to seed into the child's `mcp.json` before the child
+    /// process starts. `None` means "leave the existing file alone" — used
+    /// on restart so per-agent edits via `octo mcp add --agent <name>`
+    /// survive. `Some(list)` writes that list to
+    /// `<data_dir>/mcp.json`, overwriting any existing content. Pass an
+    /// empty slice to explicitly clear the child's MCP servers.
+    pub mcp:               Option<&'a [McpServerConfig]>,
 }
 
 /// One running agent. We keep the `Child` handle so dropping the supervisor
@@ -150,6 +158,21 @@ impl AgentSupervisor {
         chown_best_effort(&agent_dir,     uid, gid);
         chown_best_effort(&data_dir,      uid, gid);
         chown_best_effort(&workspace_dir, uid, gid);
+
+        // Seed the child's mcp.json *before* spawning so the child's
+        // `init_mcp_pool()` sees it on first read. `None` means the caller
+        // (typically a restart path) wants to preserve whatever's already
+        // on disk — possibly per-agent edits made via
+        // `octo mcp add --agent <name>` after the child was created.
+        if let Some(servers) = p.mcp {
+            let mcp_path = data_dir.join("mcp.json");
+            let json = serde_json::to_string_pretty(servers)
+                .context("serialize seeded mcp.json")?;
+            std::fs::write(&mcp_path, json)
+                .with_context(|| format!("write {}", mcp_path.display()))?;
+            chown_best_effort(&mcp_path, uid, gid);
+            info!("[supervisor] seeded {} with {} MCP server(s)", mcp_path.display(), servers.len());
+        }
 
         let log_path = self.log_path(p.name);
         let log_file = std::fs::OpenOptions::new()

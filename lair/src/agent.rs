@@ -431,6 +431,22 @@ fn spawn_agent_tool() -> AnthropicTool {
                 "startup_prompt": {
                     "type": "string",
                     "description": "Optional first user message to the child's agentic loop once ready. Never include secrets."
+                },
+                "mcp": {
+                    "type": "array",
+                    "description": "Optional MCP server list for the new child. OMIT to inherit lair's current mcp.json verbatim (the default — the child gets the same MCP tools lair has). Pass an empty array [] to give the child no MCP servers. Pass a non-empty array to override with exactly these servers — each entry matches the mcp.json schema: {name, command, args?, env?} for stdio or {name, url, headers?} for HTTP. The list is snapshotted into the child's data dir at spawn time.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name":    { "type": "string" },
+                            "command": { "type": "string" },
+                            "args":    { "type": "array", "items": { "type": "string" } },
+                            "env":     { "type": "object", "additionalProperties": { "type": "string" } },
+                            "url":     { "type": "string" },
+                            "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+                        },
+                        "required": ["name"]
+                    }
                 }
             },
             "required": []

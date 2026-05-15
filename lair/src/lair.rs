@@ -542,6 +542,10 @@ async fn start_agent_by_name(state: &AppState, name: &str) -> Result<(), String>
         agent_purpose:     None,
         agent_token:       agent_token.as_deref(),
         lair_internal_url: Some(&lair_internal_url),
+        // Restart preserves the existing mcp.json (which may have been
+        // edited via `octo mcp add --agent <name>`). Initial inheritance
+        // from lair happens once at create time, not on every restart.
+        mcp:               None,
     };
     let pid = state.supervisor.spawn(&params).await.map_err(|e| e.to_string())?;
     {
@@ -1025,6 +1029,22 @@ fn create_agent_tool() -> AnthropicTool {
                 "startup_prompt": {
                     "type": "string",
                     "description": "Optional initial prompt sent to the child's agentic loop once ready. Never include sensitive data."
+                },
+                "mcp": {
+                    "type": "array",
+                    "description": "Optional MCP server list for the child. OMIT this field to inherit lair's current mcp.json verbatim (the default — children get all of lair's MCP tools). Pass an empty array [] to give the child no MCP servers. Pass a non-empty array to override with exactly these servers — each entry matches the mcp.json schema: {name, command, args?, env?} for stdio or {name, url, headers?} for HTTP. The list is snapshotted into the child's data dir at create time; subsequent edits to lair's mcp.json do not propagate.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name":    { "type": "string" },
+                            "command": { "type": "string" },
+                            "args":    { "type": "array", "items": { "type": "string" } },
+                            "env":     { "type": "object", "additionalProperties": { "type": "string" } },
+                            "url":     { "type": "string" },
+                            "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+                        },
+                        "required": ["name"]
+                    }
                 }
             },
             "required": []
@@ -1265,6 +1285,45 @@ async fn exec_create_agent_for_parent(
         git_url.as_deref().unwrap_or("(none)"),
     );
 
+    // Resolve the child's MCP servers. Default = inherit lair's current
+    // mcp.json. Explicit override = the caller-supplied "mcp" array
+    // (which may be empty to mean "no MCP servers"). The resolved list is
+    // written to the child's data dir by `AgentSupervisor::spawn` before
+    // it starts the process.
+    let mcp_servers: Vec<octo_core::mcp::McpServerConfig> = match input.get("mcp") {
+        None => {
+            // Inherit lair's mcp.json verbatim. `load_mcp_configs` reads
+            // from `OCTO_DATA_DIR/mcp.json` and returns an empty Vec if
+            // the file is absent — both are valid defaults for the child.
+            let inherited = octo_core::mcp::load_mcp_configs();
+            info!(
+                "[lair/create_agent] {child_name} inheriting {} MCP server(s) from lair",
+                inherited.len(),
+            );
+            inherited
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            match serde_json::from_value::<Vec<octo_core::mcp::McpServerConfig>>(serde_json::Value::Array(arr.clone())) {
+                Ok(v) => {
+                    info!("[lair/create_agent] {child_name} using {} MCP server(s) from override", v.len());
+                    v
+                }
+                Err(e) => return Err(format!("invalid 'mcp' field — {e}")),
+            }
+        }
+        Some(other) => {
+            let kind = match other {
+                serde_json::Value::Null    => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Object(_) => "object",
+                serde_json::Value::Array(_)  => "array",
+            };
+            return Err(format!("'mcp' must be a JSON array of server configs (got {kind})"));
+        }
+    };
+
     let cfg = octo_core::read_config();
     let gh_token = std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty());
 
@@ -1297,6 +1356,7 @@ async fn exec_create_agent_for_parent(
         agent_purpose:     None,
         agent_token:       agent_token.as_deref(),
         lair_internal_url: Some(&lair_internal_url),
+        mcp:               Some(&mcp_servers),
     };
 
     match state.supervisor.spawn(&params).await {
@@ -1865,6 +1925,11 @@ struct CreateAgentBody {
     port:           Option<u16>,
     startup_script: Option<String>,
     startup_prompt: Option<String>,
+    /// Optional MCP server list for the child. Absent = inherit lair's
+    /// current mcp.json verbatim (the default). Empty array = explicitly
+    /// no MCP servers. Non-empty = use exactly these (same schema as
+    /// `mcp.json`).
+    mcp:            Option<serde_json::Value>,
 }
 
 async fn cli_list_agents(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -1882,6 +1947,7 @@ async fn cli_create_agent(
     if let Some(v) = body.port           { input.insert("port".into(),           serde_json::Value::Number(v.into())); }
     if let Some(v) = body.startup_script { input.insert("startup_script".into(), serde_json::Value::String(v)); }
     if let Some(v) = body.startup_prompt { input.insert("startup_prompt".into(), serde_json::Value::String(v)); }
+    if let Some(v) = body.mcp            { input.insert("mcp".into(),            v); }
     let out = exec_create_agent(state, serde_json::Value::Object(input)).await;
     if out.starts_with("error") {
         (StatusCode::BAD_REQUEST, out).into_response()
@@ -1945,6 +2011,10 @@ struct CreateChildAgentBody {
     port:           Option<u16>,
     startup_script: Option<String>,
     startup_prompt: Option<String>,
+    /// Same semantics as `CreateAgentBody.mcp` — omit to inherit lair's
+    /// current `mcp.json` verbatim, pass `[]` for no MCP servers, or pass
+    /// a non-empty array for an exact replacement.
+    mcp:            Option<serde_json::Value>,
 }
 
 /// Spawn a new agent whose parent is the caller. The caller is identified by
@@ -1991,6 +2061,7 @@ async fn agent_create_child(
     if let Some(v) = body.port           { input.insert("port".into(),           serde_json::Value::Number(v.into())); }
     if let Some(v) = body.startup_script { input.insert("startup_script".into(), serde_json::Value::String(v)); }
     if let Some(v) = body.startup_prompt { input.insert("startup_prompt".into(), serde_json::Value::String(v)); }
+    if let Some(v) = body.mcp            { input.insert("mcp".into(),            v); }
 
     match exec_create_agent_for_parent(state, serde_json::Value::Object(input), Some(caller.name.clone())).await {
         Ok(msg) => (StatusCode::OK, msg).into_response(),
