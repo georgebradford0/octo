@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-05-14
+
+### Security
+
+- **Remote agents now whitelist lair as the only legitimate Noise XX initiator.** `core::run_noise_proxy` (the responder loop, shared by both the lair role and the agent role) gains an `expected_initiator_pubkey: Option<Vec<u8>>` parameter. After the handshake, `core::handle_noise_connection` calls `session.get_remote_static()` and rejects with `initiator pubkey not on allowlist` when the bytes don't match. Without this, a third party who learned `(host, port, agent_pubkey)` could complete the Noise XX handshake against the remote agent and speak its protocol — Noise XX proves possession of the static key but doesn't bind it to an expected identity.
+- The agent role (`lair/src/agent.rs`) now reads `LAIR_PUBKEY` from env at boot. If `AGENT_NOISE_PORT` is set (remote-agent mode) and `LAIR_PUBKEY` is unset or malformed, the role **refuses to start** — fail-closed. Local children (where `AGENT_NOISE_PORT` is unset) are unaffected.
+- `mint_bootstrap_userdata` now embeds `LAIR_PUBKEY=<base32>` in the agent.env it writes, sourced from lair's current Noise static pubkey (`AppState.pubkey_b32`).
+- The mobile-facing lair listener still passes `None` for the allowlist — that path is tracked separately by the "client-key allowlist + first-connection ack UI" item in `TODO.md`.
+
 ## [0.10.2] - 2026-05-14
 
 ### Fixed

@@ -28,7 +28,7 @@ use octo_core::{
     self,
     build_agent_system_prompt, build_system_prompt,
     build_tools_with_mcp, cancel_task as core_cancel_task, chain_executor_with_mcp,
-    completion_chat_event, data_dir, finalize_task, now_secs, record_task_progress,
+    completion_chat_event, data_dir, finalize_task, from_base32, now_secs, record_task_progress,
     register_task, tasks_wire_json, TaskRecord, TaskStatus,
     get_branches_for_repo, init_mcp_pool, init_shell_env,
     load_or_generate_keypair, read_config,
@@ -531,7 +531,35 @@ pub async fn run() -> anyhow::Result<()> {
         if let Err(e) = write_agent_info(&data_dir(), &pubkey_b32, noise_port) {
             warn!("[agent] could not write agent-info.json: {e}");
         }
-        tokio::spawn(run_noise_proxy(static_private, noise_port, port));
+        // Initiator-pubkey allowlist: only lair (whose static pubkey is
+        // embedded in the userdata as `LAIR_PUBKEY=<base32>`) is allowed to
+        // complete the Noise XX handshake to this responder. Without this,
+        // anyone on the internet who learned `(host, port, agent_pubkey)`
+        // could speak the agent's protocol — Noise XX proves possession of
+        // a static key but doesn't enforce identity. Fail-closed: if
+        // `LAIR_PUBKEY` is unset or malformed for a remote agent, refuse
+        // to start the responder rather than running open.
+        let expected_lair_pubkey: Option<Vec<u8>> = match std::env::var("LAIR_PUBKEY") {
+            Ok(s) if !s.is_empty() => match from_base32(&s) {
+                Some(bytes) if bytes.len() == 32 => Some(bytes),
+                Some(_) => {
+                    return Err(anyhow::anyhow!(
+                        "LAIR_PUBKEY decodes to non-32-byte value; expected a 32-byte Curve25519 public key"
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "LAIR_PUBKEY is not valid base32 (RFC 4648 no-pad)"
+                    ));
+                }
+            },
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "AGENT_NOISE_PORT is set but LAIR_PUBKEY is missing — refusing to expose an unauthenticated Noise responder. Re-mint userdata via `mint_bootstrap_userdata` so it embeds lair's pubkey."
+                ));
+            }
+        };
+        tokio::spawn(run_noise_proxy(static_private, noise_port, port, expected_lair_pubkey));
     }
 
     let workspace = std::path::PathBuf::from(

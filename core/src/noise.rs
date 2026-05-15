@@ -207,14 +207,37 @@ pub async fn noise_handshake(
     }
 }
 
+// `expected_initiator_pubkey`, when `Some(_)`, rejects any connection whose
+// post-handshake remote static key bytes don't equal this value. Used by the
+// remote-agent role to whitelist lair as the only legitimate initiator —
+// without it, knowing `(host, port, agent_pubkey)` would be enough for any
+// third party to complete the Noise XX handshake.
 pub async fn handle_noise_connection(
     mut stream: tokio::net::TcpStream,
     static_private: Arc<Vec<u8>>,
     http_port: u16,
+    expected_initiator_pubkey: Option<Arc<Vec<u8>>>,
 ) -> anyhow::Result<()> {
     let peer = stream.peer_addr().ok();
-    let HandshakeResult { transport, remote_static: _ } =
+    let HandshakeResult { transport, remote_static } =
         noise_handshake(&mut stream, &static_private).await?;
+    if let Some(expected) = expected_initiator_pubkey.as_deref() {
+        match remote_static.as_deref() {
+            Some(actual) if actual == expected.as_slice() => {}
+            Some(actual) => {
+                warn!(
+                    "[noise] rejecting peer={peer:?}: initiator pubkey {} does not match expected {}",
+                    to_base32(actual),
+                    to_base32(expected),
+                );
+                anyhow::bail!("initiator pubkey not on allowlist");
+            }
+            None => {
+                warn!("[noise] rejecting peer={peer:?}: handshake completed without an initiator pubkey");
+                anyhow::bail!("initiator pubkey absent after handshake");
+            }
+        }
+    }
     let transport = Arc::new(Mutex::new(transport));
     debug!("[noise] connecting to local HTTP port {http_port} for peer={peer:?}");
     let local = tokio::net::TcpStream::connect(format!("127.0.0.1:{http_port}")).await?;
@@ -429,11 +452,30 @@ async fn pipe_noise_initiator(
     }
 }
 
-pub async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port: u16) {
+// `expected_initiator_pubkey`, when `Some(_)`, restricts the listener to
+// handshakes whose initiator static pubkey matches this value (everyone
+// else is dropped after the handshake completes). Remote agents pass
+// `Some(lair_pubkey)`; lair itself passes `None` because the mobile-facing
+// tunnel is gated by QR distribution (tracked separately by the
+// client-allowlist TODO in the project root).
+pub async fn run_noise_proxy(
+    static_private: Vec<u8>,
+    noise_port: u16,
+    http_port: u16,
+    expected_initiator_pubkey: Option<Vec<u8>>,
+) {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{noise_port}"))
         .await.expect("failed to bind Noise port");
-    info!("[noise] listening on 0.0.0.0:{noise_port} → 127.0.0.1:{http_port}");
+    if let Some(ref k) = expected_initiator_pubkey {
+        info!(
+            "[noise] listening on 0.0.0.0:{noise_port} → 127.0.0.1:{http_port} (allowlist={})",
+            to_base32(k),
+        );
+    } else {
+        info!("[noise] listening on 0.0.0.0:{noise_port} → 127.0.0.1:{http_port}");
+    }
     let static_private = Arc::new(static_private);
+    let expected_initiator_pubkey = expected_initiator_pubkey.map(Arc::new);
     let per_ip_count: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let Ok((stream, peer)) = listener.accept().await else { continue };
@@ -460,6 +502,7 @@ pub async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port
         info!("[noise] connection from {peer}");
         let priv_clone = static_private.clone();
         let counts_clone = per_ip_count.clone();
+        let expected_clone = expected_initiator_pubkey.clone();
         tokio::spawn(async move {
             // Decrement the per-IP counter when this task ends, regardless of outcome.
             struct ConnGuard {
@@ -477,7 +520,7 @@ pub async fn run_noise_proxy(static_private: Vec<u8>, noise_port: u16, http_port
             }
             let _guard = ConnGuard { counts: counts_clone, ip: peer_ip };
 
-            if let Err(e) = handle_noise_connection(stream, priv_clone, http_port).await {
+            if let Err(e) = handle_noise_connection(stream, priv_clone, http_port, expected_clone).await {
                 if e.is::<ProbeClosed>() {
                     debug!("[noise] probe closed (no handshake) from {peer}");
                 } else {
