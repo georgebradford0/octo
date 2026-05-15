@@ -1361,12 +1361,19 @@ async fn exec_mint_bootstrap_userdata(state: Arc<AppState>, input: serde_json::V
         Err(e) => return format!("error reading lair SSH public key: {e:#}"),
     };
 
+    // Lair's Noise static pubkey — embedded as `LAIR_PUBKEY` so the remote
+    // agent's responder rejects any Noise XX handshake from an initiator
+    // that isn't this lair. Without this, knowing the agent's `(host, port,
+    // pubkey)` triple would be enough to speak the agent's protocol.
+    let lair_noise_pubkey_b32 = state.pubkey_b32.clone();
+
     // Env file passed to `docker run --env-file`. All container-internal
     // paths — the image bakes `OCTO_HOME=/data` and `OCTO_DATA_DIR=/data/lair`
     // already, and `-v /var/lib/octo:/data` maps those to host paths.
     let mut env_lines: Vec<String> = vec![
         "AGENT_PORT=8000".to_string(),
         format!("AGENT_NOISE_PORT={public_port}"),
+        format!("LAIR_PUBKEY={lair_noise_pubkey_b32}"),
         "WORKSPACE_DIR=/data/workspace".to_string(),
         "OCTO_SKIP_SHELL_ENV=1".to_string(),
     ];
@@ -2085,7 +2092,10 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     // Keep a clone of the private key around so AppState can use it as the
     // Noise *initiator* key when proxying mobile traffic to remote agents.
     let lair_priv = static_private.clone();
-    tokio::spawn(run_noise_proxy(static_private, noise_port, http_port));
+    // Mobile-facing tunnel: no initiator-pubkey allowlist. Today anyone with
+    // the QR can connect; the TODO.md "client-key allowlist + first-connection
+    // ack UI" item is the planned gate for that surface.
+    tokio::spawn(run_noise_proxy(static_private, noise_port, http_port, None));
 
     // Operator SSH key — generated once for ops use (e.g. SSHing into hosts);
     // kept even though the remote-agent flow was removed, in case the user

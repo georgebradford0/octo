@@ -139,7 +139,7 @@ async fn noise_proxy_forwards_http() {
     let noise_addr = noise_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (stream, _) = noise_listener.accept().await.unwrap();
-        handle_noise_connection(stream, Arc::new(DEV_STATIC_PRIVATE.to_vec()), http_port)
+        handle_noise_connection(stream, Arc::new(DEV_STATIC_PRIVATE.to_vec()), http_port, None)
             .await
             .ok();
     });
