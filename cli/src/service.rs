@@ -210,6 +210,23 @@ pub fn read_lair_logs(tail: u32) -> Result<String> {
     Ok(s)
 }
 
+/// Run `octo-lair --version` inside the running lair container and return its
+/// trimmed stdout (e.g. `octo-lair 0.11.1`). Errors if the container isn't
+/// running. Reports the actual binary baked into the image rather than the
+/// image tag, which may just be `:latest`.
+pub fn lair_binary_version() -> Result<String> {
+    ensure_docker_present()?;
+    if !is_running() {
+        anyhow::bail!("lair is not running. Run `octo init` or `octo reload` first.");
+    }
+    let out = docker_output(&["exec", LAIR_CONTAINER_NAME, "octo-lair", "--version"])?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("`octo-lair --version` exited with {}: {stderr}", out.status);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// True if a container named `LAIR_CONTAINER_NAME` is running on this host.
 pub fn is_running() -> bool {
     let out = match docker_output(&[

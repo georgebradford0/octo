@@ -177,6 +177,9 @@ enum LairAction {
         #[arg(long)]
         image: Option<String>,
     },
+
+    /// Print the version of the running lair binary
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -611,6 +614,7 @@ async fn main() -> Result<()> {
         Command::Update => update().await?,
         Command::Lair { action } => match action {
             LairAction::Update { image } => update_lair(image).await?,
+            LairAction::Version => println!("{}", service::lair_binary_version()?),
         },
         Command::Uninstall { yes } => uninstall(yes).await?,
         Command::Completions { shell } => {
