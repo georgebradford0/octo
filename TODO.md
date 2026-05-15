@@ -1,6 +1,5 @@
 # TODO
 
-- [ ] enable ability to background currently running task
 - [ ] How will a remote agent running docker be able to talk to processes outside of the container, can ML workloads be dockerized?
 - [ ] add extensive logging in lair and children
 - [ ] Client-key allowlist + first-connection ack UI — `noise_handshake` already captures the client static key from snow's `get_remote_static()` and logs it, but it's never checked. Persist a `known_clients.json` on lair, gate new client pubkeys behind a first-connection ack flow in the mobile UI (approve / reject), and reject handshakes from unknown keys after the first run. Replaces today's QR-only TOFU model where anyone with the QR can connect indefinitely.

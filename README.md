@@ -8,6 +8,13 @@ A single `octo-lair` container runs on a host with a static IP. The mobile clien
 
 Linux only (x86_64 and aarch64). The lair image is multi-arch (linux/amd64, linux/arm64). The Rust code never talks to the Docker daemon — every Docker interaction is either an `octo` CLI shell-out or a `bash` tool call from the agentic loop.
 
+## Remote Agents for GPU Compute Management
+
+Because remote agents require passing 'userdata' at startup to properly initiate and complete a Noise handshake, deploying remote agents with instances from typical GPU compute providers (RunPod, Lambda Labs, Prime Intellect, etc) is generally not advised and will almost certainly not work.  Most GPU platforms manage shared compute using unpriveleged docker containers and docker-in-docker containers are usually blocked. 
+
+For this reason users should always deploy local agents on the lair host to manage GPU compute instances.  For example, I train models on Prime Intellect and deploy a local agent that creates instances through the MCP and then triggers/setup/monitor/terminate training runs or anything else over SSH.  All GPU providers let users pass an SSH pubkey at instance creation, so this can be passed in by the agent during instance creation.
+//TODO: check ssh startup for prime
+
 ## Install the CLI
 
 ```sh
@@ -102,3 +109,7 @@ Both are hot-reloaded within a few seconds.
 New child agents are created via the built-in `create_agent` tool in the lair chat. It accepts `startup_script` (runs before the agent's HTTP server starts — good for `apt-get`, git config) and `startup_prompt` (the first message the agent receives once ready).
 
 Both fields are stored as plaintext env on the agent process — they should not contain sensitive data.
+
+## Security
+
+Do **not** bind-mount `/var/run/docker.sock` into the lair container. Access to the host Docker socket is equivalent to root on the host — an agent's `bash` tool could spawn a privileged sibling container, mount `/`, and read or modify anything outside the container, defeating the per-uid sandboxing lair sets up for child agents. Only consider it on a single-tenant box where you fully trust every agent loop you run.
