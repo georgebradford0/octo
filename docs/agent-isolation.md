@@ -1,6 +1,8 @@
 # Agent isolation inside the lair container
 
-This doc explains how *local* child agent processes are kept from terminating lair, terminating their siblings, or spawning new agents. As of `lair 0.10.1` / `cli 0.4.0`.
+This doc explains how *local* child agent processes are kept from terminating lair, terminating their siblings, or spawning new agents. As of `lair 0.11.0` / `cli 0.4.0`.
+
+> **See also: [agent-spawning.md](agent-spawning.md).** As of `0.11.0` agents *can* spawn child agents, but only their own subtree — that flow's authorization model is described in the companion doc. This doc covers the underlying process isolation that makes the spawn flow's security claims hold.
 
 > **Remote agents** are out of scope — they live on separate VMs, in their own `octo-lair` container booted by the cloud-init userdata that `mint_bootstrap_userdata` mints (Docker install + `docker run … --role agent` under a systemd unit; see `lair/src/lair.rs::exec_mint_bootstrap_userdata`). The mobile ↔ lair ↔ remote-agent flow encrypts the second hop with an outbound Noise tunnel from lair, so the same "children can't talk to each other" property holds *between* hosts naturally. The threats this doc addresses are inter-process within the lair container.
 
@@ -48,7 +50,7 @@ RUN useradd -u 10001 -M -N -s /bin/bash octo-agent
 cmd.uid(AGENT_UID).gid(AGENT_GID);
 ```
 
-Lair itself stays at uid 0 (root) inside the container. Sending a signal across uids without `CAP_KILL` fails with `EPERM`, so the child can't `kill -TERM 1`. Same applies to killing siblings — every child runs as uid 10001, so all children share a uid, which means *one child can kill another sibling*. (See "Known residuals" below.)
+Lair itself stays at uid 0 (root) inside the container. Sending a signal across uids without `CAP_KILL` fails with `EPERM`, so the child can't `kill -TERM 1`. Since `0.11.0` each child also gets its *own* uid (10100..10199, mapped 1:1 with port 30100..30199 by `uid_for_port`), so the same `EPERM` rule applies between siblings — agent A's `kill -TERM <B-pid>` from inside its `bash` tool fails with `Operation not permitted`.
 
 ### 3. Reading `/proc/1/environ`, `/data/config.json`, etc.
 
@@ -59,7 +61,7 @@ The Linux kernel restricts `/proc/<pid>/environ` (and `/proc/<pid>/auxv`, etc.) 
   - On a fresh `octo init` we don't currently chmod config.json inside the container, but it's also written from the host as `chmod 0600`, owned by the host user (uid 1000 typically). The bind-mount surfaces that file as uid 1000 with mode 0600 inside the container — different from the child's 10001, so EACCES.
 - `cat /data/lair/*` (noise key, relay signing key, sessions, registry) → same story; lair writes these as root under `/data/lair`, the child running as 10001 can't read 0600 root-owned files.
 
-The agent uid also can't read `/data/agents/<sibling>/...` of *other* children — wait, this is a wrinkle. Each child runs as the *same* uid (10001). Per-agent dirs are chowned to 10001 on spawn. So child A can read child B's data dir. (See "Known residuals.")
+Cross-sibling reads are also blocked since `0.11.0`. Each child's `/data/agents/<name>/` is `chown`ed to that child's specific uid (10100 + port-offset) before exec. Sibling B trying to `cat /data/agents/A/data/messages.json` gets `EACCES` because B's uid doesn't match A's, and the per-agent dirs are not world-readable.
 
 ### 4. Where the child *can* write
 
@@ -118,15 +120,20 @@ operator host                      lair container
 These are intentionally **not** addressed in this round. They're either lower-impact or require a bigger architectural shift.
 
 - **Child can interrupt or clear a sibling.** Every child's own HTTP server (loopback only, ports 30100–30199) exposes `POST /interrupt`, `POST /clear`, `PUT /config`. A child can `curl http://127.0.0.1:<sibling_port>/interrupt` to nuke a sibling's in-flight turn. Annoying, not catastrophic. Fix is to extend the same token middleware onto the child HTTP server, with the token forwarded only to lair (which already uses these endpoints via the `cli_*` proxy handlers).
-- **Child can `kill <sibling_pid>` of a sibling.** Same uid → same signal permissions. The fix here is a per-child uid (e.g. 10001 + agent ordinal), which complicates `/data/agents/<name>/` ownership and chown bookkeeping. Doable, not done.
-- **Child can read another child's `/data/agents/<sibling>/` files.** Same uid means the 0700 dir perms don't help. Same fix as above (per-child uid).
 - **Child can `cat /proc/1/cmdline`, `/proc/1/status`, etc.** These don't expose the token, just metadata. Not a real leak.
 - **Child can reach the operator's host network if Docker's default bridge has egress.** This is a generic LLM-can-curl-anywhere problem, not specific to multi-agent setups.
 
+## Fixed in 0.11.0
+
+These were called out as residuals in earlier revisions of this doc and have since been closed:
+
+- ~~Child can `kill <sibling_pid>`~~ — fixed by per-agent uids (10100..10199, 1:1 with port). Cross-uid signals fail with `EPERM`.
+- ~~Child can read another child's `/data/agents/<sibling>/` files~~ — same fix. Per-agent dirs are now chowned to that agent's specific uid.
+
 ## Source pointers
 
-- `lair/Dockerfile` — creates `octo-agent` (uid 10001).
+- `lair/Dockerfile` — creates `octo-agent` (uid 10001, fallback) plus `octo-agent-0`..`octo-agent-99` (uids 10100..10199).
 - `lair/src/lair.rs` — `mgmt_token` field on `AppState`; `require_mgmt_token` middleware; `protected` router merged into the main app.
-- `lair/src/agent_proc.rs` — `AGENT_UID` / `AGENT_GID` constants; `chown_best_effort`; `spawn` sets `cmd.uid(...)`, `cmd.env_remove("LAIR_MGMT_TOKEN")`, `cmd.env("HOME", agent_dir)`.
+- `lair/src/agent_proc.rs` — `uid_for_port` (maps port 30100..30199 → uid 10100..10199); `chown_best_effort`; `spawn` sets `cmd.uid(...)`, `cmd.env_remove("LAIR_MGMT_TOKEN")`, `cmd.env("HOME", agent_dir)`.
 - `cli/src/service.rs` — `ensure_mgmt_token` / `read_mgmt_token` / `mgmt_token_path` / `random_hex`. `start_lair` passes `-e LAIR_MGMT_TOKEN=...`.
 - `cli/src/agents.rs` — `mgmt_request` helper attaches the `X-Octo-Token` header to every state-mutating call.
