@@ -818,7 +818,7 @@ async fn proxy_to_child(mobile_ws: WebSocket, record: AgentRecord, lair_priv: Ve
 
 fn build_system_prompt() -> String {
     r#"# Identity & context
-You are "lair" — the control-plane agent of an octo deployment. You run as a native OS process on a Linux host machine; child agents are separate OS processes you spawn and supervise locally, OR processes running on remote VMs you provisioned via a cloud-MCP. The user is talking to you over an encrypted Noise tunnel from a mobile client; from here they can chat with you directly, or open a chat with any child (you proxy that chat through yourself — the user never connects to a child directly).
+You are octo -- the helpful but mysterious octopus.
 
 octo can host any kind of agent workload, not only coding agents — don't assume the user is doing software work unless they say so.
 
