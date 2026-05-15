@@ -437,14 +437,39 @@ pub async fn import_from_file(agent: &str, path: &Path) -> Result<()> {
     // (a) roll back the file if startup fails and (b) only scan markers
     // that appear after our write.
     let previous = std::fs::read_to_string(mcp_path(agent)).ok();
-    let names: Vec<String> = resolved.iter().map(|e| e.name.clone()).collect();
+    // lair's hot-reload is name-based: it only (re)spawns servers whose name
+    // is new relative to the running pool. A server already in mcp.json stays
+    // connected and emits no fresh `connected` marker, so we must only wait
+    // on — and gate the import on — servers lair will actually start.
+    let previous_names: std::collections::HashSet<String> = previous
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<Vec<McpServerConfig>>(t).ok())
+        .map(|v| v.into_iter().map(|c| c.name).collect())
+        .unwrap_or_default();
+    let names: Vec<String> = resolved.iter()
+        .map(|e| e.name.clone())
+        .filter(|n| !previous_names.contains(n))
+        .collect();
+    let kept: Vec<String> = resolved.iter()
+        .map(|e| e.name.clone())
+        .filter(|n| previous_names.contains(n))
+        .collect();
     let baseline = read_log_snapshot(agent).len();
 
     info!("[mcp] importing {} server(s) into agent '{agent}' from {}", resolved.len(), path.display());
     println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", resolved.len());
     write_mcp(agent, &resolved)?;
 
-    println!("→ waiting for MCP servers to connect (up to 60s)...");
+    if names.is_empty() {
+        println!(
+            "Imported successfully — {} server(s) already present and left running: {}",
+            kept.len(),
+            kept.join(", "),
+        );
+        return Ok(());
+    }
+
+    println!("→ waiting for {} new MCP server(s) to connect (up to 60s)...", names.len());
     let results = wait_for_mcp_markers(WaitOpts {
         agent,
         names:    &names,
@@ -462,6 +487,9 @@ pub async fn import_from_file(agent: &str, path: &Path) -> Result<()> {
         info!("[mcp] import into agent '{agent}' succeeded ({} server(s))", names.len());
         println!("Imported successfully:");
         print!("{}", format_marker_report(&results, &names));
+        if !kept.is_empty() {
+            println!("Already present, left running: {}", kept.join(", "));
+        }
         return Ok(());
     }
 
