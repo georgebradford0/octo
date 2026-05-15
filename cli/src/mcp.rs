@@ -101,6 +101,33 @@ fn read_log_snapshot(agent: &str) -> String {
     }
 }
 
+/// Extract the leading RFC3339 timestamp from a structured-tracing log line.
+/// Lines emitted by core/lair/agent tracing start with e.g.
+/// `2026-05-15T04:16:24.632994684Z `. Returns the timestamp token, or `None`
+/// for lines without one (blank lines, panic backtraces, etc).
+fn line_timestamp(line: &str) -> Option<&str> {
+    let ts = line.split_whitespace().next()?;
+    let b = ts.as_bytes();
+    if b.len() >= 20 && b[10] == b'T' && ts.ends_with('Z') {
+        Some(ts)
+    } else {
+        None
+    }
+}
+
+/// Timestamp of the most recent log line currently visible for `agent`, used
+/// as the lower bound for post-write marker scanning. RFC3339 UTC timestamps
+/// sort lexically, so a plain string compare orders them correctly. Returns
+/// an empty string if no timestamped line is present (fresh container).
+fn latest_log_timestamp(agent: &str) -> String {
+    read_log_snapshot(agent)
+        .lines()
+        .rev()
+        .find_map(line_timestamp)
+        .unwrap_or_default()
+        .to_string()
+}
+
 // ── Marker scanning ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,14 +157,25 @@ impl McpMarker {
 
 /// Scan a log buffer for MCP markers tied to `name`. Returns the *first*
 /// terminal marker (success or failure) encountered for that name, or
-/// `Timeout` if none is present.
-fn classify_markers(name: &str, logs: &str) -> McpMarker {
+/// `Timeout` if none is present. Lines at or before `since` (an RFC3339
+/// timestamp) are ignored so a previous lifetime's `connected` marker can't
+/// be mistaken for a fresh one; an empty `since` scans everything.
+fn classify_markers(name: &str, logs: &str, since: &str) -> McpMarker {
     let connected = format!("[mcp] '{name}' connected");
     let no_tools  = format!("[mcp] warning: server '{name}' advertised no tools");
     let spawn     = format!("[mcp] failed to spawn '{name}'");
     let init      = format!("[mcp] '{name}' initialize failed");
 
     for line in logs.lines() {
+        if !since.is_empty() {
+            // Markers are single-line tracing events and always carry a
+            // timestamp; skip untimestamped lines and anything not strictly
+            // newer than the pre-write cutoff.
+            match line_timestamp(line) {
+                Some(ts) if ts > since => {}
+                _ => continue,
+            }
+        }
         if line.contains(&connected) { return McpMarker::Connected; }
         if line.contains(&no_tools)  { return McpMarker::NoTools; }
         if let Some(idx) = line.find(&spawn) {
@@ -158,11 +196,13 @@ pub struct WaitOpts<'a> {
     pub agent:    &'a str,
     pub names:    &'a [String],
     pub timeout:  Duration,
-    /// Byte offset into the log captured *before* the file write. Marker
-    /// scanning is restricted to anything appended after this point so we
-    /// don't pick up `connected` markers from a previous lifetime of the
-    /// same server name.
-    pub baseline: usize,
+    /// RFC3339 timestamp of the last log line observed *before* the file
+    /// write. Marker scanning ignores any line at or before this instant, so
+    /// we don't pick up `connected` markers from a previous lifetime of the
+    /// same server name. A byte offset can't be used here: lair's log source
+    /// is `docker logs --tail`, a sliding window whose front scrolls away as
+    /// the container keeps logging. Empty means "scan everything".
+    pub since:    String,
 }
 
 /// Poll the relevant log source every 3 s until every `name` has a terminal
@@ -172,16 +212,9 @@ pub async fn wait_for_mcp_markers(opts: WaitOpts<'_>) -> HashMap<String, McpMark
     let mut decided: HashMap<String, McpMarker> = HashMap::new();
     loop {
         let snapshot = read_log_snapshot(opts.agent);
-        // `docker logs --tail` can return fewer bytes than baseline if the
-        // operator manually `docker rm`d the container mid-poll; clamp.
-        let suffix = if opts.baseline >= snapshot.len() {
-            ""
-        } else {
-            &snapshot[opts.baseline..]
-        };
         for name in opts.names {
             if decided.contains_key(name) { continue; }
-            let marker = classify_markers(name, suffix);
+            let marker = classify_markers(name, &snapshot, &opts.since);
             if marker != McpMarker::Timeout {
                 decided.insert(name.clone(), marker);
             }
@@ -314,7 +347,7 @@ pub async fn add(
     });
 
     let names = vec![name.to_string()];
-    let baseline = read_log_snapshot(agent).len();
+    let since = latest_log_timestamp(agent);
 
     info!("[mcp] adding server '{name}' to agent '{agent}'");
     println!("→ writing config to '{agent}'");
@@ -325,7 +358,7 @@ pub async fn add(
         agent,
         names:    &names,
         timeout:  Duration::from_secs(60),
-        baseline,
+        since,
     }).await;
 
     let marker = results.get(name).cloned().unwrap_or(McpMarker::Timeout);
@@ -433,9 +466,7 @@ pub async fn import_from_file(agent: &str, path: &Path) -> Result<()> {
         anyhow::bail!(msg);
     }
 
-    // Snapshot the previous file and the current log length so we can both
-    // (a) roll back the file if startup fails and (b) only scan markers
-    // that appear after our write.
+    // Snapshot the previous file so we can roll it back if startup fails.
     let previous = std::fs::read_to_string(mcp_path(agent)).ok();
     // lair's hot-reload is name-based: it only (re)spawns servers whose name
     // is new relative to the running pool. A server already in mcp.json stays
@@ -454,7 +485,9 @@ pub async fn import_from_file(agent: &str, path: &Path) -> Result<()> {
         .map(|e| e.name.clone())
         .filter(|n| previous_names.contains(n))
         .collect();
-    let baseline = read_log_snapshot(agent).len();
+    // Capture the cutoff timestamp before the write so marker scanning only
+    // considers lines lair emits in response to this import.
+    let since = latest_log_timestamp(agent);
 
     info!("[mcp] importing {} server(s) into agent '{agent}' from {}", resolved.len(), path.display());
     println!("Importing {} MCP server(s) into '{agent}' (replacing existing config)...", resolved.len());
@@ -474,7 +507,7 @@ pub async fn import_from_file(agent: &str, path: &Path) -> Result<()> {
         agent,
         names:    &names,
         timeout:  Duration::from_secs(60),
-        baseline,
+        since,
     }).await;
 
     let mut failures: Vec<String> = names.iter()

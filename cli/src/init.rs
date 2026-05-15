@@ -200,7 +200,7 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
             agent:    crate::mcp::LAIR_AGENT_NAME,
             names:    &seed_server_names,
             timeout:  std::time::Duration::from_secs(10),
-            baseline: 0,
+            since:    String::new(),
         }).await;
         let failures: Vec<String> = seed_server_names.iter()
             .filter(|n| !results.get(*n).map(|m| m.is_success()).unwrap_or(false))
