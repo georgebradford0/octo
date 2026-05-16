@@ -1,0 +1,96 @@
+name: Relay Release
+
+on:
+  workflow_dispatch:
+
+# Builds `octo-relay` (the push-notification relay) for both Linux arches and
+# uploads it as the release asset pair attached to `relay-v<version>` (read
+# from `relay/Cargo.toml`). The relay runs as a plain systemd service on its
+# own host — deploy the matching-arch binary to `/usr/local/bin/octo-relay`
+# and restart `octo-relay.service`. The binary carries no secrets; APNs
+# credentials live only on the host (`/etc/octo-relay/`).
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: octo-relay-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: octo-relay-linux-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version' relay/Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation toolchain (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build octo-relay
+        run: cargo build --release -p octo-relay --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/octo-relay ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version' relay/Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: Create GitHub release
+        run: |
+          gh release create "relay-v${{ steps.version.outputs.value }}" \
+            --title "octo relay v${{ steps.version.outputs.value }}" \
+            --notes "octo push-notification relay. Linux x86_64 and aarch64.
+
+          Deploy the matching-arch binary to \`/usr/local/bin/octo-relay\` on
+          the relay host and restart \`octo-relay.service\`. APNs credentials
+          live on the host (\`/etc/octo-relay/\`); the binary carries none." \
+            artifacts/octo-relay-linux-x86_64/octo-relay-linux-x86_64 \
+            artifacts/octo-relay-linux-aarch64/octo-relay-linux-aarch64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

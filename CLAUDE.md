@@ -158,6 +158,7 @@ Inheritance is a snapshot at create time — subsequent edits to lair's `mcp.jso
 | Workflow | What it does |
 |----------|--------------|
 | `cli.yml` | Builds the `octo` CLI per-target and uploads as Release assets. |
+| `relay.yml` | Builds `octo-relay` per-Linux-arch and uploads as assets on `relay-v<version>` (read from `relay/Cargo.toml`). |
 | `lair.yml` | Multi-arch `docker buildx` of `lair/Dockerfile`, pushes to `ghcr.io/<owner>/octo-lair:<version>` + `:latest`. |
 | `android.yml` | Builds AAB via fastlane, uploads to Google Play. |
 | `ios.yml` | Builds on macOS runner, optionally uploads to TestFlight. |
