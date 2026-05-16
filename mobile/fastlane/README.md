@@ -13,6 +13,27 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 # Available Actions
 
+## iOS
+
+### ios bump_build_number
+
+```sh
+[bundle exec] fastlane ios bump_build_number
+```
+
+Bump build number to one above the highest build across all versions
+
+### ios upload_tf
+
+```sh
+[bundle exec] fastlane ios upload_tf
+```
+
+Upload IPA to TestFlight
+
+----
+
+
 ## Android
 
 ### android closed
