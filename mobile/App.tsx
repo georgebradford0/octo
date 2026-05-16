@@ -573,7 +573,7 @@ function TasksHeaderButton({ tasks, onPress }: { tasks: TaskRecord[]; onPress: (
   )
 }
 
-const TaskRow = memo(function TaskRow({ task, onCancel }: { task: TaskRecord; onCancel: () => void }) {
+const TaskRow = memo(function TaskRow({ task, cancelling, onCancel }: { task: TaskRecord; cancelling: boolean; onCancel: () => void }) {
   const [expanded, setExpanded] = useState(false)
   const isRunning = task.status === 'running'
   const ts = task.completed_at != null ? relativeTime(task.completed_at) : relativeTime(task.started_at)
@@ -588,8 +588,13 @@ const TaskRow = memo(function TaskRow({ task, onCancel }: { task: TaskRecord; on
         </View>
         <Text style={s.taskTimestamp}>{ts}</Text>
         {isRunning && (
-          <TouchableOpacity style={s.taskStopBtn} onPress={onCancel} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-            <Text style={s.taskStopText}>STOP</Text>
+          <TouchableOpacity
+            style={[s.taskStopBtn, cancelling && { opacity: 0.4 }]}
+            onPress={onCancel}
+            disabled={cancelling}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+          >
+            <Text style={s.taskStopText}>{cancelling ? 'STOPPING' : 'STOP'}</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -610,11 +615,12 @@ const TaskRow = memo(function TaskRow({ task, onCancel }: { task: TaskRecord; on
   )
 })
 
-function TasksModal({ visible, tasks, onClose, onCancel }: {
-  visible:  boolean
-  tasks:    TaskRecord[]
-  onClose:  () => void
-  onCancel: (taskId: string) => void
+function TasksModal({ visible, tasks, cancellingIds, onClose, onCancel }: {
+  visible:       boolean
+  tasks:         TaskRecord[]
+  cancellingIds: Set<string>
+  onClose:       () => void
+  onCancel:      (taskId: string) => void
 }) {
   const insets = useSafeAreaInsets()
   const slide  = useRef(new Animated.Value(0)).current
@@ -672,12 +678,87 @@ function TasksModal({ visible, tasks, onClose, onCancel }: {
               <Text style={s.tasksEmptyText}>No background tasks</Text>
             </View>
           ) : sorted.map(t => (
-            <TaskRow key={t.task_id} task={t} onCancel={() => onCancel(t.task_id)} />
+            <TaskRow
+              key={t.task_id}
+              task={t}
+              cancelling={cancellingIds.has(t.task_id)}
+              onCancel={() => onCancel(t.task_id)}
+            />
           ))}
         </ScrollView>
       </Animated.View>
     </View>
   )
+}
+
+// ── useCancelGuard ────────────────────────────────────────────────────────────
+
+// Optimistic guard for the task STOP button. A press latches the task id into
+// `cancellingIds` (button shows STOPPING, disabled) and sends one `cancel_task`
+// frame. The latch is released by whichever lands first:
+//   • `cancel_task_ack` with fired=false — server had nothing live to cancel.
+//   • a `tasks` frame moving the task off `running` — the cancel took effect.
+//   • CANCEL_ACK_TIMEOUT_MS with no ack — the frame was likely lost on a WS
+//     hiccup; un-latch so the user can retry rather than latching forever.
+// An ack with fired=true keeps the latch: the kill is in progress and the
+// follow-up `tasks` frame will release it.
+const CANCEL_ACK_TIMEOUT_MS = 6000
+
+function useCancelGuard(sendFrameRef: React.MutableRefObject<(frame: ClientFrame) => boolean>) {
+  const [cancellingIds, setCancellingIds] = useState<Set<string>>(() => new Set())
+  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  const clearTimer = useCallback((id: string) => {
+    const t = timersRef.current.get(id)
+    if (t != null) { clearTimeout(t); timersRef.current.delete(id) }
+  }, [])
+
+  const release = useCallback((id: string) => {
+    clearTimer(id)
+    setCancellingIds(prev => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }, [clearTimer])
+
+  const requestCancel = useCallback((id: string) => {
+    sendFrameRef.current({ type: 'cancel_task', id })
+    setCancellingIds(prev => prev.has(id) ? prev : new Set(prev).add(id))
+    clearTimer(id)
+    timersRef.current.set(id, setTimeout(() => release(id), CANCEL_ACK_TIMEOUT_MS))
+  }, [sendFrameRef, clearTimer, release])
+
+  const handleCancelAck = useCallback((id: string, fired: boolean) => {
+    clearTimer(id)
+    if (!fired) release(id)
+  }, [clearTimer, release])
+
+  // Reconcile against the authoritative registry: drop any latched id whose
+  // task is gone or no longer running — the `tasks` frame has superseded it.
+  const reconcile = useCallback((tasks: TaskRecord[]) => {
+    setCancellingIds(prev => {
+      if (prev.size === 0) return prev
+      let next: Set<string> | null = null
+      for (const id of prev) {
+        const t = tasks.find(x => x.task_id === id)
+        if (t == null || t.status !== 'running') {
+          if (next == null) next = new Set(prev)
+          next.delete(id)
+          clearTimer(id)
+        }
+      }
+      return next ?? prev
+    })
+  }, [clearTimer])
+
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => { timers.forEach(clearTimeout); timers.clear() }
+  }, [])
+
+  return { cancellingIds, requestCancel, handleCancelAck, reconcile }
 }
 
 // ── AppIcon ───────────────────────────────────────────────────────────────────
@@ -753,7 +834,7 @@ function QrScanner({ onScanned, onCancel }: { onScanned: (data: string) => void;
 
 const ChatPane = memo(function ChatPane({
   baseUrl, onStatusChange, clearRef, initialDraft, onDraftChange, reconnectingRef, reloadRef, closeWsRef,
-  sendFrameRef, onContainersUpdate, onTasksUpdate,
+  sendFrameRef, onContainersUpdate, onTasksUpdate, onCancelAck,
 }: {
   baseUrl:             string
   onStatusChange:      (s: ConnStatus) => void
@@ -774,6 +855,10 @@ const ChatPane = memo(function ChatPane({
   /// open and after every spawn / completion / cancellation. The list is the
   /// per-chat background-task registry — see core::TaskRecord.
   onTasksUpdate?:      (tasks: TaskRecord[]) => void
+  /// Push hook for `cancel_task_ack` — the server's receipt confirmation for a
+  /// `cancel_task` frame. Lets the STOP-button guard tell a received cancel
+  /// apart from a frame dropped on a WS hiccup. See useCancelGuard.
+  onCancelAck?:        (id: string, fired: boolean) => void
 }) {
   const insets                     = useSafeAreaInsets()
   const { height: keyboardHeight } = useReanimatedKeyboardAnimation()
@@ -1022,6 +1107,10 @@ const ChatPane = memo(function ChatPane({
       case 'tasks':
         if (onTasksUpdate) onTasksUpdate(event.tasks)
         break
+      case 'cancel_task_ack':
+        log(`[chat] cancel_task_ack id=${event.id} fired=${event.fired}`)
+        if (onCancelAck) onCancelAck(event.id, event.fired)
+        break
       case 'bg_complete': {
         // Live insertion of the bg_complete chip between assistant turns. The
         // id is stable per task so a subsequent /history reload (which also
@@ -1043,7 +1132,7 @@ const ChatPane = memo(function ChatPane({
         }
         break
     }
-  }, [updateStatus, sendFrame, onContainersUpdate, onTasksUpdate, armTurnScroll])
+  }, [updateStatus, sendFrame, onContainersUpdate, onTasksUpdate, onCancelAck, armTurnScroll])
 
   // Keep a stable ref to loadHistory so reattachStream can call it without
   // being listed as a dependency (avoids circular dep: loadHistory → reattachStream → loadHistory).
@@ -1511,6 +1600,13 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
   const [showTasksModal, setShowTasksModal] = useState(false)
   const clearRef     = useRef<() => void>(() => {})
   const sendFrameRef = useRef<(frame: ClientFrame) => boolean>(() => false)
+  const { cancellingIds, requestCancel, handleCancelAck, reconcile } = useCancelGuard(sendFrameRef)
+  // Stable identity so the memoized ChatPane isn't re-rendered on every
+  // task-progress tick.
+  const handleTasksUpdate = useCallback((t: TaskRecord[]) => {
+    setTasks(t)
+    reconcile(t)
+  }, [reconcile])
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
@@ -1554,7 +1650,8 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
             reloadRef={reloadRef}
             closeWsRef={closeWsRef}
             sendFrameRef={sendFrameRef}
-            onTasksUpdate={setTasks}
+            onTasksUpdate={handleTasksUpdate}
+            onCancelAck={handleCancelAck}
           />
         ) : tunnelError ? (
           <View style={s.setupCenter}>
@@ -1565,10 +1662,11 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onClose, initialDraft
         <TasksModal
           visible={showTasksModal}
           tasks={tasks}
+          cancellingIds={cancellingIds}
           onClose={() => setShowTasksModal(false)}
           onCancel={(id) => {
             log(`[child] cancel_task id=${id}`)
-            sendFrameRef.current({ type: 'cancel_task', id })
+            requestCancel(id)
           }}
         />
       </View>
@@ -1629,6 +1727,18 @@ function AppInner() {
   // Bound to the master ChatPane's persistent /stream WS once it's open.
   // Returns false if no WS is connected (caller should surface or retry).
   const masterSendFrameRef = useRef<(frame: ClientFrame) => boolean>(() => false)
+  const {
+    cancellingIds: masterCancellingIds,
+    requestCancel: masterRequestCancel,
+    handleCancelAck: masterHandleCancelAck,
+    reconcile: masterReconcile,
+  } = useCancelGuard(masterSendFrameRef)
+  // Stable identity so the memoized ChatPane isn't re-rendered on every
+  // task-progress tick.
+  const handleMasterTasksUpdate = useCallback((t: TaskRecord[]) => {
+    setMasterTasks(t)
+    masterReconcile(t)
+  }, [masterReconcile])
   // In-memory draft cache: survives ChatPane unmount/remount without async latency.
   const draftsRef          = useRef<Record<string, string>>({})
   // Held true for the full duration of a foreground-return reconnect so that
@@ -1960,17 +2070,19 @@ function AppInner() {
             closeWsRef={closeWsRef}
             sendFrameRef={masterSendFrameRef}
             onContainersUpdate={handleContainersUpdate}
-            onTasksUpdate={setMasterTasks}
+            onTasksUpdate={handleMasterTasksUpdate}
+            onCancelAck={masterHandleCancelAck}
           />
         )}
 
         <TasksModal
           visible={showTasksModal}
           tasks={masterTasks}
+          cancellingIds={masterCancellingIds}
           onClose={() => setShowTasksModal(false)}
           onCancel={(id) => {
             log(`[app] cancel_task id=${id} (master)`)
-            masterSendFrameRef.current({ type: 'cancel_task', id })
+            masterRequestCancel(id)
           }}
         />
 

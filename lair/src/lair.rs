@@ -538,6 +538,10 @@ async fn handle_client_frame(raw: &str, state: &Arc<AppState>) {
             if id.is_empty() { warn!("[lair/stream] cancel_task missing id"); return; }
             let fired = core_cancel_task(&state.stream_state, &id);
             info!("[lair/stream] cancel_task id={id} fired={fired}");
+            buffer_and_fanout(
+                &state.stream_state,
+                serde_json::json!({"type":"cancel_task_ack","id":id,"fired":fired}).to_string(),
+            );
         }
         "pong" => {}
         other => warn!("[lair/stream] unknown client frame type='{other}'"),

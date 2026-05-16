@@ -18,6 +18,7 @@ export type ServerEvent =
   | { type: 'error';         message: string }
   | { type: 'interrupted';   cost_usd: number }
   | { type: 'interrupt_ack' }
+  | { type: 'cancel_task_ack'; id: string; fired: boolean }
   | { type: 'system';        text: string }
   | { type: 'agents';        agents: AgentInfo[] }
   | { type: 'tasks';         tasks: TaskRecord[] }
