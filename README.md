@@ -3,7 +3,7 @@
 
 ## Setup
 To get up and running quickly you'll need
-- A Linux host with static IP
+- A Linux host with static IP with ports 22 and 8443 open
 - LLM provider api key (you can also setup open source models but we'll defer explaining)
 - iPhone (or you can build Android if you like)
 
