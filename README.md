@@ -1,38 +1,21 @@
 # octo
+`octo` is a mobile agent management system that runs a fleet of local and remote LLM agents. It was originally designed for coding but can be used to deploy LLM agents for any task.  It supports the Anthropic and any OpenAI-compatible API.  It uses the Noise Protocol to setup an encrypted connection between mobile and server without the need for DNS.
 
-`octo` is a mobile agent management system that runs a fleet of LLM agents inside a single Docker container on a Linux host. It was originally designed for coding but can be used to deploy any type of agent.
+## Setup
+To get up and running quickly you'll need
+- A Linux host with static IP
+- LLM provider api key (you can also setup open source models but we'll defer explaining)
+- iPhone (or you can build Android if you like)
 
-## Architecture
-
-A single `octo-lair` container runs on a host with a static IP. The mobile client connects to lair over an encrypted Noise tunnel; from the lair chat the user creates, messages, and tears down "child" agents. Each child is another `octo-lair` process (spawned by lair with `--role agent`) inside the same container, listening on a loopback HTTP port. Mobile chats with a child by opening a WebSocket to lair's proxy URL (`/agents/<name>/stream`) — there is no separate connection per child, and no second container per agent.
-
-Linux only (x86_64 and aarch64). The lair image is multi-arch (linux/amd64, linux/arm64). The Rust code never talks to the Docker daemon — every Docker interaction is either an `octo` CLI shell-out or a `bash` tool call from the agentic loop.
-
-## Remote Agents for GPU Compute Management
-
-Because remote agents require passing 'userdata' at startup to properly initiate and complete a Noise handshake, deploying remote agents with instances from typical GPU compute providers (RunPod, Lambda Labs, Prime Intellect, etc) is generally not advised and will almost certainly not work.  Most GPU platforms manage shared compute using unpriveleged docker containers and docker-in-docker containers are usually blocked. 
-
-For this reason users should always deploy local agents on the lair host to manage GPU compute instances.  For example, I train models on Prime Intellect and deploy a local agent that creates instances through the MCP and then triggers/setup/monitor/terminate training runs or anything else over SSH.  All GPU providers let users pass an SSH pubkey at instance creation, so this can be passed in by the agent during instance creation.
-//TODO: check ssh startup for prime
-
-## Install the CLI
-
+Grab the CLI on your linux host with the helper script
 ```sh
 curl -fsSL https://raw.githubusercontent.com/georgebradford0/octo/main/scripts/get-cli.sh | sh
 ```
-
-This installs the `octo` CLI to `~/.local/bin/octo`. Docker must already be installed and runnable as the current user — `octo init` `docker pull`s `ghcr.io/georgebradford0/octo-lair:latest` on first run.
-
-## Setup
-
-`octo init` must be run on a Linux host with Docker installed and a static — or at least publicly-reachable — IP. On first run it prompts interactively for credentials; on subsequent runs (when `~/.octo/config.json` already exists) it refuses to overwrite the existing config.
-
-```sh
+then
+```
 octo init
 ```
-
-It prompts for:
-
+It will prompt for:
 - **Anthropic API key** — press Enter to skip.
 - **OpenAI API key** — press Enter to skip. At least one of the two keys is required.
 - **API URL** — Enter for the Anthropic default; otherwise the full chat-completions URL (e.g. `https://api.deepinfra.com/v1/openai/chat/completions`).
@@ -41,47 +24,22 @@ It prompts for:
 `init` will then:
 
 1. Persist credentials to `~/.octo/config.json`.
-2. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels — e.g. SSHing into a remote host for tailing logs).
-3. Write an env file (`~/.octo/lair-env`) — this is what `docker --env-file` ingests.
-4. `docker pull` the lair image, then `docker run -d --name octo-lair -v ~/.octo:/data -p 8443:8443 …`.
-5. Wait for the management API on `127.0.0.1:8000/health`, then print a QR code containing the host, port, and Noise pubkey.
+2. Install docker if not already available
+3. Generate a Noise keypair and an Ed25519 SSH keypair (the SSH key is reserved for ops backchannels — e.g. SSHing into a remote host for tailing logs).
+4. Write an env file (`~/.octo/lair-env`) — this is what `docker --env-file` ingests.
+5. `docker pull` the lair image, then `docker run -d --name octo-lair -v ~/.octo:/data -p 8443:8443 …`.
+6. Wait for the management API on `127.0.0.1:8000/health`, then print a QR code containing the host, port, and Noise pubkey.
 
-Pass `--image ghcr.io/you/octo-lair:0.9.0` (or `OCTO_LAIR_IMAGE=…`) to pin a specific image.
+Once the QR code prints to the terminal, download the mobile app at (TODO build ios for production and list here) or build code in `mobile/` to local device (iOS or Android).  Open the app, press icon and scan the QR.
 
-### Env vars
-
-Anything passed via `--env KEY=VAL` (or stored later with `octo env set KEY=VAL`) is written to `~/.octo/lair-env` and ingested by docker on container start. **The same variables are inherited by every child agent process lair spawns** — child agents share the lair container's env, so a single `-e GH_TOKEN=…` reaches lair, every child, and any MCP server they invoke.
-
-Anyone with the QR data can connect, so treat it like a credential.
-
-The `mobile/` directory contains a React Native app (TODO: store links). Open the app, tap the pulsing icon, and scan the QR. The connection opens to the lair chat.
-
-## Day-to-day
-
-| Command | What it does |
-|---|---|
-| `octo init` | First-run setup. Pulls the lair image and `docker run`s it. |
-| `octo reload` | Restart the lair container (picks up new env / image). `--all` also restarts every agent. |
-| `octo destroy` | Remove the lair container, terminate every agent, wipe `~/.octo/lair` and `~/.octo/agents`. |
-| `octo logs [name]` | `docker logs` for lair (default) or tail a specific agent's `agent.log`. `-f` to follow. |
-| `octo lair update [--image …]` | `docker pull` the lair image and restart the container. |
-| `octo agents list` | Show every known agent (status, pid, port, git URL). |
-| `octo agents start <name>` | Re-spawn a stopped agent. |
-| `octo agents stop <name>` | SIGTERM an agent. |
-| `octo agents delete <name>` | Stop the agent and remove its `~/.octo/agents/<name>/` dir. |
-| `octo config show` / `set` | View / edit `~/.octo/config.json` (API keys, model). Lair re-reads on every call — no restart needed. |
-| `octo env show` / `set` / `unset` | View / edit `~/.octo/lair-env` (extra env vars passed to lair). Changes auto-restart lair. |
+If you are on iOS it will ask for push notification permissions.  These are generally for background tasks or monitors, but technically there is a dedicated tool for push notifications so you can always direct the model to call that tool for any scenario you want.  I have set up a small relay server to handle these push notifications, please don't abuse it.  It does not require sign up.  If you'd like to understand how it authenticates the device you can read [this](docs/relay-architecture.md).
 
 ## MCP Support
-
 MCP servers can be seeded at init time by passing an MCP JSON file:
-
 ```sh
 octo init --mcp-config <path_to_mcp_json>
 ```
-
-They can also be added at runtime and are hot-reloaded:
-
+An example file is [here](.mcp.json). They can also be added at runtime with CLI and are hot-reloaded 
 ```sh
 # uvx-based server
 octo mcp add --name aws-ec2 --command uvx \
@@ -96,20 +54,10 @@ octo mcp add --agent lair-myrepo --name linear --command npx \
 octo mcp list
 octo mcp remove --name github
 ```
+One thing to note.  MCPs by default are inherited by parent to spawned child.  This will probably change but I haven't decided on a design handle MCP inheritance in detail.  Currently the CLI can only update MCPs for local agents, this will also change soon.
 
-`mcp add` waits for the server to connect and reports the result. On failure the entry is automatically removed. Server configs are stored at:
+## Local vs Remote Agents
+Agents can be deployed and managed from the main chat or using the CLI. Local agents are deployed in the *same container* as `octo-lair` but with their own data dir.  This is so `octo-lair` does not have docker.sock access and is completely contained on the host.  Once an agent is deployed and ready to communicate it will be available in the mobile sidebar with a separate chat.
 
-- `~/.octo/lair/mcp.json` (for lair)
-- `~/.octo/agents/<name>/data/mcp.json` (for child agents)
+For remote agents an MCP for AWS/Azure/GCP is necessary (any provider is fine assuming they have an MCP, which they probably do).  Assuming the MCP exists, you can simply ask the main chat to create a remote agent on whatever instance type (eg for AWS a t3.micro) is preferred.  It will provision said instance with the appropiate `userdata` using builtin tools to continue setup once the instance comes online, connect through SSH and complete registration of the remote agent.  As per the local case, remote agents also run in a docker container without sock access and any agents added will be in the same container.  A list of builtin tools is [here](docs/builtin-tools.md).
 
-Both are hot-reloaded within a few seconds.
-
-## Startup Scripts
-
-New child agents are created via the built-in `create_agent` tool in the lair chat. It accepts `startup_script` (runs before the agent's HTTP server starts — good for `apt-get`, git config) and `startup_prompt` (the first message the agent receives once ready).
-
-Both fields are stored as plaintext env on the agent process — they should not contain sensitive data.
-
-## Security
-
-Do **not** bind-mount `/var/run/docker.sock` into the lair container. Access to the host Docker socket is equivalent to root on the host — an agent's `bash` tool could spawn a privileged sibling container, mount `/`, and read or modify anything outside the container, defeating the per-uid sandboxing lair sets up for child agents. Only consider it on a single-tenant box where you fully trust every agent loop you run.
