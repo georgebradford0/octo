@@ -19,7 +19,13 @@ fn registry_path() -> PathBuf {
 pub async fn list() -> Result<()> {
     let path = registry_path();
     if !path.exists() {
-        println!("No agents (lair hasn't been started yet — no registry at {}).", path.display());
+        // The registry file is created lazily when the first agent is
+        // deployed, so its absence means "no agents", not "lair is down".
+        if service::is_running() {
+            println!("No agents.");
+        } else {
+            println!("No agents (lair is not running — run `octo init` to start it).");
+        }
         return Ok(());
     }
     let reg = Registry::load(path).context("load agent registry")?;
