@@ -226,12 +226,60 @@ enum McpAction {
     },
 }
 
+/// Generate the bash completion script, write it to `~/.octo/octorc`, and
+/// wire `~/.bashrc` to source it. Idempotent — safe to re-run on every
+/// `octo init`.
+fn install_completions() {
+    let home = match std::env::var("HOME") {
+        Ok(h) => std::path::PathBuf::from(h),
+        Err(_) => {
+            warn!("[cli] HOME unset; skipping completion install");
+            return;
+        }
+    };
+
+    let octorc = home.join(".octo/octorc");
+    if let Some(parent) = octorc.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut script = Vec::new();
+    generate(Shell::Bash, &mut Cli::command(), "octo", &mut script);
+    if let Err(e) = std::fs::write(&octorc, &script) {
+        warn!("[cli] could not write {}: {e}", octorc.display());
+        eprintln!("warning: could not write completions to {}: {e}", octorc.display());
+        return;
+    }
+    debug!("[cli] wrote bash completions to {}", octorc.display());
+    println!("Wrote bash completions to {}.", octorc.display());
+
+    let bashrc = home.join(".bashrc");
+    let source_line = "source \"$HOME/.octo/octorc\"";
+    let existing = std::fs::read_to_string(&bashrc).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == source_line) {
+        return;
+    }
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("\n# Octo completions\n");
+    updated.push_str(source_line);
+    updated.push('\n');
+    if let Err(e) = std::fs::write(&bashrc, updated) {
+        warn!("[cli] could not update {}: {e}", bashrc.display());
+        eprintln!("warning: could not update {}: {e}", bashrc.display());
+        return;
+    }
+    println!("Added completion source to {}.", bashrc.display());
+}
+
 fn remove_completions() {
     let home = match std::env::var("HOME") {
         Ok(h) => std::path::PathBuf::from(h),
         Err(_) => return,
     };
     let files = [
+        home.join(".octo/octorc"),
         home.join(".local/share/bash-completion/completions/octo"),
         home.join(".zfunc/_octo"),
         home.join(".config/fish/completions/octo.fish"),
@@ -241,11 +289,14 @@ fn remove_completions() {
             let _ = std::fs::remove_file(path);
         }
     }
+    // Drop any octo-related lines (the `# Octo completions` comment and its
+    // `source` line, plus any legacy completion sources). Case-insensitive so
+    // the capitalized comment is caught alongside the lowercased paths.
     let bashrc = home.join(".bashrc");
     if let Ok(content) = std::fs::read_to_string(&bashrc) {
         let cleaned = content
             .lines()
-            .filter(|l| !l.contains("octo"))
+            .filter(|l| !l.to_lowercase().contains("octo"))
             .collect::<Vec<_>>()
             .join("\n");
         let cleaned = if content.ends_with('\n') { cleaned + "\n" } else { cleaned };
@@ -265,6 +316,7 @@ async fn refresh_completions(bin: &std::path::Path) {
         Err(_) => return,
     };
     let targets: &[(&str, std::path::PathBuf)] = &[
+        ("bash", home.join(".octo/octorc")),
         ("bash", home.join(".local/share/bash-completion/completions/octo")),
         ("zsh",  home.join(".zfunc/_octo")),
         ("fish", home.join(".config/fish/completions/octo.fish")),
@@ -585,6 +637,8 @@ async fn main() -> Result<()> {
                 debug!("[init] wrote config file {}", config_path.display());
                 println!("\nWrote {}.", config_path.display());
             }
+
+            install_completions();
 
             init::run(init::InitOptions {
                 noise_port,
