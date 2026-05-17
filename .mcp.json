@@ -1,0 +1,26 @@
+[
+  {
+    "name": "aws-mcp",
+    "command": "uvx",
+    "timeout": 100000,
+    "transport": "stdio",
+    "args": [
+      "mcp-proxy-for-aws@latest",
+      "https://aws-mcp.us-east-1.api.aws/mcp",
+      "--metadata", "AWS_REGION=us-west-2"
+    ],
+    "env": {
+      "AWS_ACCESS_KEY_ID": "${AWS_ACCESS_KEY_ID}",
+      "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY}"
+    }
+  },
+  {
+    "name": "prime-intellect",
+    "command": "uvx",
+    "args": ["prime-intellect-mcp"],
+    "env": {
+      "PRIME_API_KEY":        "${PRIME_API_KEY}",
+      "PRIME_MAX_HOURLY_USD": "${PRIME_MAX_HOURLY_USD}"
+    }
+  }
+]
