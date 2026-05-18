@@ -1,6 +1,8 @@
 # octo
 `octo` is a mobile agent management system that runs a fleet of local and remote LLM agents. It was originally designed for coding but can be used to deploy LLM agents for any task.  It supports the Anthropic and any OpenAI-compatible API.  It uses the Noise Protocol to setup an encrypted connection between mobile and server without the need for DNS.
 
+This code is experimental and will change frequently between version updates.
+
 ## Setup
 To get up and running you'll need
 - A Linux host with static IP with ports 22 and 8443 open
