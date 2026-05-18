@@ -1736,10 +1736,13 @@ function AppInner() {
   const [showTasksModal,      setShowTasksModal]      = useState(false)
   const [showSidebar,    setShowSidebar]    = useState(false)
   const sidebarAnim = useRef(new Animated.Value(0)).current
+  const childSlideAnim = useRef(new Animated.Value(0)).current
+  const [childMounted, setChildMounted] = useState(false)
   const [startingContainerId, setStartingContainerId] = useState<string | null>(null)
   const [startingError,       setStartingError]       = useState<string | null>(null)
   const [reconnecting,        setReconnecting]        = useState(false)
   const startingContainerIdRef = useRef<string | null>(null)
+  const openChatRef = useRef((child: ContainerInfo) => {})
   const clearChatRef       = useRef<() => void>(() => {})
   const reloadRef          = useRef<() => void>(() => {})
   const closeWsRef         = useRef<() => void>(() => {})
@@ -1773,7 +1776,7 @@ function AppInner() {
   // The single Noise tunnel always points at lair. Mobile reaches a child
   // agent's chat by opening WS to `/agents/<name>/stream` over the same
   // tunnel — lair proxies the traffic.
-  const masterBaseUrl = !activeChild && tunnelPort ? `http://127.0.0.1:${tunnelPort}` : null
+  const masterBaseUrl = tunnelPort ? `http://127.0.0.1:${tunnelPort}` : null
 
   // Load saved master connection on mount and auto-connect.
   useEffect(() => {
@@ -1894,7 +1897,7 @@ function AppInner() {
         startingContainerIdRef.current = null
         setStartingContainerId(null)
         setStartingError(null)
-        setActiveChild(started)
+        openChatRef.current(started)
       }
     }
   }, [])
@@ -1980,6 +1983,27 @@ function AppInner() {
     })
   }, [sidebarAnim])
 
+  const openChild = useCallback((child: ContainerInfo) => {
+    setChildMounted(true)
+    childSlideAnim.setValue(0)
+    setActiveChild(child)
+    Animated.timing(childSlideAnim, { toValue: 1, duration: 260, useNativeDriver: true }).start()
+  }, [childSlideAnim])
+
+  const closeChild = useCallback(() => {
+    Animated.timing(childSlideAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(({ finished }) => {
+      if (finished) {
+        setActiveChild(null)
+        setChildMounted(false)
+        setShowSidebar(false)
+        sidebarAnim.setValue(0)
+      }
+    })
+  }, [childSlideAnim, sidebarAnim])
+
+  // Keep the ref in sync so handleContainersUpdate can trigger animation.
+  useEffect(() => { openChatRef.current = openChild }, [openChild])
+
   // ── QR scanner overlay ──────────────────────────────────────────────────────
   if (scanning) {
     return <QrScanner onScanned={handleQrScanned} onCancel={() => setScanning(false)} />
@@ -2019,91 +2043,98 @@ function AppInner() {
     )
   }
 
-  // ── Child chat screen ───────────────────────────────────────────────────────
-  if (activeChild) {
-    const childKey = activeChild.id
-    return (
-      <ChildChatScreen
-        child={activeChild}
-        tunnelPort={tunnelPort}
-        tunnelError={tunnelError}
-        onClose={() => {
-          // The Noise tunnel stays — only the in-app chat target changes.
-          setActiveChild(null)
-          setShowSidebar(false)
-          sidebarAnim.setValue(0)
-        }}
-        initialDraft={draftsRef.current[childKey]}
-        onDraftChange={d => { draftsRef.current[childKey] = d }}
-        reconnectingRef={reconnectingRef}
-        reloadRef={reloadRef}
-        closeWsRef={closeWsRef}
-      />
-    )
-  }
+
+  // ── Master + child overlay layout ───────────────────────────────────────────
+  const { width: screenW } = useWindowDimensions()
+  const masterTranslateX = childSlideAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -(screenW * 0.3)],
+  })
+  const childTranslateX = childSlideAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [screenW, 0],
+  })
 
   // ── Master chat UI ───────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <View style={s.paneArea}>
-        <View style={s.header}>
-          <View style={s.headerLeft}>
-            <TouchableOpacity
-              style={s.hamburgerBtn}
-              onPress={openSidebar}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <View style={s.hamburgerBars}>
-                <View style={s.hamburgerBar} />
-                <View style={s.hamburgerBar} />
-                <View style={s.hamburgerBar} />
+        <Animated.View style={[{ flex: 1, transform: [{ translateX: masterTranslateX }] }]}>
+          <View style={s.header}>
+            <View style={s.headerLeft}>
+              <TouchableOpacity
+                style={s.hamburgerBtn}
+                onPress={openSidebar}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <View style={s.hamburgerBars}>
+                  <View style={s.hamburgerBar} />
+                  <View style={s.hamburgerBar} />
+                  <View style={s.hamburgerBar} />
+                </View>
+              </TouchableOpacity>
+              <View style={[s.connStatusPill, { backgroundColor: statusColor(chatStatus) + '22' }]}>
+                <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
+                <Text style={[s.connPillLabel, { color: statusColor(chatStatus) }]}>{chatStatus === 'ready' || chatStatus === 'streaming' ? 'live' : chatStatus}</Text>
               </View>
-            </TouchableOpacity>
-            <View style={[s.connStatusPill, { backgroundColor: statusColor(chatStatus) + '22' }]}>
-              <View style={[s.connDot, { backgroundColor: statusColor(chatStatus) }]} />
-              <Text style={[s.connPillLabel, { color: statusColor(chatStatus) }]}>{chatStatus === 'ready' || chatStatus === 'streaming' ? 'live' : chatStatus}</Text>
+            </View>
+            <View style={s.headerRight}>
+              <TasksHeaderButton tasks={masterTasks} onPress={() => setShowTasksModal(true)} />
+              <TouchableOpacity
+                style={s.clearBtn}
+                onPress={() => clearChatRef.current()}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                disabled={chatStatus !== 'ready'}
+              >
+                <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
+              </TouchableOpacity>
             </View>
           </View>
-          <View style={s.headerRight}>
-            <TasksHeaderButton tasks={masterTasks} onPress={() => setShowTasksModal(true)} />
-            <TouchableOpacity
-              style={s.clearBtn}
-              onPress={() => clearChatRef.current()}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              disabled={chatStatus !== 'ready'}
-            >
-              <Text style={[s.clearBtnText, chatStatus !== 'ready' && { opacity: 0.3 }]}>clear</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
 
-        {masterBaseUrl && (
-          <ChatPane
-            baseUrl={masterBaseUrl}
-            onStatusChange={setChatStatus}
-            clearRef={clearChatRef}
-            initialDraft={draftsRef.current['master']}
-            onDraftChange={d => { draftsRef.current['master'] = d }}
-            reconnectingRef={reconnectingRef}
-            reloadRef={reloadRef}
-            closeWsRef={closeWsRef}
-            sendFrameRef={masterSendFrameRef}
-            onContainersUpdate={handleContainersUpdate}
-            onTasksUpdate={handleMasterTasksUpdate}
-            onCancelAck={masterHandleCancelAck}
+          {masterBaseUrl && (
+            <ChatPane
+              baseUrl={masterBaseUrl}
+              onStatusChange={setChatStatus}
+              clearRef={clearChatRef}
+              initialDraft={draftsRef.current['master']}
+              onDraftChange={d => { draftsRef.current['master'] = d }}
+              reconnectingRef={reconnectingRef}
+              reloadRef={reloadRef}
+              closeWsRef={closeWsRef}
+              sendFrameRef={masterSendFrameRef}
+              onContainersUpdate={handleContainersUpdate}
+              onTasksUpdate={handleMasterTasksUpdate}
+              onCancelAck={masterHandleCancelAck}
+            />
+          )}
+
+          <TasksModal
+            visible={showTasksModal}
+            tasks={masterTasks}
+            cancellingIds={masterCancellingIds}
+            onClose={() => setShowTasksModal(false)}
+            onCancel={(id) => {
+              log(`[app] cancel_task id=${id} (master)`)
+              masterRequestCancel(id)
+            }}
           />
-        )}
+        </Animated.View>
 
-        <TasksModal
-          visible={showTasksModal}
-          tasks={masterTasks}
-          cancellingIds={masterCancellingIds}
-          onClose={() => setShowTasksModal(false)}
-          onCancel={(id) => {
-            log(`[app] cancel_task id=${id} (master)`)
-            masterRequestCancel(id)
-          }}
-        />
+        {childMounted && activeChild && (
+          <Animated.View style={[StyleSheet.absoluteFillObject, { transform: [{ translateX: childTranslateX }] }]}>
+            <ChildChatScreen
+              child={activeChild}
+              tunnelPort={tunnelPort}
+              tunnelError={tunnelError}
+              onClose={closeChild}
+              initialDraft={draftsRef.current[activeChild.id]}
+              onDraftChange={d => { draftsRef.current[activeChild.id] = d }}
+              reconnectingRef={reconnectingRef}
+              reloadRef={reloadRef}
+              closeWsRef={closeWsRef}
+            />
+          </Animated.View>
+        )}
 
         {reconnecting && (
           <View style={s.startingOverlay} pointerEvents="none">
@@ -2178,10 +2209,10 @@ function AppInner() {
                     key={c.id}
                     style={s.containerMenuItem}
                     onPress={() => {
-                      setShowSidebar(false)
-                      sidebarAnim.setValue(0)
                       if (c.status === 'running') {
-                        setActiveChild(c)
+                        setShowSidebar(false)
+                        sidebarAnim.setValue(0)
+                        openChild(c)
                       } else {
                         startContainer(c.id)
                       }
