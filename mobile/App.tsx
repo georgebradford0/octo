@@ -1727,6 +1727,8 @@ function AppInner() {
   const [tunnelPort,  setTunnelPort]  = useState<number | null>(null)
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [scanning,    setScanning]    = useState(false)
+  const [manualConn,  setManualConn]  = useState('')
+  const [manualError, setManualError] = useState<string | null>(null)
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
   const [containers,          setContainers]          = useState<ContainerInfo[]>([])
   const [activeChild,         setActiveChild]         = useState<ContainerInfo | null>(null)
@@ -1916,6 +1918,23 @@ function AppInner() {
     setConn(parsed)
   }, [])
 
+  const handleManualConnect = useCallback(() => {
+    const raw = manualConn.trim()
+    if (!raw) return
+    Keyboard.dismiss()
+    log(`[qr] manual connect raw=${raw}`)
+    const parsed = parseQrData(raw)
+    if (!parsed) {
+      logE(`[qr] manual parse failed for: ${raw}`)
+      setManualError('Invalid connect string')
+      return
+    }
+    log(`[qr] manual host=${parsed.host} port=${parsed.port} pk=${parsed.pk.slice(0, 8)}…`)
+    setManualError(null)
+    AsyncStorage.setItem('masterConnection', JSON.stringify(parsed)).catch(() => {})
+    setConn(parsed)
+  }, [manualConn])
+
   const requestCameraAndScan = useCallback(async () => {
     if (Platform.OS === 'android') {
       const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA)
@@ -2038,6 +2057,28 @@ function AppInner() {
           <View style={s.setupRule} />
           <Text style={s.setupSubtitle}>Distributed Coding Agents</Text>
           <Text style={s.setupTagline}>Tap the mark to scan your session QR code.</Text>
+          <Text style={s.setupOr}>or paste a connect string</Text>
+          <TextInput
+            style={s.setupInput}
+            value={manualConn}
+            onChangeText={(t) => { setManualConn(t); if (manualError) setManualError(null) }}
+            onSubmitEditing={handleManualConnect}
+            placeholder="2:host:port:key"
+            placeholderTextColor={C.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoComplete="off"
+            spellCheck={false}
+            returnKeyType="go"
+          />
+          {manualError ? <Text style={s.setupError}>{manualError}</Text> : null}
+          <TouchableOpacity
+            style={[s.setupBtn, !manualConn.trim() && s.setupBtnDisabled]}
+            onPress={handleManualConnect}
+            disabled={!manualConn.trim()}
+          >
+            <Text style={s.setupBtnText}>connect</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     )
@@ -2270,7 +2311,10 @@ const s = StyleSheet.create({
   setupStatus:   { fontSize: 11, color: C.textMuted, textAlign: 'center', fontFamily: MONO, letterSpacing: 1.5, textTransform: 'uppercase' },
   setupError:    { fontSize: 12, color: C.red, textAlign: 'center', lineHeight: 18, fontFamily: MONO, letterSpacing: 0.4 },
   setupBtn:      { borderRadius: 0, borderWidth: 1.5, borderColor: C.textPrimary, paddingVertical: 13, paddingHorizontal: 36, marginTop: 14, backgroundColor: 'transparent' },
+  setupBtnDisabled: { opacity: 0.35 },
   setupBtnText:  { color: C.textPrimary, fontWeight: '800', fontSize: 11, letterSpacing: 4, textTransform: 'uppercase', fontFamily: ARIMO },
+  setupOr:       { fontSize: 10, color: C.textMuted, letterSpacing: 3, textTransform: 'uppercase', fontFamily: MONO, fontWeight: '700', marginTop: 18 },
+  setupInput:    { width: '100%', maxWidth: 320, backgroundColor: '#FBF8EE', borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 12, color: C.textPrimary, fontSize: 13, fontFamily: MONO, marginTop: 4 },
 
   // App icon mark
   creatureImg:        { width: 116, height: 116, borderRadius: 26, marginBottom: 8 },
