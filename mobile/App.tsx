@@ -1628,7 +1628,10 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onOpenSidebar, initia
   }, [reconcile])
 
   return (
-    <SafeAreaView style={s.safe} edges={['top']}>
+    // No SafeAreaView here: this screen is rendered as an overlay inside
+    // AppInner's SafeAreaView, so applying the top inset again would push
+    // the header down by double the status-bar height.
+    <View style={s.safe}>
       <View style={s.paneArea}>
         <View style={s.header}>
           <View style={s.headerLeft}>
@@ -1693,7 +1696,7 @@ function ChildChatScreen({ child, tunnelPort, tunnelError, onOpenSidebar, initia
           }}
         />
       </View>
-    </SafeAreaView>
+    </View>
   )
 }
 
