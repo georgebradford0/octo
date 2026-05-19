@@ -890,17 +890,6 @@ const ChatPane = memo(function ChatPane({
   const closingRef        = useRef(false)
   const streamingIdRef    = useRef<string>(uid())
   const hasAssistantMsgRef = useRef<boolean>(false)
-  // True for the duration of an agentic turn after the turn's anchor row has
-  // been scrolled into view: suppresses content-grew auto-scroll so streaming
-  // text doesn't drag the viewport down while the user is reading. Released
-  // only when the turn ends (done / interrupted / error). User scroll never
-  // releases — they can read or peek freely without forfeiting the lock.
-  const streamingLockRef    = useRef<boolean>(false)
-  // One-shot flag, set when a turn begins — by sendMessage for local turns,
-  // by armTurnScroll for auto-turns (bg_complete) and resumed-WS replays.
-  // Consumed by onContentSizeChange the next time it auto-scrolls, engaging
-  // streamingLockRef once the turn's anchor row is on screen.
-  const scrollOnceAndLockRef = useRef<boolean>(false)
   // Per-WS counters for the mobile→server keepalive. The WS effect emits
   // `ping { id: ++clientPingNextRef }` every KEEPALIVE_INTERVAL_MS and the
   // server replies with `pong { id }` (handled in handleStreamEvent above,
@@ -947,17 +936,6 @@ const ChatPane = memo(function ChatPane({
     if (sendFrameRef) sendFrameRef.current = sendFrame
   }, [sendFrame, sendFrameRef])
 
-  // Arm the scroll-once-and-lock one-shot for a turn that began without a
-  // local sendMessage — an auto-turn triggered by bg_complete, or a turn
-  // replayed after a resumed-WS join. Mirrors sendMessage so streaming
-  // content from any turn brings its anchor into view once, then stops
-  // dragging the viewport. No-op if a turn is already armed or locked.
-  const armTurnScroll = useCallback(() => {
-    if (!streamingLockRef.current && !scrollOnceAndLockRef.current) {
-      scrollOnceAndLockRef.current = true
-    }
-  }, [])
-
   const handleStreamEvent = useCallback((raw: string) => {
     const event = parseServerEvent(raw)
     if (!event) return
@@ -993,7 +971,6 @@ const ChatPane = memo(function ChatPane({
         break
       }
       case 'text': {
-        armTurnScroll()
         const chunk = event.text
         if (!hasAssistantMsgRef.current) {
           hasAssistantMsgRef.current = true
@@ -1006,7 +983,6 @@ const ChatPane = memo(function ChatPane({
         break
       }
       case 'tool_use': {
-        armTurnScroll()
         // Bump streaming id so the *next* text block becomes a fresh message
         // after the tool, not appended to pre-tool text.
         hasAssistantMsgRef.current = false
@@ -1042,7 +1018,6 @@ const ChatPane = memo(function ChatPane({
       case 'done': {
         log(`[chat] stream done cost_usd=${event.cost_usd}`)
         lastToolIdRef.current = null
-        streamingLockRef.current = false
         updateStatus('ready')
         const cost = event.cost_usd
         setMessages(prev => {
@@ -1072,7 +1047,6 @@ const ChatPane = memo(function ChatPane({
       case 'interrupted': {
         log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
         lastToolIdRef.current = null
-        streamingLockRef.current = false
         updateStatus('ready')
         const cost = event.cost_usd
         setMessages(prev => {
@@ -1093,7 +1067,6 @@ const ChatPane = memo(function ChatPane({
       case 'error':
         logE(`[chat] stream error: ${event.message}`)
         lastToolIdRef.current = null
-        streamingLockRef.current = false
         setMessages(prev => appendMsg(prev, { id: uid(), role: 'error' as const, text: event.message }))
         updateStatus('ready')
         hasAssistantMsgRef.current = false
@@ -1139,7 +1112,7 @@ const ChatPane = memo(function ChatPane({
         }
         break
     }
-  }, [updateStatus, sendFrame, onContainersUpdate, onTasksUpdate, onCancelAck, armTurnScroll])
+  }, [updateStatus, sendFrame, onContainersUpdate, onTasksUpdate, onCancelAck])
 
   // Keep a stable ref to loadHistory so reattachStream can call it without
   // being listed as a dependency (avoids circular dep: loadHistory → reattachStream → loadHistory).
@@ -1196,12 +1169,10 @@ const ChatPane = memo(function ChatPane({
         // `done`/`interrupted`/`error` at turn end), so loadHistory no longer
         // needs to drive it from `is_streaming`.
         setTimeout(() => {
-          // Only re-pin to the bottom if the user was already there and no
-          // turn lock is engaged. Otherwise the user is reading earlier
-          // content — or a turn is deliberately holding the viewport still —
-          // and a history reconcile (e.g. end-of-turn, foreground return)
-          // would yank them away.
-          if (!isAtBottomRef.current || streamingLockRef.current) return
+          // Only re-pin to the bottom if the user was already there.
+          // Otherwise they're reading earlier content and a history reconcile
+          // (e.g. end-of-turn, foreground return) would yank them away.
+          if (!isAtBottomRef.current) return
           const offset = Math.max(0, contentHeightRef.current - listHeightRef.current)
           listRef.current?.scrollToOffset({ offset, animated: false })
         }, 50)
@@ -1413,11 +1384,6 @@ const ChatPane = memo(function ChatPane({
     // streaming message id rather than appending onto the previous turn's tail.
     streamingIdRef.current = uid()
     hasAssistantMsgRef.current = false
-    // Release any lingering lock from a previous turn, then arm the one-shot
-    // so the user msg auto-scrolls into view and the lock re-engages right
-    // after — see onContentSizeChange.
-    streamingLockRef.current = false
-    scrollOnceAndLockRef.current = true
 
     if (!sendFrame({ type: 'user_message', text })) {
       logE('[chat] sendMessage: WS not open, surfacing error')
@@ -1476,20 +1442,13 @@ const ChatPane = memo(function ChatPane({
           }
           onContentSizeChange={(_, h) => {
             contentHeightRef.current = h
-            if (streamingLockRef.current) {
-              if (isAtBottomRef.current && h > listHeightRef.current) {
-                isAtBottomRef.current = false
-                setShowScrollBtn(true)
-              }
-              return
-            }
+            // Follow new content — new messages and streaming text — only
+            // while the user is already at the bottom. If they've scrolled
+            // up to read, leave the viewport put; the scroll-to-bottom
+            // button handles re-pinning.
             if (isAtBottomRef.current) {
               const offset = Math.max(0, h - listHeightRef.current)
               listRef.current?.scrollToOffset({ offset, animated: false })
-              if (scrollOnceAndLockRef.current) {
-                scrollOnceAndLockRef.current = false
-                streamingLockRef.current = true
-              }
             }
           }}
           onLayout={e => { listHeightRef.current = e.nativeEvent.layout.height }}
