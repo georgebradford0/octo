@@ -1701,6 +1701,11 @@ function AppInner() {
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
   const [containers,          setContainers]          = useState<ContainerInfo[]>([])
   const [activeChild,         setActiveChild]         = useState<ContainerInfo | null>(null)
+  // When swapping between two child agents, the previously-shown child is
+  // parked here so its pane stays visible underneath the incoming slide-in.
+  // Without it the swap would briefly reveal the master pane behind, since
+  // resetting `childSlideAnim` to 0 also slides the master back into view.
+  const [outgoingChild,       setOutgoingChild]       = useState<ContainerInfo | null>(null)
   // Per-chat background-task registry for the master chat. Pushed by lair on
   // /stream open and after every spawn / completion / cancellation.
   const [masterTasks,         setMasterTasks]         = useState<TaskRecord[]>([])
@@ -1972,19 +1977,30 @@ function AppInner() {
   }, [sidebarAnim])
 
   const openChild = useCallback((child: ContainerInfo) => {
-    setActiveChild(child)
-    setChildMounted(true)
-    if (childMounted) {
-      // Already on a child pane (switching agents via the sidebar) — swap the
-      // content in place; sliding from master would flash the master chat.
-      childSlideAnim.setValue(1)
+    // No-op if the sidebar tap targets the agent we're already viewing.
+    if (childMounted && activeChild?.id === child.id) return
+    if (childMounted && activeChild) {
+      // Child → child: park the outgoing pane underneath so it covers the
+      // master pane while `childSlideAnim` rewinds, then slide the new child
+      // in from the right with the same animation used for master → child.
+      setOutgoingChild(activeChild)
+      setActiveChild(child)
+      childSlideAnim.setValue(0)
+      Animated.timing(childSlideAnim, { toValue: 1, duration: 260, useNativeDriver: true }).start(({ finished }) => {
+        if (finished) setOutgoingChild(null)
+      })
     } else {
+      setActiveChild(child)
+      setChildMounted(true)
       childSlideAnim.setValue(0)
       Animated.timing(childSlideAnim, { toValue: 1, duration: 260, useNativeDriver: true }).start()
     }
-  }, [childSlideAnim, childMounted])
+  }, [childSlideAnim, childMounted, activeChild])
 
   const closeChild = useCallback(() => {
+    // If we're mid-swap, drop the outgoing pane up front — otherwise it would
+    // be revealed as the active pane slides out.
+    setOutgoingChild(null)
     Animated.timing(childSlideAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(({ finished }) => {
       if (finished) {
         setActiveChild(null)
@@ -2146,6 +2162,24 @@ function AppInner() {
             }}
           />
         </Animated.View>
+
+        {outgoingChild && (
+          // Static cover for the master pane during a child → child swap.
+          // Unmounts once `openChild` finishes the slide-in. Pointer events
+          // disabled so taps fall through to the incoming pane on top.
+          <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
+            <ChildChatScreen
+              key={`outgoing-${outgoingChild.id}`}
+              child={outgoingChild}
+              tunnelPort={tunnelPort}
+              tunnelError={tunnelError}
+              onOpenSidebar={openSidebar}
+              initialDraft={draftsRef.current[outgoingChild.id]}
+              onDraftChange={d => { draftsRef.current[outgoingChild.id] = d }}
+              reconnectingRef={reconnectingRef}
+            />
+          </View>
+        )}
 
         {childMounted && activeChild && (
           <Animated.View style={[StyleSheet.absoluteFillObject, { transform: [{ translateX: childTranslateX }] }]}>
