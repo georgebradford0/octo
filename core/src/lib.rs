@@ -341,6 +341,7 @@ pub enum ChatEvent {
     Ready              { session_id: String, resumed: bool },
     Text               { text: String },
     ToolUse            {
+        tool_use_id: String,
         tool:  String,
         input: serde_json::Value,
         /// Human-readable phrase clients should show in place of `tool` (e.g.
@@ -349,7 +350,7 @@ pub enum ChatEvent {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         display: Option<String>,
     },
-    ToolOutput         { line: String },
+    ToolOutput         { tool_use_id: String, line: String },
     ToolResult         { tool_use_id: String, content: serde_json::Value },
     Result             { cost_usd: f64, turns: usize, session_id: String, result: Option<String> },
     Error              { message: String },
@@ -554,6 +555,7 @@ pub fn tool_definitions() -> Vec<AnthropicTool> {
 // ── Tool Execution ─────────────────────────────────────────────────────────────
 
 pub async fn execute_tool(
+    tool_use_id:      &str,
     name:             &str,
     input:            &serde_json::Value,
     cwd:              &str,
@@ -571,7 +573,7 @@ pub async fn execute_tool(
     // partial state (e.g. a half-written file). The model will see the
     // synthetic "error: interrupted" result and can clean up on the next turn.
     let result = tokio::select! {
-        r = execute_tool_inner(name, input, cwd, tx, cancel.clone(), extra_executor) => r,
+        r = execute_tool_inner(tool_use_id, name, input, cwd, tx, cancel.clone(), extra_executor) => r,
         _ = cancel.cancelled() => "error: interrupted".to_string(),
     };
     let elapsed = tool_start.elapsed().as_millis();
@@ -581,6 +583,7 @@ pub async fn execute_tool(
 }
 
 async fn execute_tool_inner(
+    tool_use_id:      &str,
     name:             &str,
     input:            &serde_json::Value,
     cwd:              &str,
@@ -616,7 +619,7 @@ async fn execute_tool_inner(
                         tokio::select! {
                             line = stdout_reader.next_line() => match line {
                                 Ok(Some(l)) => {
-                                    tx.send(ChatEvent::ToolOutput { line: l.clone() }).await.ok();
+                                    tx.send(ChatEvent::ToolOutput { tool_use_id: tool_use_id.to_string(), line: l.clone() }).await.ok();
                                     stdout_buf.push_str(&l);
                                     stdout_buf.push('\n');
                                 }
@@ -624,7 +627,7 @@ async fn execute_tool_inner(
                             },
                             line = stderr_reader.next_line() => match line {
                                 Ok(Some(l)) => {
-                                    tx.send(ChatEvent::ToolOutput { line: format!("[stderr] {l}") }).await.ok();
+                                    tx.send(ChatEvent::ToolOutput { tool_use_id: tool_use_id.to_string(), line: format!("[stderr] {l}") }).await.ok();
                                     stderr_buf.push_str(&l);
                                     stderr_buf.push('\n');
                                 }
@@ -639,12 +642,12 @@ async fn execute_tool_inner(
                     }
                     // Drain whichever pipe still has data after select exits.
                     while let Ok(Some(l)) = stdout_reader.next_line().await {
-                        tx.send(ChatEvent::ToolOutput { line: l.clone() }).await.ok();
+                        tx.send(ChatEvent::ToolOutput { tool_use_id: tool_use_id.to_string(), line: l.clone() }).await.ok();
                         stdout_buf.push_str(&l);
                         stdout_buf.push('\n');
                     }
                     while let Ok(Some(l)) = stderr_reader.next_line().await {
-                        tx.send(ChatEvent::ToolOutput { line: format!("[stderr] {l}") }).await.ok();
+                        tx.send(ChatEvent::ToolOutput { tool_use_id: tool_use_id.to_string(), line: format!("[stderr] {l}") }).await.ok();
                         stderr_buf.push_str(&l);
                         stderr_buf.push('\n');
                     }
@@ -1162,6 +1165,7 @@ async fn stream_anthropic(
                                 };
                                 info!("[core/stream/anthropic] tool_use name={} id={}", cur.name, cur.id);
                                 tx.send(ChatEvent::ToolUse {
+                                    tool_use_id: cur.id.clone(),
                                     tool:    cur.name.clone(),
                                     input:   input.clone(),
                                     display: lookup_display_label(tools, &cur.name),
@@ -1280,6 +1284,7 @@ async fn stream_openai(
         };
         info!("[core/stream/openai] tool_use name={} id={}", tc.name, tc.id);
         tx.send(ChatEvent::ToolUse {
+            tool_use_id: tc.id.clone(),
             tool:    tc.name.clone(),
             input:   input.clone(),
             display: lookup_display_label(tools, &tc.name),
@@ -1617,7 +1622,7 @@ pub async fn send_message(
                 continue;
             }
             let result = truncate_tool_output(
-                execute_tool(&name, &input, cwd, &tx, cancel.clone(), extra_executor.as_deref()).await,
+                execute_tool(&id, &name, &input, cwd, &tx, cancel.clone(), extra_executor.as_deref()).await,
                 tool_output_limit(&name),
             );
             let result_preview = result.chars().take(200).collect::<String>();
@@ -1731,7 +1736,7 @@ pub async fn run_agentic_loop(
                             continue;
                         }
                         let result = truncate_tool_output(
-                            execute_tool(name, input, &cwd, &tx, cancel.clone(), extra_executor.as_deref()).await,
+                            execute_tool(id, name, input, &cwd, &tx, cancel.clone(), extra_executor.as_deref()).await,
                             tool_output_limit(name),
                         );
                         let result_preview: String = result.chars().take(200).collect();

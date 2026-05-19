@@ -60,7 +60,6 @@ interface Message {
   role:       'user' | 'assistant' | 'tool' | 'session' | 'interrupted' | 'error' | 'bg_complete' | 'bg_progress'
   text:       string
   cost?:      number
-  toolUseId?: string
   output?:    string
   prevRole?:  Message['role']
 }
@@ -902,7 +901,6 @@ const ChatPane = memo(function ChatPane({
   const isAtBottomRef     = useRef(true)
   const contentHeightRef  = useRef(0)
   const listHeightRef     = useRef(0)
-  const lastToolIdRef     = useRef<string | null>(null)
   const historyAbortRef   = useRef<AbortController | null>(null)
 
   // Expose imperative handles to the parent.
@@ -961,7 +959,6 @@ const ChatPane = memo(function ChatPane({
             }
             return prev
           })
-          lastToolIdRef.current = null
         }
         // Reset per-turn streaming refs unconditionally: for resumed=false this
         // is the first turn after connect; for resumed=true the replay restarts
@@ -992,32 +989,28 @@ const ChatPane = memo(function ChatPane({
           : ''
         const label = event.display ?? event.tool
         const toolText = firstVal ? `${label} (${firstVal})` : label
-        log(`[chat] tool_use tool=${event.tool}`)
-        const toolId = uid()
-        lastToolIdRef.current = toolId
-        setMessages(prev => appendMsg(prev, { id: toolId, role: 'tool' as const, text: toolText }))
+        log(`[chat] tool_use tool=${event.tool} id=${event.tool_use_id}`)
+        // Use the wire tool_use_id directly as the Message id so subsequent
+        // tool_output / tool_result events route to the right bubble even when
+        // the model emits multiple tool_use blocks in one turn.
+        setMessages(prev => appendMsg(prev, { id: event.tool_use_id, role: 'tool' as const, text: toolText }))
         break
       }
       case 'tool_output': {
-        const toolId = lastToolIdRef.current
-        if (toolId) {
-          setMessages(prev => prev.map(m =>
-            m.id === toolId ? { ...m, output: (m.output ?? '') + event.line + '\n' } : m
-          ))
-        }
+        const toolId = event.tool_use_id
+        setMessages(prev => prev.map(m =>
+          m.id === toolId ? { ...m, output: (m.output ?? '') + event.line + '\n' } : m
+        ))
         break
       }
       case 'tool_result': {
-        const toolId = lastToolIdRef.current
-        if (toolId) {
-          const out = typeof event.output === 'string' ? event.output : JSON.stringify(event.output)
-          setMessages(prev => prev.map(m => m.id === toolId ? { ...m, output: out } : m))
-        }
+        const toolId = event.tool_use_id
+        const out = typeof event.output === 'string' ? event.output : JSON.stringify(event.output)
+        setMessages(prev => prev.map(m => m.id === toolId ? { ...m, output: out } : m))
         break
       }
       case 'done': {
         log(`[chat] stream done cost_usd=${event.cost_usd}`)
-        lastToolIdRef.current = null
         updateStatus('ready')
         const cost = event.cost_usd
         setMessages(prev => {
@@ -1046,7 +1039,6 @@ const ChatPane = memo(function ChatPane({
         break
       case 'interrupted': {
         log(`[chat] stream interrupted cost_usd=${event.cost_usd}`)
-        lastToolIdRef.current = null
         updateStatus('ready')
         const cost = event.cost_usd
         setMessages(prev => {
@@ -1066,7 +1058,6 @@ const ChatPane = memo(function ChatPane({
       }
       case 'error':
         logE(`[chat] stream error: ${event.message}`)
-        lastToolIdRef.current = null
         setMessages(prev => appendMsg(prev, { id: uid(), role: 'error' as const, text: event.message }))
         updateStatus('ready')
         hasAssistantMsgRef.current = false

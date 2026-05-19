@@ -11,8 +11,8 @@
 export type ServerEvent =
   | { type: 'ready';         session_id: string; resumed: boolean }
   | { type: 'text';          text: string }
-  | { type: 'tool_use';      tool: string; input: unknown; display?: string }
-  | { type: 'tool_output';   line: string }
+  | { type: 'tool_use';      tool_use_id: string; tool: string; input: unknown; display?: string }
+  | { type: 'tool_output';   tool_use_id: string; line: string }
   | { type: 'tool_result';   tool_use_id: string; output: unknown }
   | { type: 'done';          cost_usd: number }
   | { type: 'error';         message: string }
