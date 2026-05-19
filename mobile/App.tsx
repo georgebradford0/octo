@@ -1729,6 +1729,9 @@ function AppInner() {
   const [scanning,    setScanning]    = useState(false)
   const [manualConn,  setManualConn]  = useState('')
   const [manualError, setManualError] = useState<string | null>(null)
+  // Hooks must run unconditionally — keep this above the early returns for the
+  // scan / sign-in screens, not down by the chat layout that uses it.
+  const { width: screenW } = useWindowDimensions()
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
   const [containers,          setContainers]          = useState<ContainerInfo[]>([])
   const [activeChild,         setActiveChild]         = useState<ContainerInfo | null>(null)
@@ -2086,7 +2089,6 @@ function AppInner() {
 
 
   // ── Master + child overlay layout ───────────────────────────────────────────
-  const { width: screenW } = useWindowDimensions()
   const masterTranslateX = childSlideAnim.interpolate({
     inputRange: [0, 1],
     outputRange: [0, -(screenW * 0.3)],
