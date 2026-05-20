@@ -204,13 +204,10 @@ pub fn resolve_api_key() -> Option<String> {
 
     if openai_url.is_some() {
         std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty())
-            .or_else(|| {
-                let cfg = read_config();
-                cfg.openai_api_key.filter(|s| !s.is_empty()).or(cfg.anthropic_api_key)
-            })
+            .or_else(|| read_config().openai_api_key.filter(|s| !s.is_empty()))
     } else {
         std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty())
-            .or_else(|| read_config().anthropic_api_key)
+            .or_else(|| read_config().anthropic_api_key.filter(|s| !s.is_empty()))
             .or_else(|| read_key_from_shell_files())
     }
 }
