@@ -1689,6 +1689,15 @@ function AppInner() {
   // Hooks must run unconditionally — keep this above the early returns for the
   // scan / sign-in screens, not down by the chat layout that uses it.
   const { width: screenW } = useWindowDimensions()
+  // Setup-screen keyboard avoidance: when the manual-connect TextInput is
+  // focused, animate paddingBottom up by the keyboard height. The setup
+  // content is `justifyContent: 'center'`, so shrinking the available area
+  // from the bottom shifts the content up by half the keyboard height —
+  // enough to clear the input without pushing the AppIcon off the top.
+  const { height: kbHeight } = useReanimatedKeyboardAnimation()
+  const setupKeyboardLift = useAnimatedStyle(() => ({
+    paddingBottom: Math.max(0, -kbHeight.value),
+  }))
   const [chatStatus,  setChatStatus]  = useState<ConnStatus>('connecting')
   const [containers,          setContainers]          = useState<ContainerInfo[]>([])
   const [activeChild,         setActiveChild]         = useState<ContainerInfo | null>(null)
@@ -2043,37 +2052,39 @@ function AppInner() {
   if (!conn) {
     return (
       <SafeAreaView style={s.setupSafe} edges={['top', 'bottom']}>
-        <View style={s.setupCenter}>
-          <TouchableOpacity onPress={requestCameraAndScan} activeOpacity={0.85}>
-            <AppIcon pulse />
-          </TouchableOpacity>
-          <Text style={s.setupTitle}>OCTO</Text>
-          <View style={s.setupRule} />
-          <Text style={s.setupSubtitle}>Distributed Coding Agents</Text>
-          <Text style={s.setupTagline}>Tap the mark to scan your session QR code.</Text>
-          <Text style={s.setupOr}>or paste a connect string</Text>
-          <TextInput
-            style={s.setupInput}
-            value={manualConn}
-            onChangeText={(t) => { setManualConn(t); if (manualError) setManualError(null) }}
-            onSubmitEditing={handleManualConnect}
-            placeholder="2:host:port:key"
-            placeholderTextColor={C.textMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete="off"
-            spellCheck={false}
-            returnKeyType="go"
-          />
-          {manualError ? <Text style={s.setupError}>{manualError}</Text> : null}
-          <TouchableOpacity
-            style={[s.setupBtn, !manualConn.trim() && s.setupBtnDisabled]}
-            onPress={handleManualConnect}
-            disabled={!manualConn.trim()}
-          >
-            <Text style={s.setupBtnText}>connect</Text>
-          </TouchableOpacity>
-        </View>
+        <Reanimated.View style={[{ flex: 1 }, setupKeyboardLift]}>
+          <View style={s.setupCenter}>
+            <TouchableOpacity onPress={requestCameraAndScan} activeOpacity={0.85}>
+              <AppIcon pulse />
+            </TouchableOpacity>
+            <Text style={s.setupTitle}>OCTO</Text>
+            <View style={s.setupRule} />
+            <Text style={s.setupSubtitle}>Distributed Coding Agents</Text>
+            <Text style={s.setupTagline}>Tap the mark to scan your session QR code.</Text>
+            <Text style={s.setupOr}>or paste a connect string</Text>
+            <TextInput
+              style={s.setupInput}
+              value={manualConn}
+              onChangeText={(t) => { setManualConn(t); if (manualError) setManualError(null) }}
+              onSubmitEditing={handleManualConnect}
+              placeholder="2:host:port:key"
+              placeholderTextColor={C.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoComplete="off"
+              spellCheck={false}
+              returnKeyType="go"
+            />
+            {manualError ? <Text style={s.setupError}>{manualError}</Text> : null}
+            <TouchableOpacity
+              style={[s.setupBtn, !manualConn.trim() && s.setupBtnDisabled]}
+              onPress={handleManualConnect}
+              disabled={!manualConn.trim()}
+            >
+              <Text style={s.setupBtnText}>connect</Text>
+            </TouchableOpacity>
+          </View>
+        </Reanimated.View>
       </SafeAreaView>
     )
   }
