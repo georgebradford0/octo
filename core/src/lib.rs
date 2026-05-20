@@ -41,7 +41,12 @@ pub use relay::{RelaySigner, notify as relay_notify, send_notification_tool,
     NOTIFY_CATEGORY_AGENT_MESSAGE};
 
 pub mod ssh;
-pub use ssh::{ensure_ssh_keypair, SSH_PRIVATE_KEY_FILE, SSH_PUBLIC_KEY_FILE};
+pub use ssh::{
+    ensure_ssh_keypair, ensure_keypair_at, ensure_ssh_ca_keypair, read_ca_public_key, sign_user_cert,
+    load_revocations, revoke, unrevoke, is_revoked, RevokedEntry,
+    SSH_PRIVATE_KEY_FILE, SSH_PUBLIC_KEY_FILE,
+    SSH_CA_PRIVATE_KEY_FILE, SSH_CA_PUBLIC_KEY_FILE, SSH_REVOKED_FILE,
+};
 
 pub mod registry;
 pub use registry::{AgentRecord, AgentStatus, Registry};

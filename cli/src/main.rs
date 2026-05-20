@@ -3,6 +3,7 @@ mod init;
 mod mcp;
 mod qr;
 mod service;
+mod ssh;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -155,6 +156,28 @@ enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
+
+    /// Manage lair's SSH certificate authority (used to sign per-child certs
+    /// for outbound SSH from agents). See docs/ssh-certs.md.
+    Ssh {
+        #[command(subcommand)]
+        action: SshAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SshAction {
+    /// Print lair's CA public key. Add it to `/etc/ssh/lair_ca.pub` on any
+    /// remote host you want agents to reach, and `TrustedUserCAKeys
+    /// /etc/ssh/lair_ca.pub` to that host's sshd_config.
+    CaPubkey,
+    /// Revoke an agent — lair refuses to mint/refresh certs for it.
+    /// Existing certs expire when their TTL elapses (default 1h).
+    Revoke { name: String },
+    /// Remove an agent from the revocation list.
+    Unrevoke { name: String },
+    /// Print the current revocation list.
+    ListRevoked,
 }
 
 #[derive(Subcommand)]
@@ -867,6 +890,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Ssh { action } => match action {
+            SshAction::CaPubkey       => ssh::ca_pubkey().await?,
+            SshAction::Revoke   { name } => ssh::revoke(&name).await?,
+            SshAction::Unrevoke { name } => ssh::unrevoke(&name).await?,
+            SshAction::ListRevoked    => ssh::list_revoked().await?,
+        },
     }
     Ok(())
 }

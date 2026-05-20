@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use data_encoding::BASE32_NOPAD;
-use octo_core::ensure_ssh_keypair;
+use octo_core::{ensure_ssh_keypair, ensure_ssh_ca_keypair};
 use tracing::{debug, error, info, warn};
 
 use crate::service;
@@ -116,6 +116,24 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
         Err(e) => {
             warn!("[init] could not ensure SSH keypair: {e:#}");
             eprintln!("warning: could not ensure SSH keypair: {e:#}");
+        }
+    }
+
+    // SSH CA keypair — signs short-lived user certs for child agents (see
+    // docs/ssh-certs.md). The CA pubkey is the thing the operator authorizes
+    // on external hosts (one `TrustedUserCAKeys` line in sshd_config);
+    // after that, every child agent can SSH without per-child key churn.
+    match ensure_ssh_ca_keypair(&lair_dir) {
+        Ok((priv_path, pub_path)) => {
+            debug!("[init] SSH CA keypair ready at {}", priv_path.display());
+            println!("SSH CA keypair ready:");
+            println!("  private: {}", priv_path.display());
+            println!("  public:  {}", pub_path.display());
+            println!("  (run `octo ssh ca-pubkey` later to print this for authorizing on remote hosts)");
+        }
+        Err(e) => {
+            warn!("[init] could not ensure SSH CA keypair: {e:#}");
+            eprintln!("warning: could not ensure SSH CA keypair: {e:#}");
         }
     }
 
