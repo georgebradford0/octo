@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use data_encoding::BASE32_NOPAD;
-use octo_core::{ensure_ssh_keypair, ensure_ssh_ca_keypair};
+use octo_core::ensure_container_ssh_keypair;
 use tracing::{debug, error, info, warn};
 
 use crate::service;
@@ -105,35 +105,23 @@ pub async fn run(opts: InitOptions<'_>) -> Result<()> {
     fs::create_dir_all(&agents_dir)
         .with_context(|| format!("create {}", agents_dir.display()))?;
 
-    // SSH keypair for ops backchannels.
-    match ensure_ssh_keypair(&lair_dir) {
+    // Container SSH keypair — one Ed25519 key per container, at the
+    // conventional `$HOME/.ssh/id_ed25519` location. Lair seeds each
+    // agent's `~/.ssh/` from this same keypair on spawn, so the whole
+    // container shares one identity and the operator only has to
+    // register one pubkey per container on external services.
+    let container_home = service::config_dir();
+    match ensure_container_ssh_keypair(&container_home) {
         Ok((priv_path, pub_path)) => {
-            debug!("[init] SSH keypair ready at {}", priv_path.display());
-            println!("SSH keypair ready:");
+            debug!("[init] container SSH keypair ready at {}", priv_path.display());
+            println!("Container SSH keypair ready:");
             println!("  private: {}", priv_path.display());
             println!("  public:  {}", pub_path.display());
+            println!("  (run `octo ssh pubkey` later to print this for registering on Prime / GitHub / etc.)");
         }
         Err(e) => {
-            warn!("[init] could not ensure SSH keypair: {e:#}");
-            eprintln!("warning: could not ensure SSH keypair: {e:#}");
-        }
-    }
-
-    // SSH CA keypair — signs short-lived user certs for child agents (see
-    // docs/ssh-certs.md). The CA pubkey is the thing the operator authorizes
-    // on external hosts (one `TrustedUserCAKeys` line in sshd_config);
-    // after that, every child agent can SSH without per-child key churn.
-    match ensure_ssh_ca_keypair(&lair_dir) {
-        Ok((priv_path, pub_path)) => {
-            debug!("[init] SSH CA keypair ready at {}", priv_path.display());
-            println!("SSH CA keypair ready:");
-            println!("  private: {}", priv_path.display());
-            println!("  public:  {}", pub_path.display());
-            println!("  (run `octo ssh ca-pubkey` later to print this for authorizing on remote hosts)");
-        }
-        Err(e) => {
-            warn!("[init] could not ensure SSH CA keypair: {e:#}");
-            eprintln!("warning: could not ensure SSH CA keypair: {e:#}");
+            warn!("[init] could not ensure container SSH keypair: {e:#}");
+            eprintln!("warning: could not ensure container SSH keypair: {e:#}");
         }
     }
 

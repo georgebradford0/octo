@@ -898,86 +898,6 @@ fn spawn_monitor(
 /// identity. Idempotent — overwritten on each boot. Used by remote-agent
 /// registration: lair SSH-reads this file to learn the agent's Noise pubkey
 /// + public port after cloud-init completes.
-/// Mint `~/.ssh/id_ed25519{,.pub}` (idempotent) and POST the pubkey to lair's
-/// agent-token-gated cert endpoint. The returned cert is written next to the
-/// private key so plain `ssh user@host` from anywhere inside the agent picks
-/// it up automatically. Returns Ok even when there's no cert yet (lair
-/// unreachable, no token configured) — the lair refresher will produce one
-/// on its next tick.
-async fn bootstrap_ssh_identity() -> anyhow::Result<()> {
-    use anyhow::Context;
-    let home = std::env::var("HOME")
-        .context("HOME not set — can't place ssh identity")?;
-    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
-    let priv_path = ssh_dir.join("id_ed25519");
-    let pub_path  = ssh_dir.join("id_ed25519.pub");
-    std::fs::create_dir_all(&ssh_dir)
-        .with_context(|| format!("create {}", ssh_dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&ssh_dir)?.permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&ssh_dir, perms).ok();
-    }
-
-    let (priv_path, pub_path) = octo_core::ensure_keypair_at(&priv_path, &pub_path)
-        .context("ensure child ssh keypair")?;
-    info!("[agent] ssh identity ready at {}", priv_path.display());
-
-    let lair_url = match std::env::var("LAIR_INTERNAL_URL") {
-        Ok(s) if !s.is_empty() => s,
-        _ => {
-            warn!("[agent] LAIR_INTERNAL_URL not set; skipping initial cert request");
-            return Ok(());
-        }
-    };
-    let token = match std::env::var("OCTO_AGENT_TOKEN") {
-        Ok(s) if !s.is_empty() => s,
-        _ => {
-            // No spawn capability and no cert capability — operator-spawned
-            // top-level agents end up here. They have lair's cert refresher
-            // running for them only if they're spawned by another agent;
-            // for now, log and continue.
-            debug!("[agent] OCTO_AGENT_TOKEN not set; skipping initial cert request");
-            return Ok(());
-        }
-    };
-
-    let pubkey = std::fs::read_to_string(&pub_path)
-        .with_context(|| format!("read {}", pub_path.display()))?
-        .trim().to_string();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .context("build http client")?;
-    let url = format!("{}/ssh/cert", lair_url.trim_end_matches('/'));
-    let resp = client.post(&url)
-        .header("X-Octo-Agent-Token", &token)
-        .json(&serde_json::json!({ "pubkey": pubkey }))
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("lair refused cert (status {status}): {}", body.trim());
-    }
-    #[derive(serde::Deserialize)]
-    struct CertResp { cert: String }
-    let CertResp { cert } = resp.json::<CertResp>().await
-        .context("parse cert response")?;
-
-    let cert_path = ssh_dir.join("id_ed25519-cert.pub");
-    let tmp = cert_path.with_extension("pub.tmp");
-    std::fs::write(&tmp, format!("{}\n", cert.trim()))
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &cert_path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), cert_path.display()))?;
-    info!("[agent] ssh cert written to {}", cert_path.display());
-    Ok(())
-}
-
 fn write_agent_info(dir: &std::path::Path, pubkey_b32: &str, public_port: u16) -> std::io::Result<()> {
     let info = serde_json::json!({
         "pubkey":   pubkey_b32,
@@ -1070,16 +990,11 @@ pub async fn run() -> anyhow::Result<()> {
 
     crate::bootstrap::run_startup_script("agent").await?;
 
-    // Generate the child's own SSH keypair and request an initial cert from
-    // lair. Plain `ssh user@host` from inside the agent container then Just
-    // Works — OpenSSH auto-discovers `~/.ssh/id_ed25519{,-cert.pub}`. The
-    // background refresher in lair re-mints before each cert expires; this
-    // initial request avoids waiting up to TTL/2 for the first cert.
-    // Best-effort: if lair is briefly unreachable, the agent still starts
-    // and the refresher will catch up on its next tick.
-    if let Err(e) = bootstrap_ssh_identity().await {
-        warn!("[agent] SSH identity bootstrap failed (will retry via refresher): {e:#}");
-    }
+    // The container's shared SSH keypair has already been seeded into
+    // `$HOME/.ssh/id_ed25519{,.pub}` by lair's `AgentSupervisor::spawn`
+    // (see `lair/src/agent_proc.rs`), so any tool call inside the agent —
+    // raw `ssh user@host`, `git push`, etc. — uses the same identity as
+    // every other process in this container, with no per-agent setup.
 
     let cwd       = workspace.to_string_lossy().to_string();
     let system    = if has_repo {

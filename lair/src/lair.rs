@@ -33,7 +33,7 @@ use axum::{
 use octo_core::{
     self,
     build_tools_with_mcp, chain_executor_with_mcp,
-    cancel_task as core_cancel_task, completion_chat_event, ensure_ssh_keypair, finalize_task,
+    cancel_task as core_cancel_task, completion_chat_event, ensure_container_ssh_keypair, finalize_task,
     from_base32, init_mcp_pool, init_shell_env, load_or_generate_keypair, now_secs,
     monitor_complete_message, monitor_complete_text,
     monitor_process_tool, monitor_progress_message, monitor_progress_text, open_noise_tunnel,
@@ -1215,7 +1215,7 @@ octo can host any kind of agent workload, not only coding agents — don't assum
 - The instance must be in a **public subnet** — i.e. one whose route table has `0.0.0.0/0` pointing at an Internet Gateway. A "public IP" assigned in a non-public subnet is non-functional.
 
 ## Other remote-agent notes
-- Lair's SSH keypair is at `<OCTO_DATA_DIR>/ssh_id_ed25519`. `mint_bootstrap_userdata` always embeds the matching pubkey in the userdata it returns.
+- The lair container's SSH keypair is at `$HOME/.ssh/id_ed25519` (standard OpenSSH location). `mint_bootstrap_userdata` always embeds the matching pubkey in the userdata it returns.
 - Termination: for remote agents, `terminate_agent` returns instructions — call the provisioning MCP's terminate-instance method (using `instance_id` from `list_agents`), then `forget_agent(name)`.
 - Trigger the remote flow when the user names a cloud / instance type / region, OR when they ask for hardware lair doesn't have locally (GPUs, etc.).
 
@@ -1841,7 +1841,13 @@ async fn exec_register_remote_agent(state: Arc<AppState>, input: serde_json::Val
     let git_url     = input.get("git_url")    .and_then(|v| v.as_str()).map(str::to_string);
     let metadata    = input.get("metadata")   .cloned().unwrap_or(serde_json::Value::Null);
 
-    let key_path = octo_core::data_dir().join(octo_core::SSH_PRIVATE_KEY_FILE);
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => std::path::PathBuf::from(h),
+        _ => {
+            return "error: HOME is not set in lair's env — cannot resolve SSH key path.".to_string();
+        }
+    };
+    let key_path = octo_core::container_ssh_private_key(&home);
     if !key_path.exists() {
         return format!(
             "error: lair has no SSH private key at {}. Restart lair to generate one.",
@@ -2588,186 +2594,6 @@ async fn agent_delete_child(
     }
 }
 
-// ── SSH certificate authority ─────────────────────────────────────────────────
-//
-// `/ssh/cert` (agent-token gated) — child posts its pubkey, lair signs a
-// short-lived user cert. `/ssh/ca-pubkey` (open) — anyone can read the CA
-// pubkey. `/ssh/revoke[/...]` (mgmt-token gated) — operator manages the
-// revocation list, which both the issuance endpoint and the refresh task
-// check. See docs/ssh-certs.md for the full flow.
-
-/// Default cert validity. Tunable via `OCTO_SSH_CERT_TTL_SECS`.
-const DEFAULT_SSH_CERT_TTL_SECS: u64 = 3600;
-/// Refresh tick is `min(TTL/2, REFRESH_CAP)`. The cap keeps very long TTLs
-/// from leaving children with no margin if lair restarts.
-const SSH_REFRESH_INTERVAL_CAP_SECS: u64 = 900;
-
-fn ssh_cert_ttl_secs() -> u64 {
-    std::env::var("OCTO_SSH_CERT_TTL_SECS")
-        .ok().and_then(|v| v.parse::<u64>().ok())
-        .filter(|&n| n >= 60)
-        .unwrap_or(DEFAULT_SSH_CERT_TTL_SECS)
-}
-
-fn ssh_refresh_interval_secs() -> u64 {
-    (ssh_cert_ttl_secs() / 2).min(SSH_REFRESH_INTERVAL_CAP_SECS).max(60)
-}
-
-#[derive(Deserialize)]
-struct SshCertRequest {
-    /// Single-line OpenSSH-format pubkey (`ssh-ed25519 AAAA…`).
-    pubkey: String,
-}
-
-#[derive(serde::Serialize)]
-struct SshCertResponse {
-    cert:             String,
-    valid_until_secs: u64,
-    principal:        String,
-    key_id:           String,
-}
-
-async fn ssh_mint_cert(
-    State(_state): State<Arc<AppState>>,
-    axum::Extension(caller): axum::Extension<AgentCaller>,
-    Json(body):    Json<SshCertRequest>,
-) -> Response {
-    let pubkey = body.pubkey.trim().to_string();
-    if pubkey.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing 'pubkey'").into_response();
-    }
-    let dir = octo_core::data_dir();
-    if octo_core::is_revoked(&dir, &caller.name) {
-        warn!("[lair/ssh] cert refused: '{}' is revoked", caller.name);
-        return (
-            StatusCode::FORBIDDEN,
-            format!("agent '{}' is on the SSH revocation list", caller.name),
-        ).into_response();
-    }
-    let ca_priv = dir.join(octo_core::SSH_CA_PRIVATE_KEY_FILE);
-    if !ca_priv.exists() {
-        error!("[lair/ssh] CA key missing at {}", ca_priv.display());
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "SSH CA key missing — restart lair to regenerate",
-        ).into_response();
-    }
-    let now = octo_core::now_secs();
-    let ttl = ssh_cert_ttl_secs();
-    let key_id = format!("{}-{}", caller.name, now);
-    match octo_core::sign_user_cert(&ca_priv, &pubkey, &key_id, &caller.name, ttl) {
-        Ok(cert) => {
-            info!("[lair/ssh] minted cert for '{}' (ttl {ttl}s, key_id={key_id})", caller.name);
-            (StatusCode::OK, Json(SshCertResponse {
-                cert,
-                valid_until_secs: now + ttl,
-                principal: caller.name.clone(),
-                key_id,
-            })).into_response()
-        }
-        Err(e) => {
-            error!("[lair/ssh] sign_user_cert for '{}' failed: {e:#}", caller.name);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("sign failed: {e:#}")).into_response()
-        }
-    }
-}
-
-async fn ssh_ca_pubkey_handler() -> Response {
-    let dir = octo_core::data_dir();
-    match octo_core::read_ca_public_key(&dir) {
-        Ok(s)  => (StatusCode::OK, s).into_response(),
-        Err(e) => {
-            warn!("[lair/ssh] read CA pubkey failed: {e:#}");
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
-        }
-    }
-}
-
-async fn ssh_revoke_handler(AxumPath(name): AxumPath<String>) -> Response {
-    info!("[lair/ssh] POST /ssh/revoke/{name}");
-    match octo_core::revoke(&octo_core::data_dir(), &name, octo_core::now_secs()) {
-        Ok(_)  => (StatusCode::OK, format!("revoked '{name}'")).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
-    }
-}
-
-async fn ssh_unrevoke_handler(AxumPath(name): AxumPath<String>) -> Response {
-    info!("[lair/ssh] DELETE /ssh/revoke/{name}");
-    match octo_core::unrevoke(&octo_core::data_dir(), &name) {
-        Ok(true)  => (StatusCode::OK, format!("unrevoked '{name}'")).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, format!("'{name}' was not revoked")).into_response(),
-        Err(e)    => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
-    }
-}
-
-async fn ssh_list_revoked_handler() -> Response {
-    let list = octo_core::load_revocations(&octo_core::data_dir());
-    (StatusCode::OK, Json(list)).into_response()
-}
-
-/// Background task: every `ssh_refresh_interval_secs`, re-mint certs for
-/// every Running child that has published a pubkey. Skips revoked and
-/// stopped children. Best-effort — logs and continues on per-child errors.
-async fn ssh_cert_refresher(state: Arc<AppState>) {
-    let interval = Duration::from_secs(ssh_refresh_interval_secs());
-    let ttl = ssh_cert_ttl_secs();
-    info!("[lair/ssh] cert refresher starting (interval={interval:?}, ttl={ttl}s)");
-    // First tick after one interval — children request their initial cert
-    // on boot, so a freshly-spawned child already has one before we wake.
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await; // consume the immediate first tick
-    loop {
-        ticker.tick().await;
-        let dir = octo_core::data_dir();
-        let ca_priv = dir.join(octo_core::SSH_CA_PRIVATE_KEY_FILE);
-        if !ca_priv.exists() {
-            warn!("[lair/ssh] refresh skipped: CA key missing at {}", ca_priv.display());
-            continue;
-        }
-        let snapshot: Vec<AgentRecord> = state.registry.lock().unwrap().list().to_vec();
-        for record in snapshot {
-            if !matches!(record.status, AgentStatus::Running) { continue; }
-            if octo_core::is_revoked(&dir, &record.name)      { continue; }
-            let child_data_dir = state.supervisor.data_dir(&record.name);
-            // Child's HOME is `<agent_dir>` (one level above its data dir),
-            // and its keys live at `~/.ssh/id_ed25519{,.pub}`.
-            let ssh_dir  = state.supervisor.agent_dir(&record.name).join(".ssh");
-            let pub_path = ssh_dir.join("id_ed25519.pub");
-            let cert_path= ssh_dir.join("id_ed25519-cert.pub");
-            let Ok(pubkey) = std::fs::read_to_string(&pub_path) else { continue; };
-            let pubkey = pubkey.trim().to_string();
-            if pubkey.is_empty() { continue; }
-            let now = octo_core::now_secs();
-            let key_id = format!("{}-{}", record.name, now);
-            match octo_core::sign_user_cert(&ca_priv, &pubkey, &key_id, &record.name, ttl) {
-                Ok(cert) => {
-                    let tmp = cert_path.with_extension("pub.tmp");
-                    if let Err(e) = std::fs::write(&tmp, format!("{cert}\n")) {
-                        warn!("[lair/ssh] refresh '{}': write tmp failed: {e}", record.name);
-                        continue;
-                    }
-                    // Match ownership to the child's data dir so the per-agent
-                    // uid can read its own cert. Best-effort.
-                    if let Ok(meta) = std::fs::metadata(&child_data_dir) {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::MetadataExt;
-                            let _ = std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()));
-                        }
-                    }
-                    if let Err(e) = std::fs::rename(&tmp, &cert_path) {
-                        warn!("[lair/ssh] refresh '{}': rename failed: {e}", record.name);
-                    } else {
-                        debug!("[lair/ssh] refreshed cert for '{}' (key_id={key_id})", record.name);
-                    }
-                }
-                Err(e) => warn!("[lair/ssh] refresh '{}': sign failed: {e:#}", record.name),
-            }
-        }
-    }
-}
-
 async fn cli_agent_logs(
     AxumPath(name): AxumPath<String>,
     State(state):   State<Arc<AppState>>,
@@ -2842,22 +2668,19 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
     // ack UI" item is the planned gate for that surface.
     tokio::spawn(run_noise_proxy(static_private, noise_port, http_port, None));
 
-    // Operator SSH key — generated once for ops use (e.g. SSHing into hosts);
-    // kept even though the remote-agent flow was removed, in case the user
-    // wants to use it for unrelated ops.
-    match ensure_ssh_keypair(&dir) {
-        Ok((priv_path, _pub_path)) => info!("[lair] SSH keypair ready at {}", priv_path.display()),
-        Err(e) => warn!("[lair] could not ensure SSH keypair: {e:#}"),
-    }
-
-    // SSH certificate authority — signs short-lived user certs for child
-    // agents. Pubkey is what the operator authorizes once on external hosts
-    // (Prime Intellect, GPU pods, etc.) via a single `TrustedUserCAKeys`
-    // line in sshd_config; thereafter every child gets a signed cert and
-    // can SSH there without the operator ever updating authorized_keys.
-    match octo_core::ensure_ssh_ca_keypair(&dir) {
-        Ok((priv_path, _pub_path)) => info!("[lair] SSH CA keypair ready at {}", priv_path.display()),
-        Err(e) => warn!("[lair] could not ensure SSH CA keypair: {e:#}"),
+    // Container SSH keypair — one Ed25519 key per container, at the
+    // conventional `$HOME/.ssh/id_ed25519` location so tool calls (`ssh
+    // user@host`, `git push`, the agentic loop's `bash` shell-outs) pick
+    // it up without `-i` flags. Lair seeds each spawned agent's
+    // `$HOME/.ssh/` from this same keypair (see `AgentSupervisor::spawn`),
+    // so the whole container shares one identity.
+    let lair_home = std::env::var("HOME")
+        .ok().filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.clone());
+    match ensure_container_ssh_keypair(&lair_home) {
+        Ok((priv_path, _pub_path)) => info!("[lair] container SSH keypair ready at {}", priv_path.display()),
+        Err(e) => warn!("[lair] could not ensure container SSH keypair: {e:#}"),
     }
 
     // Agents root: `<OCTO_DATA_DIR>/../agents` so multiple lairs on one host
@@ -2980,7 +2803,6 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         });
 
         tokio::spawn(poll_agents(state.clone(), ready_tx.clone()));
-        tokio::spawn(ssh_cert_refresher(state.clone()));
 
         let ready_tx_timeout = ready_tx.clone();
         tokio::spawn(async move {
@@ -3006,8 +2828,6 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
             .route("/agents/:name/start", post(cli_start_agent))
             .route("/agents/:name/stop",  post(cli_stop_agent))
             .route("/agents/:name",       delete(cli_delete_agent))
-            .route("/ssh/revoke/:name",   post(ssh_revoke_handler))
-            .route("/ssh/revoke/:name",   delete(ssh_unrevoke_handler))
             .route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 require_mgmt_token,
@@ -3016,13 +2836,10 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         // Routes available to child agents via the per-agent capability
         // token (`X-Octo-Agent-Token`). Strict scope: the caller can only
         // spawn agents owned by itself, and can only terminate agents
-        // that descend from itself. Cert minting is here so the calling
-        // child is identified by the token, not the body — a child can't
-        // mint a cert with a principal other than its own name.
+        // that descend from itself.
         let agent_protected = Router::new()
             .route("/agents/child",       post(agent_create_child))
             .route("/agents/child/:name", delete(agent_delete_child))
-            .route("/ssh/cert",           post(ssh_mint_cert))
             .route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 require_agent_token,
@@ -3045,10 +2862,6 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
             .route("/agents/:name/clear",      post(proxy_agent_clear))
             .route("/agents/:name/branches",   get(proxy_agent_branches))
             .route("/agents/:name/completions", get(proxy_agent_completions))
-            // SSH CA — the CA pubkey and revocation list are not secret;
-            // anything that can reach lair's loopback HTTP can read them.
-            .route("/ssh/ca-pubkey",           get(ssh_ca_pubkey_handler))
-            .route("/ssh/revoked",             get(ssh_list_revoked_handler))
             .merge(protected)
             .merge(agent_protected)
             .with_state(state)

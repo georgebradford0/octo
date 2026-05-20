@@ -146,7 +146,10 @@ pub async fn await_agent_info(
 }
 
 pub fn read_lair_public_key() -> Result<String> {
-    let path = octo_core::data_dir().join(octo_core::SSH_PUBLIC_KEY_FILE);
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set — cannot resolve lair container SSH pubkey path")?;
+    let path = octo_core::container_ssh_public_key(&home);
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("read lair ssh public key at {}", path.display()))?;
     Ok(text.trim().to_string())

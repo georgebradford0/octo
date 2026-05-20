@@ -57,8 +57,9 @@ Everything lives under `~/.octo/` on the host, bind-mounted at `/data` inside th
 - `~/.octo/config.json` ↔ `/data/config.json` — operator credentials (API keys, model). Read by every role via `octo_core::config_path()`. The Rust code resolves `OCTO_HOME=/data` to find this; the host CLI uses `$HOME/.octo`.
 - `~/.octo/lair-env` — KEY=VALUE lines passed to `docker --env-file` on every `start_lair`. Operator-managed via `octo env`. **Stays on the host, not bind-mounted** — only consumed at container-start time.
 - `~/.octo/lair-launch.json` — bookkeeping for `octo reload`: ports + last-used image reference.
-- `~/.octo/lair/` ↔ `/data/lair/` — lair's per-process data dir (`OCTO_DATA_DIR`). Holds `noise_key.bin`, `agents.json`, `mcp.json`, `messages.json`, `tasks.json`, `relay_signing_key.bin`, `ssh_id_ed25519{,.pub}`, `known_hosts`. (No more `lair.pid` / `lair.log` — the container lifecycle is tracked by docker; `octo logs` shells out to `docker logs`.)
-- `~/.octo/agents/<name>/` ↔ `/data/agents/<name>/` — per-agent dirs. Each has `data/` (the agent's `OCTO_DATA_DIR`) and `workspace/` (its `WORKSPACE_DIR`), plus an `agent.log` capture written by lair's supervisor.
+- `~/.octo/lair/` ↔ `/data/lair/` — lair's per-process data dir (`OCTO_DATA_DIR`). Holds `noise_key.bin`, `agents.json`, `mcp.json`, `messages.json`, `tasks.json`, `relay_signing_key.bin`, `known_hosts`. (No more `lair.pid` / `lair.log` — the container lifecycle is tracked by docker; `octo logs` shells out to `docker logs`.)
+- `~/.octo/.ssh/` ↔ `/data/.ssh/` — the **container-level** SSH keypair (`id_ed25519`, `id_ed25519.pub`). One key per container; lair generates it on startup and seeds every spawned agent's `~/.ssh/` from it, so the whole container shares one identity. Register the matching pubkey once on external services (Prime Intellect, GitHub, GPU pods, etc.) via `octo ssh pubkey`.
+- `~/.octo/agents/<name>/` ↔ `/data/agents/<name>/` — per-agent dirs. Each has `data/` (the agent's `OCTO_DATA_DIR`), `workspace/` (its `WORKSPACE_DIR`), and `.ssh/` (a copy of the container keypair, chowned to the agent's uid), plus an `agent.log` capture written by lair's supervisor.
 
 ### Agent registry
 

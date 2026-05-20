@@ -55,6 +55,59 @@ fn chown_best_effort(path: &Path, uid: u32, gid: u32) {
     }
 }
 
+/// Seed `<agent_dir>/.ssh/` with the container-level SSH keypair (which
+/// lair generated on startup at `$HOME/.ssh/id_ed25519{,.pub}`). All
+/// agents in the same container share this one identity — the operator
+/// only registers one pubkey per container on external services. Best-
+/// effort: if lair's own keypair is missing (startup keygen failed), the
+/// agent boots without `~/.ssh/` populated and SSH-from-agent won't work
+/// until lair is restarted.
+fn seed_agent_ssh(agent_dir: &Path, uid: u32, gid: u32) -> Result<()> {
+    let lair_home = std::env::var("HOME")
+        .ok().filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set — cannot resolve container ssh key"))?;
+    let src_priv = octo_core::container_ssh_private_key(&lair_home);
+    let src_pub  = octo_core::container_ssh_public_key(&lair_home);
+    if !src_priv.exists() || !src_pub.exists() {
+        warn!(
+            "[supervisor] container ssh key missing ({} / {}); skipping seed for {}",
+            src_priv.display(), src_pub.display(), agent_dir.display(),
+        );
+        return Ok(());
+    }
+
+    let dst_dir  = agent_dir.join(".ssh");
+    let dst_priv = dst_dir.join(octo_core::SSH_PRIVATE_KEY_FILE);
+    let dst_pub  = dst_dir.join(octo_core::SSH_PUBLIC_KEY_FILE);
+    std::fs::create_dir_all(&dst_dir)
+        .with_context(|| format!("create {}", dst_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dst_dir)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dst_dir, perms).ok();
+    }
+
+    std::fs::copy(&src_priv, &dst_priv)
+        .with_context(|| format!("copy {} -> {}", src_priv.display(), dst_priv.display()))?;
+    std::fs::copy(&src_pub, &dst_pub)
+        .with_context(|| format!("copy {} -> {}", src_pub.display(), dst_pub.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dst_priv)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&dst_priv, perms).ok();
+    }
+    chown_best_effort(&dst_dir,  uid, gid);
+    chown_best_effort(&dst_priv, uid, gid);
+    chown_best_effort(&dst_pub,  uid, gid);
+    debug!("[supervisor] seeded {} from container ssh keypair", dst_dir.display());
+    Ok(())
+}
+
 /// Per-agent spawn params handed to `AgentSupervisor::spawn`. Mirrors the
 /// shape of the old `CreateAgentParams` so call sites in `lair.rs` stay
 /// readable.
@@ -170,6 +223,15 @@ impl AgentSupervisor {
         chown_best_effort(&agent_dir,     uid, gid);
         chown_best_effort(&data_dir,      uid, gid);
         chown_best_effort(&workspace_dir, uid, gid);
+
+        // Seed the agent's `~/.ssh/` with the container's shared SSH
+        // keypair so plain `ssh user@host` from the agent's bash tool
+        // works without `-i` flags. All agents in the lair container share
+        // one identity — the operator registers one pubkey per container
+        // on external services (Prime Intellect, GitHub, etc.).
+        if let Err(e) = seed_agent_ssh(&agent_dir, uid, gid) {
+            warn!("[supervisor] seed_agent_ssh for '{}': {e:#} (agent will boot without ~/.ssh/)", p.name);
+        }
 
         // Seed the child's mcp.json *before* spawning so the child's
         // `init_mcp_pool()` sees it on first read. `None` means the caller
