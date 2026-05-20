@@ -77,6 +77,9 @@ One thing to note.  MCPs by default are inherited by parent to spawned child.  T
 ## Docker-in-Docker
 Building docker images from a chat is currently not available.  This will change in the future.  I currently use Github workflows to run docker builds.
 
+## Noise/SSH Keys
+// TODO describe the creation of noise and ssh keys on init, their idempotence and lack of rotation as well as the use of SSH for remote agent deployment and/or connecting to provisioned compute without an agent
+
 ## Local vs Remote Agents
 Agents can be deployed and managed from the main chat or using the CLI. Local agents are deployed in the *same container* as `lair` but with their own data dir.  This is so `lair` does not have docker.sock access and is completely contained on the host.  Once an agent is deployed and ready to communicate it will be available in the mobile sidebar with a separate chat.
 
