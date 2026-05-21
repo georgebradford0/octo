@@ -61,6 +61,7 @@ interface Message {
   text:       string
   cost?:      number
   output?:    string
+  running?:   boolean
   prevRole?:  Message['role']
 }
 
@@ -440,16 +441,32 @@ function containerDisplayName(name: string): string {
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
+// Small pulsing accent dot — signals a tool is still running and has live
+// output the user can expand to watch.
+function PulsingDot() {
+  const opacity = useRef(new Animated.Value(1)).current
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.3, duration: 600, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 600, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ]),
+    )
+    loop.start()
+    return () => loop.stop()
+  }, [opacity])
+  return <Animated.View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.accent, opacity, marginRight: 6 }} />
+}
+
 const MessageBubble = memo(function MessageBubble({
   message, prevRole,
 }: {
   message:   Message
   prevRole?: Message['role']
 }) {
-  // Default expanded so streaming `tool_output` events (and the final
-  // `tool_result`) show up live without the user having to tap each chip.
-  // Tap still toggles for users who want to declutter a long transcript.
-  const [toolExpanded, setToolExpanded] = useState(true)
+  // Collapsed by default; tap expands to see tool output. Running tools show
+  // a pulsing dot so the user knows live output is available.
+  const [toolExpanded, setToolExpanded] = useState(false)
   const fadeAnim = useRef(new Animated.Value(0)).current
   const baseTextStyle = message.role === 'user' ? s.textBlock : s.assistantTextBlock
   const renderedText = useMemo(() => renderText(message.text, baseTextStyle), [message.text, message.role])
@@ -511,6 +528,7 @@ const MessageBubble = memo(function MessageBubble({
         >
           <View style={s.toolChip}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              {message.running && <PulsingDot />}
               <Text style={[s.toolLine, { flex: 1 }]} selectable numberOfLines={toolExpanded ? undefined : 1} ellipsizeMode="tail">{message.text}</Text>
               <Text style={[s.toolChevron, { transform: [{ rotate: toolExpanded ? '90deg' : '0deg' }] }]}>›</Text>
             </View>
@@ -1011,7 +1029,7 @@ const ChatPane = memo(function ChatPane({
         // Use the wire tool_use_id directly as the Message id so subsequent
         // tool_output / tool_result events route to the right bubble even when
         // the model emits multiple tool_use blocks in one turn.
-        setMessages(prev => appendMsg(prev, { id: event.tool_use_id, role: 'tool' as const, text: toolText }))
+        setMessages(prev => appendMsg(prev, { id: event.tool_use_id, role: 'tool' as const, text: toolText, running: true }))
         break
       }
       case 'tool_output': {
@@ -1024,7 +1042,7 @@ const ChatPane = memo(function ChatPane({
       case 'tool_result': {
         const toolId = event.tool_use_id
         const out = typeof event.output === 'string' ? event.output : JSON.stringify(event.output)
-        setMessages(prev => prev.map(m => m.id === toolId ? { ...m, output: out } : m))
+        setMessages(prev => prev.map(m => m.id === toolId ? { ...m, output: out, running: false } : m))
         break
       }
       case 'done': {
@@ -1060,6 +1078,8 @@ const ChatPane = memo(function ChatPane({
         updateStatus('ready')
         const cost = event.cost_usd
         setMessages(prev => {
+          // Any tool still marked as running won't get a tool_result now.
+          prev = prev.map(m => m.running ? { ...m, running: false } : m)
           let stamped = prev
           for (let i = prev.length - 1; i >= 0; i--) {
             if (prev[i].role === 'assistant') {
@@ -1076,7 +1096,7 @@ const ChatPane = memo(function ChatPane({
       }
       case 'error':
         logE(`[chat] stream error: ${event.message}`)
-        setMessages(prev => appendMsg(prev, { id: uid(), role: 'error' as const, text: event.message }))
+        setMessages(prev => appendMsg(prev.map(m => m.running ? { ...m, running: false } : m), { id: uid(), role: 'error' as const, text: event.message }))
         updateStatus('ready')
         hasAssistantMsgRef.current = false
         streamingIdRef.current = uid()
