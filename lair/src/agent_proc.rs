@@ -71,27 +71,76 @@ fn username_for_uid(uid: u32) -> Option<String> {
     None
 }
 
-/// Best-effort `usermod -d <home> <user>` so OpenSSH (and anything else that
-/// looks up `~` via `getpwuid()` rather than `$HOME`) finds the per-agent
-/// `.ssh/` we just seeded. Failures are logged and ignored — outside the
-/// image (dev mode), `usermod` won't exist or lair won't have root, and the
-/// caller is already running as the target uid in that case.
+/// Best-effort rewrite of a user's `pw_dir` field in `/etc/passwd` so
+/// OpenSSH (and anything else that looks up `~` via `getpwuid()` rather
+/// than `$HOME`) finds the per-agent `.ssh/` we just seeded. Done by
+/// direct file edit rather than `usermod` because `usermod` refuses to
+/// modify a user that has any running processes — which is fatal for the
+/// lair case, where root is PID 1. Atomic via temp file + rename.
+///
+/// Failures (no `/etc/passwd`, user line missing, EPERM in dev mode) are
+/// logged and ignored — the caller is already running as the target uid
+/// in those cases, so the file ownership the chowns set up is sufficient
+/// and ssh's default lookup is moot.
 pub(crate) fn set_passwd_home_best_effort(user: &str, home: &Path, log_tag: &str) {
-    let home_str = home.to_string_lossy().to_string();
-    match std::process::Command::new("usermod")
-        .args(["-d", &home_str, user])
-        .status()
-    {
-        Ok(s) if s.success() => {
-            debug!("[{log_tag}] usermod -d {home_str} {user} ok");
-        }
-        Ok(s) => {
-            warn!("[{log_tag}] usermod -d {home_str} {user} exited with {s} (continuing)");
-        }
+    let home_str = home.to_string_lossy();
+    let passwd_path = std::path::Path::new("/etc/passwd");
+    let original = match std::fs::read_to_string(passwd_path) {
+        Ok(s) => s,
         Err(e) => {
-            debug!("[{log_tag}] usermod not available or failed: {e} (continuing)");
+            debug!("[{log_tag}] read /etc/passwd failed: {e} (continuing)");
+            return;
         }
+    };
+    let prefix = format!("{user}:");
+    let mut found = false;
+    let mut changed = false;
+    let mut rebuilt = String::with_capacity(original.len() + 16);
+    for line in original.lines() {
+        if !line.starts_with(&prefix) {
+            rebuilt.push_str(line);
+            rebuilt.push('\n');
+            continue;
+        }
+        found = true;
+        let mut fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 7 {
+            rebuilt.push_str(line);
+            rebuilt.push('\n');
+            continue;
+        }
+        if fields[5] == home_str {
+            rebuilt.push_str(line);
+            rebuilt.push('\n');
+            continue;
+        }
+        fields[5] = &home_str;
+        rebuilt.push_str(&fields.join(":"));
+        rebuilt.push('\n');
+        changed = true;
     }
+    if !found {
+        debug!("[{log_tag}] /etc/passwd has no row for '{user}' (continuing)");
+        return;
+    }
+    if !changed {
+        debug!("[{log_tag}] /etc/passwd already has home={home_str} for {user}");
+        return;
+    }
+    let tmp_path = passwd_path.with_extension("octo-tmp");
+    if let Err(e) = std::fs::write(&tmp_path, &rebuilt) {
+        warn!("[{log_tag}] write {} failed: {e} (continuing)", tmp_path.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, passwd_path) {
+        warn!(
+            "[{log_tag}] rename {} -> /etc/passwd failed: {e} (continuing)",
+            tmp_path.display(),
+        );
+        let _ = std::fs::remove_file(&tmp_path);
+        return;
+    }
+    debug!("[{log_tag}] /etc/passwd: set home={home_str} for {user}");
 }
 
 /// Seed `<agent_dir>/.ssh/` with the container-level SSH keypair (which
