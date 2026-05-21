@@ -55,6 +55,45 @@ fn chown_best_effort(path: &Path, uid: u32, gid: u32) {
     }
 }
 
+/// Resolve the system username for a uid baked into the lair image. Mirrors
+/// the `useradd` block in `lair/Dockerfile`:
+///   * uid 10001            → `octo-agent`             (legacy fallback)
+///   * uid 10100..=10199    → `octo-agent-<uid-10100>` (per-port slot)
+/// Returns `None` for uids outside those ranges (dev-mode runs where the
+/// image's users don't exist).
+fn username_for_uid(uid: u32) -> Option<String> {
+    if uid == FALLBACK_AGENT_UID {
+        return Some("octo-agent".to_string());
+    }
+    if (UID_RANGE_BASE..UID_RANGE_BASE + PORT_RANGE_LEN as u32).contains(&uid) {
+        return Some(format!("octo-agent-{}", uid - UID_RANGE_BASE));
+    }
+    None
+}
+
+/// Best-effort `usermod -d <home> <user>` so OpenSSH (and anything else that
+/// looks up `~` via `getpwuid()` rather than `$HOME`) finds the per-agent
+/// `.ssh/` we just seeded. Failures are logged and ignored — outside the
+/// image (dev mode), `usermod` won't exist or lair won't have root, and the
+/// caller is already running as the target uid in that case.
+pub(crate) fn set_passwd_home_best_effort(user: &str, home: &Path, log_tag: &str) {
+    let home_str = home.to_string_lossy().to_string();
+    match std::process::Command::new("usermod")
+        .args(["-d", &home_str, user])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            debug!("[{log_tag}] usermod -d {home_str} {user} ok");
+        }
+        Ok(s) => {
+            warn!("[{log_tag}] usermod -d {home_str} {user} exited with {s} (continuing)");
+        }
+        Err(e) => {
+            debug!("[{log_tag}] usermod not available or failed: {e} (continuing)");
+        }
+    }
+}
+
 /// Seed `<agent_dir>/.ssh/` with the container-level SSH keypair (which
 /// lair generated on startup at `$HOME/.ssh/id_ed25519{,.pub}`). All
 /// agents in the same container share this one identity — the operator
@@ -231,6 +270,17 @@ impl AgentSupervisor {
         // on external services (Prime Intellect, GitHub, etc.).
         if let Err(e) = seed_agent_ssh(&agent_dir, uid, gid) {
             warn!("[supervisor] seed_agent_ssh for '{}': {e:#} (agent will boot without ~/.ssh/)", p.name);
+        }
+
+        // Point the agent uid's `pw_dir` at its per-agent dir. OpenSSH
+        // resolves `~` via `getpwuid()`, not `$HOME`, so without this
+        // `ssh user@host` from the child's bash would look in the image-
+        // default `/home/octo-agent[-N]/.ssh/` and miss the key we just
+        // seeded. Same uid is reused across agent names over time, so
+        // this runs on every spawn rather than being baked in at image
+        // build time.
+        if let Some(user) = username_for_uid(uid) {
+            set_passwd_home_best_effort(&user, &agent_dir, "supervisor");
         }
 
         // Seed the child's mcp.json *before* spawning so the child's

@@ -53,7 +53,7 @@ use tokio::sync::{mpsc, watch, Notify};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::agent_proc::{AgentSupervisor, SpawnParams};
+use crate::agent_proc::{set_passwd_home_best_effort, AgentSupervisor, SpawnParams};
 use crate::agent_tokens::AgentTokens;
 use crate::ssh as ssh_ops;
 use octo_core::{AgentRecord, AgentStatus, Registry, resolve_agent_spawn_caps};
@@ -2708,6 +2708,14 @@ pub async fn run(print_pubkey: bool) -> anyhow::Result<()> {
         Ok((priv_path, _pub_path)) => info!("[lair] container SSH keypair ready at {}", priv_path.display()),
         Err(e) => warn!("[lair] could not ensure container SSH keypair: {e:#}"),
     }
+
+    // Point root's `pw_dir` at `$HOME` (`/data` in the image) so OpenSSH —
+    // which resolves `~` via `getpwuid()`, not `$HOME` — finds the keypair
+    // we just generated. Without this, `ssh user@host` from lair's bash
+    // tool looks in the image-default `/root/.ssh/` and falls back to no
+    // identity. Idempotent; outside the image (dev mode) lair runs non-
+    // root and the usermod call no-ops with a debug log.
+    set_passwd_home_best_effort("root", &lair_home, "lair");
 
     // Agents root: `<OCTO_DATA_DIR>/../agents` so multiple lairs on one host
     // wouldn't share dirs. Default operator layout has it at `~/.octo/agents`.
